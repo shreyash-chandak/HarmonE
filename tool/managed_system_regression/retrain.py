@@ -92,8 +92,24 @@ def train_lstm(X_train, y_train):
 
     return model
 
+SCALER_FILE = "knowledge/scaler.pkl"
+RELOAD_FLAG = "knowledge/model_reload.flag"
+
+
+def _persist_scaler(scaler):
+    """Atomically write the scaler so inference.py always sees a consistent file."""
+    tmp = SCALER_FILE + ".tmp"
+    with open(tmp, "wb") as f:
+        pickle.dump(scaler, f)
+    os.replace(tmp, SCALER_FILE)
+
+
 def retrain():
-    """Retrains the current model using `drift.csv`."""
+    """Retrains the current model using `drift.csv`.
+
+    B7 fix: scaler is fitted on drift data and persisted to knowledge/scaler.pkl
+    so inference.py loads it via transform() only.
+    """
     if not os.path.exists(drift_file) or not os.path.exists(model_file):
         print("Missing required files: `drift.csv` or `model.csv`.")
         return
@@ -108,9 +124,11 @@ def retrain():
 
     print(f"Retraining {model_name} using drift data...")
 
-    # Preprocess data
+    # B7 fix: fit scaler on drift (train) data only; persist it for inference
     scaler = MinMaxScaler()
     data_scaled = scaler.fit_transform(drift_data.reshape(-1, 1)).flatten()
+    _persist_scaler(scaler)
+
     seq_length = 5
     X_train, y_train = create_sequences(data_scaled, seq_length)
 
@@ -133,6 +151,10 @@ def retrain():
 
     # Save retrained model
     save_model_and_data(model, model_name, train_df)
+
+    # Signal inference.py to reload the model from disk on the next cycle
+    open(RELOAD_FLAG, "w").close()
+
     print(f"✔ {model_name} retraining completed.")
 
 if __name__ == "__main__":

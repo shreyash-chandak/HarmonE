@@ -1,44 +1,62 @@
 import os
+import sys
 import time
+import json
+import pickle
 import pandas as pd
 import numpy as np
 import torch
 import torch.nn as nn
-import pickle
-import pyRAPL
-from sklearn.preprocessing import MinMaxScaler
+
+# Make core/ importable when this script runs from managed_system_regression/
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from core.energy import EnergyMeter
 
 # Ensure directories exist
 os.makedirs("knowledge", exist_ok=True)
 os.makedirs("models", exist_ok=True)
 
-# Initialize PyRAPL
-pyRAPL.setup()
-energy_meter = pyRAPL.Measurement("inference")
+# Load thresholds once for energy backend config
+try:
+    with open("knowledge/thresholds.json") as _tf:
+        _thresholds = json.load(_tf)
+except Exception:
+    _thresholds = {}
+_energy_backend = _thresholds.get("energy_meter", "auto")
 
 # ---------------- Load Dataset ----------------
-print("Loading synthetic data stream...")
+print("Loading data stream...")
 
 df = pd.read_csv("knowledge/dataset.csv")
-# df = pd.read_csv("knowledge/test_data.csv")
 data = df["flow"].values
 
-# Normalize data
-scaler = MinMaxScaler()
-data_scaled = scaler.fit_transform(data.reshape(-1, 1)).flatten()
+# B7 fix: load pre-fitted scaler from disk; never fit on full dataset here.
+# Run scripts/init_regression.py once before starting inference to generate scaler.pkl.
+scaler_path = "knowledge/scaler.pkl"
+if not os.path.exists(scaler_path):
+    raise FileNotFoundError(
+        "knowledge/scaler.pkl not found. "
+        "Run python scripts/init_regression.py to fit the scaler on training data."
+    )
+with open(scaler_path, "rb") as _f:
+    scaler = pickle.load(_f)
 
-# Create rolling window sequences (assuming sequence length of 10)
+data_scaled = scaler.transform(data.reshape(-1, 1)).flatten()
+
+
 def create_sequences(data, seq_length=10):
     X, y = [], []
     for i in range(len(data) - seq_length):
-        X.append(data[i:i+seq_length])
-        y.append(data[i+seq_length])
+        X.append(data[i:i + seq_length])
+        y.append(data[i + seq_length])
     return np.array(X), np.array(y)
+
 
 seq_length = 5
 X_stream, y_stream = create_sequences(data_scaled, seq_length)
 
 print("Data stream prepared. Streaming inference begins...")
+
 
 # ---------------- Define LSTM Model ----------------
 class LSTMModel(nn.Module):
@@ -51,80 +69,100 @@ class LSTMModel(nn.Module):
         _, (h_n, _) = self.lstm(x)
         return self.fc(h_n[-1])
 
-# ---------------- Inference Loop ----------------
-# Create a CSV to store predictions
-predictions_file = "knowledge/predictions.csv"
-print("hi")
-if not os.path.exists(predictions_file):
-    pd.DataFrame(columns=["true_value", "predicted_value", "model_used", "inference_time", "energy_uJ"]).to_csv(predictions_file, index=False)
 
-for i in range(len(X_stream)):  
-    # ---------------- Check Active Model ----------------
+# B4 fix: module-level model cache so we don't deserialise on every iteration.
+# Reload happens only when model.csv changes or model_reload.flag is present.
+_model_cache: dict = {}
+_last_model_name: str = ""
+
+RELOAD_FLAG = "knowledge/model_reload.flag"
+
+
+def _load_model(model_name: str):
+    """Load model from disk and store in cache. Returns the loaded model."""
+    if model_name == "lstm":
+        m = LSTMModel()
+        m.load_state_dict(torch.load("models/lstm.pth", weights_only=False))
+        m.eval()
+        _model_cache["lstm"] = m
+    elif model_name == "linear":
+        with open("models/linear.pkl", "rb") as f:
+            _model_cache["linear"] = pickle.load(f)
+    elif model_name == "svm":
+        with open("models/svm.pkl", "rb") as f:
+            _model_cache["svm"] = pickle.load(f)
+    return _model_cache.get(model_name)
+
+
+def _get_model(model_name: str):
+    """Return cached model, reloading only when necessary."""
+    global _last_model_name
+
+    force_reload = os.path.exists(RELOAD_FLAG)
+    if force_reload:
+        os.remove(RELOAD_FLAG)
+
+    if model_name != _last_model_name or model_name not in _model_cache or force_reload:
+        print(f"[cache] Loading model from disk: {model_name}")
+        _load_model(model_name)
+        _last_model_name = model_name
+
+    return _model_cache.get(model_name)
+
+
+# ---------------- Inference Loop ----------------
+predictions_file = "knowledge/predictions.csv"
+if not os.path.exists(predictions_file):
+    pd.DataFrame(
+        columns=["true_value", "predicted_value", "model_used", "inference_time", "energy_uJ"]
+    ).to_csv(predictions_file, index=False)
+
+for i in range(len(X_stream)):
+    # Check active model
     try:
         with open("knowledge/model.csv", "r") as f:
-            chosen_model = f.read().strip().lower()  # Read model name (lstm, linear, svm)
+            chosen_model = f.read().strip().lower()
     except FileNotFoundError:
-        print("Error: knowledge/model.csv not found. Defaulting to LSTM.")
+        print("Error: knowledge/model.csv not found. Defaulting to lstm.")
         chosen_model = "lstm"
 
-    print(f"Inference {i+1}/{len(X_stream)}: Using model → {chosen_model.upper()}")
+    print(f"Inference {i + 1}/{len(X_stream)}: Using model → {chosen_model.upper()}")
 
-    # ---------------- Load and Use Model ----------------
-    X_input = X_stream[i].reshape(1, -1)  # Reshape input for non-LSTM models
+    X_input = X_stream[i].reshape(1, -1)
 
-    # Start PyRAPL energy measurement
-    energy_meter.begin()
+    with EnergyMeter("inference", backend=_energy_backend) as _em:
+        start_time = time.time()
 
-    start_time = time.time()
-    
-    if chosen_model == "lstm":
-        lstm_model = LSTMModel()
-        lstm_model.load_state_dict(torch.load("models/lstm.pth", weights_only=False))
-        lstm_model.eval()
+        model = _get_model(chosen_model)
+        if model is None:
+            print(f"Unknown model '{chosen_model}'. Defaulting to lstm.")
+            chosen_model = "lstm"
+            model = _get_model("lstm")
 
-        X_tensor = torch.tensor(X_input, dtype=torch.float32).unsqueeze(-1)
-        prediction = lstm_model(X_tensor).detach().numpy().flatten()[0]
+        if chosen_model == "lstm":
+            X_tensor = torch.tensor(X_input, dtype=torch.float32).unsqueeze(-1)
+            prediction = model(X_tensor).detach().numpy().flatten()[0]
+        else:
+            prediction = model.predict(X_input)[0]
 
-    elif chosen_model == "linear":
-        with open("models/linear.pkl", "rb") as f:
-            lr_model = pickle.load(f)
-        prediction = lr_model.predict(X_input)[0]
+        inference_time = time.time() - start_time
 
-    elif chosen_model == "svm":
-        with open("models/svm.pkl", "rb") as f:
-            svm_model = pickle.load(f)
-        prediction = svm_model.predict(X_input)[0]
+    energy_usage_uJ = _em.total_uJ or 0.0
 
-    else:
-        print(f"Unknown model '{chosen_model}'. Defaulting to LSTM.")
-        lstm_model = LSTMModel()
-        lstm_model.load_state_dict(torch.load("models/lstm.pth"))
-        lstm_model.eval()
-
-        X_tensor = torch.tensor(X_input, dtype=torch.float32).unsqueeze(-1)
-        prediction = lstm_model(X_tensor).detach().numpy().flatten()[0]
-
-    inference_time = time.time() - start_time
-
-    # Stop PyRAPL measurement and get energy usage
-    energy_meter.end()
-    energy_usage_uJ = energy_meter.result.pkg[0]  # Energy in microjoules (µJ)
-
-    # ---------------- Store Predictions ----------------
     true_value = y_stream[i]
     true_value_actual = scaler.inverse_transform([[true_value]])[0, 0]
     predicted_value_actual = scaler.inverse_transform([[prediction]])[0, 0]
 
-    # Append results to predictions.csv
-    pd.DataFrame([[true_value_actual, predicted_value_actual, chosen_model, inference_time, energy_usage_uJ]], 
-                 columns=["true_value", "predicted_value", "model_used", "inference_time", "energy_uJ"]).to_csv(
-        predictions_file, mode="a", header=False, index=False
+    pd.DataFrame(
+        [[true_value_actual, predicted_value_actual, chosen_model, inference_time, energy_usage_uJ]],
+        columns=["true_value", "predicted_value", "model_used", "inference_time", "energy_uJ"],
+    ).to_csv(predictions_file, mode="a", header=False, index=False)
+
+    print(
+        f"True: {true_value_actual:.2f}, Predicted: {predicted_value_actual:.2f}, "
+        f"Model: {chosen_model.upper()}, Time: {inference_time:.6f}s, Energy: {energy_usage_uJ} µJ"
     )
 
-    print(f"True: {true_value_actual:.2f}, Predicted: {predicted_value_actual:.2f}, Model: {chosen_model.upper()}, "
-          f"Inference Time: {inference_time:.6f} sec, Energy: {energy_usage_uJ} µJ")
-
-    # Simulate real-time streaming delay
     time.sleep(0.15)
 
 print("\nStreaming inference completed. Predictions saved in knowledge/predictions.csv")

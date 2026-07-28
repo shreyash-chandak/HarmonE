@@ -3,7 +3,12 @@ import random
 import logging
 import os
 import sys
-from analyse import analyse_mape, analyse_drift # analyse_mape is ONLY for local mode
+import time
+from analyse import analyse_mape, analyse_drift  # analyse_mape is ONLY for local mode
+
+# Allow importing from tool/core
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
+from core.planners.base import PlanningContext, get_planner
 
 # --- Setup ---
 logging.basicConfig(
@@ -19,6 +24,8 @@ KNOWLEDGE_DIR = os.path.join(BASE_DIR, "..", "knowledge")
 THRESHOLDS_FILE = os.path.join(KNOWLEDGE_DIR, "thresholds.json")
 MODEL_FILE = os.path.join(KNOWLEDGE_DIR, "model.csv")
 MAPE_INFO_FILE = os.path.join(KNOWLEDGE_DIR, "mape_info.json")
+
+_AVAILABLE_MODELS = ["lstm", "linear", "svm"]
 
 # --- Helper Functions ---
 def load_json(file_path):
@@ -36,7 +43,67 @@ def get_current_model():
     except FileNotFoundError:
         return "lstm" # Default
 
-# --- Main Planning Logic ---
+# ---------------------------------------------------------------------------
+# Phase 2 dispatcher: routes through the planner registry.
+# ---------------------------------------------------------------------------
+
+def dispatch_plan(violation: str | None, trigger: str = "local") -> dict | None:
+    """Build a PlanningContext and delegate to the configured planner.
+
+    Args:
+        violation: "score" | "energy" | "drift" | None
+        trigger:   "local" | "acp"
+
+    Returns:
+        None for noop, or a dict compatible with the existing execute.py contract:
+          {"action": "switch",   "model": <name>}
+          {"action": "replace",  "version": <path>}
+          {"action": "retrain"}
+    """
+    thresholds = load_json(THRESHOLDS_FILE)
+    mape_info = load_json(MAPE_INFO_FILE)
+    current_model = get_current_model()
+
+    # Run drift analysis only when needed
+    drift_result = None
+    if violation == "drift":
+        drift_result = analyse_drift()
+        if drift_result and not drift_result.get("drift_detected"):
+            drift_result = None  # no real drift; treat as noop
+
+    ctx = PlanningContext(
+        violation=violation,
+        ema_scores=mape_info.get("ema_scores", {}),
+        ema_accuracy=mape_info.get("ema_accuracy", {}),
+        ema_energy=mape_info.get("ema_energy", {}),
+        current_model=current_model,
+        available_models=_AVAILABLE_MODELS,
+        thresholds=thresholds,
+        drift_result=drift_result,
+    )
+
+    planner_name = thresholds.get("planner", "harmone_original")
+    try:
+        planner = get_planner(planner_name)
+    except (KeyError, NotImplementedError) as exc:
+        logging.error(f"DISPATCH: Failed to load planner '{planner_name}': {exc}")
+        return None
+
+    decision = planner.plan(ctx)
+    logging.info(f"DISPATCH [{planner_name}]: {decision.action} reason={decision.reason!r}")
+
+    if decision.action == "noop":
+        return None
+    if decision.action == "switch":
+        return decision.model  # execute.py writes this string to model.csv
+    if decision.action in ("replace", "switch_version"):
+        return {"action": "replace", "version": decision.version_path}
+    if decision.action == "retrain":
+        return {"action": "retrain"}
+    return None
+
+
+# --- Main Planning Logic (legacy wrappers — kept for backward compat) ---
 def plan_mape(trigger="local"):
     """
     Decides on the best model to use.
@@ -44,6 +111,19 @@ def plan_mape(trigger="local"):
     - trigger='acp': Skips analysis and proceeds to planning (ACP-driven).
     """
     logging.info(f"PLAN (MAPE) triggered by: {trigger.upper()}")
+
+    # L5 anti-thrash cooldown: skip switch if the last one was too recent
+    thresholds = load_json(THRESHOLDS_FILE)
+    cooldown_s = thresholds.get("switch_cooldown_s", 30)
+    mape_info = load_json(MAPE_INFO_FILE)
+    last_switch_ts = mape_info.get("last_switch_ts", 0.0)
+    elapsed = time.time() - last_switch_ts
+    if elapsed < cooldown_s:
+        logging.info(
+            f"PLAN: Cooldown active — last switch was {elapsed:.1f}s ago "
+            f"(cooldown={cooldown_s}s). Returning noop."
+        )
+        return None
 
     # 1. ANALYZE (Only for local mode)
     if trigger == "local":
@@ -133,22 +213,53 @@ def plan_drift(trigger="local"):
     logging.info("PLAN (Drift): Drift detected! No previous version available. Retraining required.")
     return {"action": "retrain"}
 
-def plan_simple_switch(trigger="local"):
+def plan_random_switch(trigger="local"):
+    """Random baseline: picks one of the other available models uniformly at random.
+
+    A1 rename: was plan_simple_switch. Kept deterministically seeded by the caller
+    (random.choice) — this is the S2/random-switch baseline in the paper.
     """
-    A simple baseline plan: just switch to a different model.
-    Picks one of the *other* available models at random.
-    """
-    # --- CHANGE 1: Use the 'trigger' variable in the log ---
-    logging.info(f"PLAN (Simple Switch): Triggered by {trigger.upper()} R² baseline.")
+    logging.info(f"PLAN (Random Switch): Triggered by {trigger.upper()} R² baseline.")
     current_model = get_current_model()
     available_models = ["lstm", "linear", "svm"]
-    
-    # --- CHANGE 2: Add a safety check before removing ---
+
     if current_model in available_models:
-        available_models.remove(current_model) 
-    
-    # Randomly pick from the remaining
+        available_models.remove(current_model)
+
     chosen_model = random.choice(available_models)
-    
-    logging.info(f"PLAN (Simple Switch): Switching from '{current_model.upper()}' to '{chosen_model.upper()}'.")
+    logging.info(f"PLAN (Random Switch): Switching from '{current_model.upper()}' to '{chosen_model.upper()}'.")
+    return chosen_model
+
+
+# Backward-compat alias so existing callers (e.g. ACP policy files) keep working
+plan_simple_switch = plan_random_switch
+
+
+def plan_greedy_switch(trigger="local"):
+    """Greedy baseline (S3): always switch to the highest-EMA non-current model.
+
+    Unlike plan_mape which uses epsilon-greedy exploration, this planner exploits
+    only. It is used as the S3 comparison baseline in the journal extension.
+    """
+    logging.info(f"PLAN (Greedy Switch): Triggered by {trigger.upper()}.")
+    thresholds = load_json(THRESHOLDS_FILE)
+    mape_info = load_json(MAPE_INFO_FILE)
+    ema_scores = mape_info.get("ema_scores", {})
+    current_model = get_current_model()
+
+    best_alternative = sorted(ema_scores.items(), key=lambda x: x[1], reverse=True)
+    chosen_model = next((m for m, _ in best_alternative if m != current_model), None)
+
+    if not chosen_model:
+        logging.warning("PLAN (Greedy Switch): No alternative models found.")
+        return None
+
+    if chosen_model == current_model:
+        logging.info("PLAN (Greedy Switch): Already on best model, no switch.")
+        return None
+
+    logging.info(
+        f"PLAN (Greedy Switch): Best alternative to '{current_model.upper()}' is "
+        f"'{chosen_model.upper()}' (EMA={ema_scores.get(chosen_model, 'N/A')})."
+    )
     return chosen_model

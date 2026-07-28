@@ -1,4 +1,9 @@
 #!/bin/bash
+# LEGACY RESET SCRIPT — kept for reference; canonical per-run reset is:
+#   python experiments/run_reset.py --domain cv
+# This script resets the CV managed system to a clean slate (models, knowledge,
+# predictions.csv). Use run_reset.py for experiment automation — it is idempotent,
+# config-driven, and preserves training artifacts (scaler, versionedMR weights).
 set -e
 
 DO_BACKUP=true

@@ -92,18 +92,17 @@ handler_app = Flask(__name__)
 
 @handler_app.route('/adaptor/tactic', methods=['POST'])
 def execute_tactic_from_acp():
-    """Receives a command from the ACP and writes it to the correct command file."""
+    """L2-c: Writes 'tactic_id|unix_ts' to command file so manage.py can reject stale replays."""
     global should_shutdown
     if should_shutdown:
         return jsonify({"error": "System is shutting down"}), 503
-        
+
     data = request.json
     tactic_id = data.get("tactic_id")
     logging.info(f"[ACP_Handler] Command received: '{tactic_id}'")
     try:
-        # COMMAND_FILE_PATH is set dynamically in __main__
         with open(COMMAND_FILE_PATH, "w") as f:
-            f.write(tactic_id)
+            f.write(f"{tactic_id}|{time.time()}")
         logging.info(f"[ACP_Handler] Command '{tactic_id}' queued in {COMMAND_FILE_PATH}.")
         return jsonify({"message": "Command queued."}), 200
     except Exception as e:
@@ -140,44 +139,89 @@ def health_check():
 def run_handler_api():
     handler_app.run(host='0.0.0.0', port=HANDLER_PORT)
 
+_STALE_LIMIT = 6   # consecutive stale intervals before system_alert (6 × 5s = 30s)
+
 # --- Telemetry & Policy Functions ---
 def push_telemetry():
-    """Dynamically pushes telemetry from the correct monitor."""
+    """L1-c: Pushes telemetry; skips POST on stale data; alerts after stale_limit cycles.
+
+    Polls subprocess liveness each cycle — kills the wrapper if any child dies.
+    """
     global monitor_mape, monitor_drift, should_shutdown
     if not monitor_mape and not monitor_drift:
         logging.critical("Monitors not imported. Exiting telemetry thread.")
         return
 
-    logging.info(f"[Monitor] Telemetry thread started.")
-    time.sleep(2) # Initial delay
-    
+    logging.info("[Monitor] Telemetry thread started.")
+    time.sleep(2)
+
+    stale_cycles = 0
+
     while not should_shutdown:
+        # L1-c: subprocess liveness check — dead child = abort immediately
+        for p in list(subprocesses):
+            rc = p.poll()
+            if rc is not None:
+                logging.critical(
+                    f"[Monitor] Subprocess PID {p.pid} exited with code {rc}. "
+                    f"Shutting down — fix the subprocess error and restart."
+                )
+                should_shutdown = True
+                cleanup_processes()
+                import os as _os
+                _os._exit(1)
+
         try:
-            telemetry_payload = {"timestamp": time.time()}
-            
-            # Dynamically call the correct monitor
-            if monitor_mape:
-                mape_metrics = monitor_mape()
+            mape_metrics = monitor_mape() if monitor_mape else None
+
+            # L1-c: monitor returns {"fresh": False} when inference has no new data
+            if mape_metrics and mape_metrics.get("fresh") is False:
+                stale_cycles += 1
+                logging.warning(
+                    f"[Monitor] Stale cycle {stale_cycles}/{_STALE_LIMIT} — "
+                    f"no new inference data."
+                )
+                if stale_cycles >= _STALE_LIMIT:
+                    logging.error(
+                        "[Monitor] Inference stalled — posting system_alert to ACP."
+                    )
+                    try:
+                        requests.post(
+                            f"{ACP_SERVER_URL}/api/telemetry",
+                            json={"timestamp": time.time(), "system_alert": "inference_stalled"},
+                            timeout=3,
+                        )
+                    except Exception:
+                        pass
+                    stale_cycles = 0  # reset so we don't flood
+            else:
+                stale_cycles = 0
+                telemetry_payload = {"timestamp": time.time()}
+
                 if mape_metrics:
                     telemetry_payload.update(mape_metrics)
 
-            if monitor_drift:
-                drift_metrics = monitor_drift()
-                if drift_metrics:
-                    telemetry_payload.update(drift_metrics)
+                if monitor_drift:
+                    drift_metrics = monitor_drift()
+                    if drift_metrics:
+                        telemetry_payload.update(drift_metrics)
 
-            if len(telemetry_payload) > 1: # More than just timestamp
-                logging.info(f"[Monitor] Pushing telemetry: {telemetry_payload}")
-                requests.post(f"{ACP_SERVER_URL}/api/telemetry", json=telemetry_payload, timeout=3)
-            else:
-                logging.info("[Monitor] No new data from monitors.")
+                if len(telemetry_payload) > 1:
+                    logging.info(f"[Monitor] Pushing telemetry: {telemetry_payload}")
+                    requests.post(
+                        f"{ACP_SERVER_URL}/api/telemetry",
+                        json=telemetry_payload,
+                        timeout=3,
+                    )
+                else:
+                    logging.info("[Monitor] No new data from monitors.")
 
         except Exception as e:
             if not should_shutdown:
                 logging.error(f"[Monitor] Error in telemetry loop: {e}", exc_info=True)
-        
+
         time.sleep(5)
-    
+
     logging.info("[Monitor] Telemetry thread shutting down")
 
 def register_policies_with_acp(policy_prefix):
@@ -306,10 +350,38 @@ if __name__ == '__main__':
     
     # logging.info(f"--- Running System: '{system_type.upper()}' in Mode: '{run_mode.upper()}' ---")
     
-    # 3. Dynamically import the correct logic
+    # 3. L1-b: Startup artifact health check — abort with remediation if missing
+    _REQUIRED_ARTIFACTS = {
+        "regression": [
+            os.path.join(LOGIC_PATH, "knowledge", "scaler.pkl"),
+            os.path.join(LOGIC_PATH, "knowledge", "reference_distribution.json"),
+            os.path.join(LOGIC_PATH, "knowledge", "thresholds.json"),
+            os.path.join(LOGIC_PATH, "knowledge", "model.csv"),
+        ],
+        "cv": [
+            os.path.join(LOGIC_PATH, "knowledge", "thresholds.json"),
+            os.path.join(LOGIC_PATH, "knowledge", "model.csv"),
+        ],
+    }
+    domain_key = "regression" if system_type == "reg" else "cv"
+    for artifact_path in _REQUIRED_ARTIFACTS.get(domain_key, []):
+        if not os.path.exists(artifact_path):
+            init_cmd = (
+                "python scripts/init_regression.py"
+                if domain_key == "regression"
+                else "python scripts/init_cv.py"
+            )
+            logging.critical(
+                f"FATAL: Required artifact missing: {artifact_path}\n"
+                f"Run:  {init_cmd} --config <dataset_name>\n"
+                f"Then restart."
+            )
+            exit(1)
+
+    # 4. Dynamically import the correct logic
     import_monitor_from_path(LOGIC_PATH)
 
-    # 4. Set up knowledge path and write the *local* config for manage.py
+    # 5. Set up knowledge path and write the *local* config for manage.py
     KNOWLEDGE_PATH = os.path.join(LOGIC_PATH, "knowledge")
     LOCAL_APPROACH_CONFIG = os.path.join(LOGIC_PATH, "approach.conf")
     COMMAND_FILE_PATH = os.path.join(KNOWLEDGE_PATH, "command.txt") # Set global var

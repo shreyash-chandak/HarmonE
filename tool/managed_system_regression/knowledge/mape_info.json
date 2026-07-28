@@ -1,20 +1,31 @@
 {
-    "last_line": 1,
-    "current_energy_threshold": 1,
+    "last_line": 2462,
+    "current_energy_threshold": 0.6,
     "linear_version": 1,
     "lstm_version": 1,
     "svm_version": 1,
     "ema_scores": {
-        "lstm": 0.82,
-        "linear": 0.75,
-        "svm": 0.79
+        "lstm": -5.914545178392586,
+        "linear": -2.4920811291456233,
+        "svm": -0.1148038823365406
+    },
+    "ema_accuracy": {
+        "lstm": -6.2455593099331965,
+        "linear": 0.0,
+        "svm": 0.2
+    },
+    "ema_energy": {
+        "lstm": 0.6042080000000001,
+        "linear": 0.3,
+        "svm": 0.4
     },
     "recovery_cycles": 0,
     "event_counters": {
-        "model_switches": 0,
-        "retrains": 0,
+        "model_switches": 113,
+        "retrains": 5,
         "vmr_events": 0,
-        "mape_k_energy_uJ": 0.0
+        "noops": 0,
+        "mape_k_energy_uJ": 197239446.0
     },
     "simple_switch_counters": {
         "simple_switches": 0
