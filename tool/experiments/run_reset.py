@@ -24,6 +24,8 @@ import os
 import sys
 from pathlib import Path
 
+import numpy as np
+
 _DOMAIN_DIRS = {
     "regression": "managed_system_regression",
     "cv": "managed_system_cv",
@@ -131,7 +133,50 @@ def reset_run_state(domain_dir: str, dry_run: bool = False) -> dict:
             else:
                 print(f"[dry-run] Would delete {fname}")
 
+    # ── Embedding store (CV domain only) ──────────────────────────────────────
+    if domain_name == "cv":
+        _reset_embedding_store(knowledge, dry_run)
+
     return result
+
+
+def _reset_embedding_store(knowledge: Path, dry_run: bool) -> None:
+    """Zero the embedding ring buffer and index if they exist (§5 embedding store)."""
+    npy_path = knowledge / "embeddings.f16.npy"
+    idx_path = knowledge / "embeddings_index.csv"
+    if npy_path.exists() or idx_path.exists():
+        if dry_run:
+            print("[dry-run] Would reset embedding store (embeddings.f16.npy + index)")
+            return
+        # Load mape_info to discover dim/capacity; fall back to re-reading npy header
+        try:
+            sys.path.insert(0, str(knowledge.parent.parent))
+            from core.drift.embedding_store import EmbeddingStore
+            info_path = knowledge / "mape_info.json"
+            dim = 256  # fallback
+            window = 500
+            if info_path.exists():
+                with open(info_path) as f:
+                    info = json.load(f)
+                dim = info.get("embedding_dim", dim)
+                window = info.get("drift_window_size", window)
+            elif npy_path.exists():
+                arr = np.load(str(npy_path))
+                if arr.ndim == 2:
+                    dim = arr.shape[1]
+                    window = arr.shape[0] // 2
+            store = EmbeddingStore(str(knowledge), embedding_dim=dim, drift_window=window)
+            store.reset()
+            print("✔ Reset embedding store (embeddings.f16.npy + index)")
+        except Exception as exc:
+            # Graceful degradation: manually zero the files
+            if npy_path.exists():
+                arr = np.load(str(npy_path))
+                arr[:] = 0.0
+                np.save(str(npy_path), arr)
+            if idx_path.exists():
+                idx_path.unlink()
+            print(f"✔ Reset embedding store (direct zero; EmbeddingStore unavailable: {exc})")
 
 
 def main() -> None:

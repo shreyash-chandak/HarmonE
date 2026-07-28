@@ -38,6 +38,18 @@
   "tau_drift": "OPTIONAL: KL divergence threshold for drift detection (CALIBRATE per dataset)",
   "drift_reference": "OPTIONAL: 'fixed' | 'rolling' | 'both' (default: 'both')",
 
+  "_comment_cv_task": "== CV TASK KEYS (cv domain only) ==",
+  "task": "OPTIONAL (cv): 'detection' | 'classification' | 'segmentation' (default: 'detection')",
+  "task_adapter": "OPTIONAL (cv): dotted class path for the TaskAdapter (default resolved from task)",
+  "num_classes": "OPTIONAL (cv classification/segmentation): number of output classes",
+  "ignore_index": "OPTIONAL (cv segmentation): pixel label value to ignore in mIoU (default: 255)",
+  "embedding_model": "OPTIONAL (cv): model name used ONLY for drift embedding extraction (R4 — pinned regardless of active inference model; default: lightest model in spectrum)",
+  "embedding_dim": "OPTIONAL (cv): expected embedding vector dimension. Validated on first extraction.",
+  "embedding_sample_every": "OPTIONAL (cv): extract embedding every N frames (default: 1; set >1 to reduce overhead)",
+  "drift_window_size": "OPTIONAL (cv): number of embeddings in drift detection window (default: 500)",
+  "pseudo_label_threshold": "OPTIONAL (cv pseudo_label tactic): minimum confidence for pseudo-label acceptance (default: 0.5)",
+  "rollback_if_worse": "OPTIONAL (cv): rollback new weights if proxy score drops after retrain (default: true)",
+
   "_comment_planner": "== PLANNER ==",
   "planner": "OPTIONAL: planner strategy name (default: 'harmone_original'). Options: naive, random_switch, greedy_switch, harmone_original, violation_aware, pareto, bandit",
   "w_acc": "OPTIONAL (pareto): accuracy weight in Chebyshev distance (default: 1.0)",

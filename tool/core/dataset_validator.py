@@ -155,9 +155,39 @@ def _validate_regression(cfg: dict, base: Path, report: ValidationReport) -> Non
             warnings.append(f"Model '{m_name}' weights not found: {w_path} (init will still succeed)")
 
 
+_VALID_TASKS = ("detection", "classification", "segmentation")
+
+
 def _validate_cv(cfg: dict, base: Path, report: ValidationReport) -> None:
     errors = report.errors
     warnings = report.warnings
+
+    # Awaiting-data status: skip data existence checks
+    if cfg.get("status") == "awaiting_data":
+        warnings.append(
+            "status=awaiting_data: data path checks skipped. "
+            "Download data and remove status key before running."
+        )
+        return
+
+    # Task keys (R4 §4.4)
+    task = cfg.get("task")
+    if task is not None and task not in _VALID_TASKS:
+        errors.append(f"'task' must be one of {_VALID_TASKS}, got '{task}'")
+
+    emb_model = cfg.get("embedding_model")
+    emb_dim = cfg.get("embedding_dim")
+
+    if task in ("detection", "classification", "segmentation"):
+        models_cfg = cfg.get("models", {})
+        if emb_model is not None and emb_model not in models_cfg:
+            warnings.append(
+                f"embedding_model='{emb_model}' is not in the models catalogue "
+                f"(available: {list(models_cfg)}). Embedding extraction will fail."
+            )
+        if emb_dim is not None:
+            if not isinstance(emb_dim, int) or emb_dim <= 0:
+                errors.append(f"'embedding_dim' must be a positive integer, got {emb_dim!r}")
 
     image_dir_raw = cfg.get("image_dir")
     manifest_raw = cfg.get("manifest_csv")
