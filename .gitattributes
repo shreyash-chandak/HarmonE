@@ -1,0 +1,10 @@
+# Normalise Python and shell files to LF (repo lives on Windows but targets Linux).
+# Existing CRLF docs are left as-is; only code files are normalised.
+*.py        text eol=lf
+*.sh        text eol=lf
+*.yaml      text eol=lf
+*.yml       text eol=lf
+*.json      text eol=lf
+*.md        text
+*.txt       text
+*.csv       text

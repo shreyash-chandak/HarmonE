@@ -1,9 +1,0 @@
-{
-    "best_overall_version": null,
-    "min_overall_kl": 0.5,
-    "kl_per_model": {
-        "yolo_n": 0.5,
-        "yolo_s": 0.5,
-        "yolo_m": 0.5
-    }
-}

@@ -1,0 +1,61 @@
+{
+  "name": "acdc",
+  "domain": "cv",
+  "adapter": "adapters.cv_imagedir.CVImageDirAdapter",
+  "status": "awaiting_data",
+
+  "manifest_csv": "data/acdc/acdc_manifest.csv",
+  "data_root": "data/acdc",
+  "seq_length": 1,
+  "train_frac": 0.7,
+  "val_frac": 0.1,
+  "stream_delay_s": 0.0,
+
+  "task": "segmentation",
+  "task_adapter": "adapters.tasks.segmentation.SegmentationAdapter",
+  "num_classes": 19,
+  "ignore_index": 255,
+
+  "models": {
+    "segformer_b0": {
+      "weights_path": "managed_system_cv/models/segformer_b0_acdc.pt",
+      "loader": "adapters.loaders.segformer_loader",
+      "cost_class": "light"
+    },
+    "segformer_b2": {
+      "weights_path": "managed_system_cv/models/segformer_b2_acdc.pt",
+      "loader": "adapters.loaders.segformer_loader",
+      "cost_class": "medium"
+    }
+  },
+
+  "embedding_model": "segformer_b0",
+  "embedding_dim": 256,
+  "embedding_sample_every": 5,
+  "drift_window_size": 500,
+
+  "proxy": "max_logit",
+  "drift_detector": "luminance_kl",
+  "retrain_tactic": "pseudo_label",
+  "pseudo_label_threshold": 0.7,
+  "rollback_if_worse": true,
+
+  "min_score": 0.50,
+  "max_energy": 0.50,
+  "E_ref": 0.5,
+  "delta": 0.05,
+  "beta": 0.96,
+  "gamma": 0.8,
+  "alpha": 0.1,
+  "E_m": 0,
+  "E_M": 10000000,
+  "tau_drift": 0.07,
+  "drift_reference": "both",
+  "switch_cooldown_s": 30,
+  "planner": "harmone_original",
+  "ema_head_start": 0.1,
+
+  "energy_required": ["cpu"],
+
+  "_comment": "Adverse-condition segmentation. clear→fog→rain→night→snow drift stream. Cityscapes label format, ignore_index=255. See docs/datasets/acdc.md. Calibrate tau_drift per hardware."
+}
