@@ -76,37 +76,51 @@ def _load_proxy(thresholds: dict):
         return ConfidenceProxy()
 
 
-def _load_drift_detector(thresholds: dict, reference_mode: str):
-    """Instantiate the configured DriftDetector for the given reference mode."""
-    detector_name = thresholds.get("drift_detector", "luminance_kl")
+def _load_embedding_detector_with_reference(thresholds: dict, detector_name: str):
+    """Instantiate an embedding detector and fit it from reference_embeddings.npz (§5.2/§5.3).
+
+    Returns (detector, fitted: bool). fitted=False means the detector has no
+    reference — score() will return None (I5).
+    """
     tau_drift = thresholds.get("tau_drift", 0.07)
-    ref_dist_path = os.path.join(KNOWLEDGE_DIR, "reference_distribution.json")
+    window_size = int(thresholds.get("drift_window_size", 500))
 
     if detector_name == "mmd_embedding":
         from core.drift.mmd_embedding import MMDEmbeddingDetector
-        det = MMDEmbeddingDetector(tau_drift=tau_drift)
-    elif detector_name == "frechet_embedding":
-        from core.drift.frechet_embedding import FrechetEmbeddingDetector
-        det = FrechetEmbeddingDetector(tau_drift=tau_drift)
+        det = MMDEmbeddingDetector(tau_drift=tau_drift, window_size=window_size)
     else:
-        from core.drift.luminance_kl import LuminanceKLDetector
-        det = LuminanceKLDetector(tau_drift=tau_drift)
+        from core.drift.frechet_embedding import FrechetEmbeddingDetector
+        det = FrechetEmbeddingDetector(tau_drift=tau_drift, window_size=window_size)
 
-    # Load persisted reference if it exists
-    det_state_path = os.path.join(KNOWLEDGE_DIR, f"detector_{detector_name}_{reference_mode}.json")
+    # Persisted detector state (after first successful fit) takes priority
+    det_state_path = os.path.join(KNOWLEDGE_DIR, f"detector_{detector_name}_fixed.npz")
     if os.path.exists(det_state_path):
-        det.load(det_state_path)
-    elif os.path.exists(ref_dist_path):
-        # Bootstrap from reference_distribution.json written by scripts/init_cv.py
         try:
-            with open(ref_dist_path) as f:
-                ref_data = json.load(f)
-            det.fit_reference(ref_data.get("histograms") or ref_data.get("data", []))
-            det.save(det_state_path)
+            det.load(det_state_path)
+            return det, True
         except Exception as exc:
-            print(f"[MONITOR-CV] Could not bootstrap drift detector: {exc}")
+            print(f"[MONITOR-CV] Could not load detector state {det_state_path}: {exc}; re-fitting.")
 
-    return det
+    # Bootstrap from reference_embeddings.npz produced by scripts/init_cv.py (§5.2)
+    ref_npz_path = os.path.join(KNOWLEDGE_DIR, "reference_embeddings.npz")
+    if not os.path.exists(ref_npz_path):
+        print(
+            f"[MONITOR-CV] {detector_name}: reference_embeddings.npz not found at "
+            f"{ref_npz_path}. Run scripts/init_cv.py to generate it. "
+            "Returning None score this cycle (I5)."
+        )
+        return det, False
+
+    try:
+        data = np.load(ref_npz_path, allow_pickle=True)
+        ref_emb = data["embeddings"].astype(np.float32)  # (N, D)
+        det.fit_reference(ref_emb)
+        det.save(det_state_path)
+        print(f"[MONITOR-CV] {detector_name}: fitted from reference_embeddings.npz ({len(ref_emb)} vectors, dim={ref_emb.shape[1]})")
+        return det, True
+    except Exception as exc:
+        print(f"[MONITOR-CV] Could not fit {detector_name} from npz: {exc}. Score will be None.")
+        return det, False
 
 
 # ── main monitor functions ─────────────────────────────────────────────────────
@@ -211,17 +225,12 @@ def monitor_drift():
 
     detector_name = thresholds.get("drift_detector", "luminance_kl")
 
-    # For luminance_kl, use histogram-based approach (legacy compatible)
+    # Luminance-KL: histogram path (fully backward compatible)
     if detector_name == "luminance_kl":
         return _monitor_drift_luminance(df, thresholds, drift_reference)
 
-    # For embedding-based detectors, need embeddings column
-    if "embedding" not in df.columns:
-        print(f"[DRIFT] '{detector_name}' requires 'embedding' column in predictions.csv. "
-              "Falling back to luminance_kl.")
-        return _monitor_drift_luminance(df, thresholds, drift_reference)
-
-    return _monitor_drift_embedding(df, thresholds, drift_reference, detector_name)
+    # Embedding-based: read from EmbeddingStore ring buffer (§5.3)
+    return _monitor_drift_embedding(thresholds, drift_reference, detector_name)
 
 
 def _monitor_drift_luminance(df, thresholds, drift_reference) -> dict | None:
@@ -285,36 +294,68 @@ def _monitor_drift_luminance(df, thresholds, drift_reference) -> dict | None:
     }
 
 
-def _monitor_drift_embedding(df, thresholds, drift_reference, detector_name) -> dict | None:
-    """Embedding-based drift monitoring (MMD² or Fréchet)."""
-    import ast
+def _monitor_drift_embedding(thresholds: dict, drift_reference: str, detector_name: str) -> dict | None:
+    """Embedding-based drift monitoring (MMD² or Fréchet) via EmbeddingStore (§5.3).
 
-    tau_drift = thresholds.get("tau_drift", 0.07)
-    det = _load_drift_detector(thresholds, "fixed")
+    Reads the current window from the EmbeddingStore ring buffer (written by
+    inference.py). Returns None score if underfilled (I5 — no fabricated telemetry).
+    Secondary mmd_local (rolling) emitted only when config emit_local_drift=true.
+    """
+    drift_window = int(thresholds.get("drift_window_size", 500))
+    emit_local = bool(thresholds.get("emit_local_drift", False))
 
+    # Load EmbeddingStore and retrieve current window
     try:
-        cur_embeddings = np.array([
-            ast.literal_eval(e) if isinstance(e, str) else e
-            for e in df["embedding"].iloc[-1000:]
-            if e is not None
-        ])
+        from core.drift.embedding_store import EmbeddingStore
+        emb_dim = int(thresholds.get("embedding_dim", 256))
+        store = EmbeddingStore(KNOWLEDGE_DIR, embedding_dim=emb_dim, drift_window=drift_window)
+        cur_window = store.last_window(drift_window)  # (N, D) float32 or None
     except Exception as exc:
-        print(f"[DRIFT] Failed to parse embeddings: {exc}")
+        print(f"[DRIFT] Could not load EmbeddingStore: {exc}")
         return {"kl_div": None, "drift_score": None, "drift_detector": detector_name}
 
-    if len(cur_embeddings) == 0:
-        return {"kl_div": None, "drift_score": None, "drift_detector": detector_name}
+    if cur_window is None:
+        print(f"[DRIFT] {detector_name}: embedding store underfilled (< {drift_window} vectors). "
+              "Returning None score during warmup (I5).")
+        return {"kl_div": None, "drift_score": None, "drift_detector": detector_name,
+                "warmup": True}
 
-    score = det.score(cur_embeddings)
-    detector_path = os.path.join(KNOWLEDGE_DIR, f"detector_{detector_name}_fixed.json")
-    det.save(detector_path)
+    # Load/fit fixed-reference detector
+    det, fitted = _load_embedding_detector_with_reference(thresholds, detector_name)
+    if not fitted:
+        return {"kl_div": None, "drift_score": None, "drift_detector": detector_name,
+                "warmup": True}
 
-    print(f"[DRIFT] {detector_name} score: {score}")
-    return {
-        "kl_div": score,        # backward compat key
-        "drift_score": score,
+    primary_score = det.score(cur_window)
+    print(f"[DRIFT] {detector_name} (fixed-ref) score: {primary_score}")
+
+    result: dict = {
+        "kl_div": primary_score,   # backward compat key consumed by analyse.py
+        "drift_score": primary_score,
         "drift_detector": detector_name,
     }
+
+    # Optional rolling/local signal (NOT the trigger — R3)
+    if emit_local and drift_reference in ("rolling", "both"):
+        all_vecs = store.last_window(drift_window * 2)  # full 2x window
+        if all_vecs is not None and len(all_vecs) >= drift_window * 2:
+            ref_half = all_vecs[:drift_window]
+            cur_half = all_vecs[drift_window:]
+            if detector_name == "mmd_embedding":
+                from core.drift.mmd_embedding import unbiased_mmd2, _median_bandwidth
+                bw = _median_bandwidth(ref_half)
+                local_score = round(unbiased_mmd2(ref_half, cur_half, bw), 8)
+            else:
+                from core.drift.frechet_embedding import frechet_distance
+                mu1 = np.mean(ref_half.astype(np.float64), axis=0)
+                mu2 = np.mean(cur_half.astype(np.float64), axis=0)
+                s1 = np.cov(ref_half.T) if len(ref_half) > 1 else np.zeros((ref_half.shape[1],) * 2)
+                s2 = np.cov(cur_half.T) if len(cur_half) > 1 else np.zeros_like(s1)
+                local_score = round(frechet_distance(mu1, s1, mu2, s2), 6)
+            result["mmd_local"] = local_score
+            print(f"[DRIFT] {detector_name} (rolling/local) score: {local_score}")
+
+    return result
 
 
 # ── thin wrapper for inline luminance KL (avoids importing full LuminanceKLDetector) ──

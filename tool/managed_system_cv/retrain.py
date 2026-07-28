@@ -153,6 +153,49 @@ def create_augmented_retrain_set(image_paths, label_dir, drift_type):
     avg_hist = (total_hist / images_processed) if images_processed > 0 else None
     return avg_hist
 
+def _save_embedding_signature(thresholds: dict, version_base_name: str) -> None:
+    """Compute and save an embedding signature for a newly-stored model version (§5.4).
+
+    Reads the current embedding window from EmbeddingStore, computes mean and
+    diagonal covariance, and writes {version_base_name}_emb_sig.json to versionedMR/.
+    Signature format: {"type": "embedding", "mean": [...], "cov_diag": [...],
+                        "model": embedding_model_name, "dim": D}
+    """
+    emb_model_name = thresholds.get("embedding_model", "")
+    emb_dim = thresholds.get("embedding_dim")
+    drift_window = int(thresholds.get("drift_window_size", 500))
+    if not emb_model_name or not emb_dim:
+        print(f"[RETRAIN] §5.4 embedding_model/embedding_dim not configured; skipping emb signature.")
+        return
+
+    try:
+        from core.drift.embedding_store import EmbeddingStore
+        store = EmbeddingStore(str(KNOWLEDGE_DIR), embedding_dim=emb_dim, drift_window=drift_window)
+        window = store.last_window(drift_window)  # (N, D) or None
+    except Exception as exc:
+        print(f"[RETRAIN] §5.4 Could not load EmbeddingStore: {exc}; skipping signature.")
+        return
+
+    if window is None:
+        print(f"[RETRAIN] §5.4 EmbeddingStore underfilled; skipping emb signature for {version_base_name}.")
+        return
+
+    mean = window.mean(axis=0).tolist()                   # (D,)
+    cov_diag = window.var(axis=0).tolist()                # (D,) diagonal only
+
+    sig = {
+        "type": "embedding",
+        "mean": mean,
+        "cov_diag": cov_diag,
+        "model": emb_model_name,
+        "dim": int(emb_dim),
+    }
+    sig_path = VERSIONED_DIR / f"{version_base_name}_emb_sig.json"
+    with open(sig_path, "w") as f:
+        json.dump(sig, f, indent=4)
+    print(f"✔ §5.4 Saved embedding signature to {sig_path.name} (dim={emb_dim}, n={len(window)})")
+
+
 # --- MAIN RETRAIN FUNCTION ---
 
 def retrain_yolo():
@@ -244,6 +287,11 @@ names: {{ {', '.join([f'{i}: {i}' for i in range(80)])} }}
         json.dump({"average_histogram": avg_retrain_hist.tolist()}, f, indent=4)
     print(f"✔ Saved versioned model to {versioned_model_path}")
     print(f"✔ Saved versioned histogram to {versioned_hist_path}")
+
+    # §5.4 Embedding signature for embedding-primary configs
+    _EMBEDDING_DETECTORS = {"mmd_embedding", "frechet_embedding"}
+    if _rt_thresholds.get("drift_detector", "luminance_kl") in _EMBEDDING_DETECTORS:
+        _save_embedding_signature(_rt_thresholds, new_version_base_name)
 
     active_model_path = ACTIVE_MODELS_DIR / f"{model_name}.pt"
     shutil.copy(versioned_model_path, active_model_path)
