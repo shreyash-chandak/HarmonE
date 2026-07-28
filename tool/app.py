@@ -297,12 +297,18 @@ def write_approach_config():
         logging.warning(f"Error during cleanup: {e}")
 
     mapping = {
-        'reg_harmone_score': 'reg_harmone',
-        'reg_switch_r2': 'reg_switch', 
-        'reg_single': 'reg_single',
-        'cv_harmone_score': 'cv_harmone',
-        'cv_switch_conf': 'cv_switch',
-        'cv_single': 'cv_single'
+        'reg_harmone_score':    'reg_harmone',
+        'reg_greedy_switch':    'reg_harmone',
+        'reg_violation_aware':  'reg_harmone',
+        'reg_pareto':           'reg_harmone',
+        'reg_random_switch':    'reg_harmone',
+        'reg_switch_r2':        'reg_switch',
+        'reg_single':           'reg_single',
+        'cv_harmone_score':     'cv_harmone',
+        'cv_greedy_switch':     'cv_harmone',
+        'cv_violation_aware':   'cv_harmone',
+        'cv_switch_conf':       'cv_switch',
+        'cv_single':            'cv_single',
     }
 
     config_val = mapping.get(approach, approach)
@@ -352,6 +358,30 @@ def set_model():
         f.write(model)
 
     return jsonify({"message": "Model set"}), 200
+
+
+@app.route('/api/set-planner', methods=['POST'])
+def set_planner():
+    data = request.json
+    planner = data.get('planner', 'harmone_original')
+    system = data.get('system', 'regression')
+
+    path = (
+        'managed_system_cv/knowledge/thresholds.json'
+        if system == 'cv'
+        else 'managed_system_regression/knowledge/thresholds.json'
+    )
+    try:
+        with open(path) as f:
+            thresholds = json.load(f)
+        thresholds['planner'] = planner
+        with open(path, 'w') as f:
+            json.dump(thresholds, f, indent=4)
+        logging.info(f"Planner updated to '{planner}' for system '{system}'")
+        return jsonify({'status': 'ok', 'planner': planner}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 
 # --- NEW: Reset Endpoint to flush data on approach switch ---
 @app.route('/api/reset', methods=['POST'])

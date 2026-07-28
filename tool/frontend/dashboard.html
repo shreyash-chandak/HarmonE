@@ -39,17 +39,15 @@
                     <div class="space-y-3">
                         <button id="modal-btn-reg-harmone" class="text-left w-full p-3 bg-gray-200 hover:bg-blue-100 rounded-lg transition-colors border border-gray-300">
                             <h4 class="font-semibold text-gray-900">HarmonE (Score/Drift)</h4>
-                            <p class="text-sm text-gray-700">Runs the HarmonE approach on Time Series Regression.
-                                Uses the HarmonE performance score to balance accuracy and energy.  
-                    <br><strong>Score:</strong>  
-                    S = (beta)(A) + (1 - beta)(1 - E)<br>
-                    where A = accuracy (e.g., R²), E = normalized energy, beta ∈ [0,1] is the weight parameter.  
-                    <br>
+                            <p class="text-sm text-gray-700">Adaptive accuracy-energy trade-off with drift-triggered VMR.<br>
+                            <strong>Score:</strong> S = β·A + (1−β)·(1−E<sub>norm</sub>)<br>
+                            <strong>Adaptive threshold:</strong> τ<sub>E</sub>(t+1) = clamp(τ<sub>E</sub>(t) + δ·(E<sub>ref</sub> − E<sub>used</sub>), lo, hi)<br>
+                            <span class="text-xs text-gray-500">Prompts for planning strategy (Original / Greedy / Violation-Aware / Pareto)</span>
                             </p>
                         </button>
                         <button id="modal-btn-reg-switch" class="text-left w-full p-3 bg-gray-200 hover:bg-blue-100 rounded-lg transition-colors border border-gray-300">
                             <h4 class="font-semibold text-gray-900">Simple R² Switch</h4>
-                            <p class="text-sm text-gray-700">Baseline: Switch on R² score+Energy.</p>
+                            <p class="text-sm text-gray-700">Baseline: Switch on R² score + energy violation.</p>
                         </button>
                         <button id="modal-btn-reg-single" class="text-left w-full p-3 bg-gray-200 hover:bg-blue-100 rounded-lg transition-colors border border-gray-300">
                             <h4 class="font-semibold text-gray-900">Single Model (Monitor-Only)</h4>
@@ -59,15 +57,18 @@
                 </div>
             
                 <div class="p-4 bg-gray-100 rounded-lg border border-gray-200">
-                    <h3 class="font-semibold text-gray-900 text-lg mb-3 border-b border-gray-300 pb-2">Computer Vision (YOLO)</h3>
+                    <h3 class="font-semibold text-gray-900 text-lg mb-3 border-b border-gray-300 pb-2">Computer Vision (YOLO · Detection)</h3>
                     <div class="space-y-3">
-                        <!-- <button id="modal-btn-cv-harmone" class="text-left w-full p-3 bg-gray-200 hover:bg-blue-100 rounded-lg transition-colors border border-gray-300">
+                        <button id="modal-btn-cv-harmone" class="text-left w-full p-3 bg-gray-200 hover:bg-blue-100 rounded-lg transition-colors border border-gray-300">
                             <h4 class="font-semibold text-gray-900">HarmonE (Score/Drift)</h4>
-                            <p class="text-sm text-gray-700">Runs the HarmonE approach on Object Detection.</p>
-                        </button> -->
+                            <p class="text-sm text-gray-700">Proxy-based HarmonE on object detection (YOLO n/s/m).<br>
+                            Drift via luminance KL or embedding MMD/Fréchet (configured in thresholds.json).<br>
+                            <span class="text-xs text-gray-500">Prompts for planning strategy</span>
+                            </p>
+                        </button>
                         <button id="modal-btn-cv-switch" class="text-left w-full p-3 bg-gray-200 hover:bg-blue-100 rounded-lg transition-colors border border-gray-300">
                             <h4 class="font-semibold text-gray-900">Simple Confidence Switch</h4>
-                            <p class="text-sm text-gray-700">Baseline: Switch on confidence+Energy.</p>
+                            <p class="text-sm text-gray-700">Baseline: Switch on detection confidence + energy violation.</p>
                         </button>
                         <button id="modal-btn-cv-single" class="text-left w-full p-3 bg-gray-200 hover:bg-blue-100 rounded-lg transition-colors border border-gray-300">
                             <h4 class="font-semibold text-gray-900">Single Model (Monitor-Only)</h4>
@@ -153,6 +154,19 @@
         </div>
     </div>
     
+    <!-- Planning Strategy Modal -->
+    <div id="planner-modal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div class="bg-white p-8 rounded-lg card-shadow-lg max-w-lg w-full mx-4">
+            <h3 class="text-xl font-bold text-gray-900 mb-1">Select Planning Strategy</h3>
+            <p class="text-gray-500 text-sm mb-5">Choose how HarmonE selects the next model when adaptation is triggered.</p>
+            <div class="space-y-2" id="planner-options"></div>
+            <div class="flex space-x-3 mt-6">
+                <button id="confirm-planner-btn" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md text-sm font-medium transition-colors">Continue</button>
+                <button id="cancel-planner-btn" class="flex-1 bg-gray-500 hover:bg-gray-600 text-white px-4 py-2 rounded-md text-sm font-medium transition-colors">Cancel</button>
+            </div>
+        </div>
+    </div>
+
     <div id="dashboard-wrapper" class="hidden flex flex-col h-screen">
 
         <header class="bg-white border-b border-gray-200 card-shadow z-10">
@@ -249,12 +263,22 @@
                         <label for="policy-presets" class="block text-sm font-medium mb-1 text-gray-700">Load Preset:</label>
                         <select id="policy-presets" class="w-full bg-white border border-gray-300 rounded-md p-2 text-sm text-gray-900 focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
                             <option value="">-- Select a preset --</option>
-                            <optgroup label="Regression Presets">
-                                <option value="reg_harmone_score">REG: HarmonE Score Policy</option>
-                                <option value="reg_switch_r2">REG: Simple R² Switch Policy</option>
+                            <optgroup label="Regression — HarmonE">
+                                <option value="reg_harmone_score">REG: HarmonE Original</option>
+                                <option value="reg_greedy_switch">REG: HarmonE Greedy Switch</option>
+                                <option value="reg_violation_aware">REG: HarmonE Violation Aware</option>
+                                <option value="reg_pareto">REG: HarmonE Pareto Optimal</option>
                             </optgroup>
-                            <optgroup label="Computer Vision Presets">
-                                <option value="cv_harmone_score">CV: HarmonE Score Policy</option>
+                            <optgroup label="Regression — Baselines">
+                                <option value="reg_switch_r2">REG: Simple R² Switch</option>
+                                <option value="reg_random_switch">REG: Random Switch</option>
+                            </optgroup>
+                            <optgroup label="Computer Vision — HarmonE">
+                                <option value="cv_harmone_score">CV: HarmonE Original</option>
+                                <option value="cv_greedy_switch">CV: HarmonE Greedy Switch</option>
+                                <option value="cv_violation_aware">CV: HarmonE Violation Aware</option>
+                            </optgroup>
+                            <optgroup label="Computer Vision — Baselines">
                                 <option value="cv_switch_conf">CV: Simple Confidence Switch</option>
                             </optgroup>
                         </select>
@@ -434,71 +458,200 @@
         const datasetHint = document.getElementById('dataset-hint');
         
         // ▼▼▼ 1. PRESETS ▼▼▼
+
+        // Planner registry: id → display info
+        const PLANNERS = [
+            { id: 'harmone_original',  name: 'HarmonE Original',    desc: 'ε-greedy EMA-weighted selection — paper baseline' },
+            { id: 'greedy_switch',     name: 'Greedy Switch',        desc: 'Always picks the highest-EMA non-current model' },
+            { id: 'violation_aware',   name: 'Violation Aware',      desc: 'Deprioritises models that recently violated energy budget' },
+            { id: 'pareto',            name: 'Pareto Optimal',       desc: 'Selects from accuracy-energy Pareto frontier' },
+            { id: 'random_switch',     name: 'Random Switch',        desc: 'Random selection — ablation baseline' },
+        ];
+
+        let pendingHarmonESystem = null; // 'reg' or 'cv' — set when planner modal is triggered
+        let selectedPlannerId = 'harmone_original';
+
         const HARMONY_PRESETS = {
             // --- REGRESSION PRESETS ---
             "reg_harmone_score": {
                 policy_id: "reg_harmone_score",
-                quality_attribute: "score", 
+                quality_attribute: "score",
                 adaptation_boundary: { type: "STATIC_THRESHOLD", condition: "LESS_THAN", threshold: 0.78 },
                 tactics: [ { tactic_id: "execute_mape_plan", priority: 1, tactic_endpoint: "http://localhost:8080/adaptor/tactic" } ],
-                secondary_boundaries: [ 
-                    {
-                        quality_attribute: "kl_div",
-                        condition: "GREATER_THAN", 
-                        threshold: 0.10, 
-                        tactic_id: "handle_data_drift"
-                    }
+                secondary_boundaries: [
+                    { quality_attribute: "kl_div", condition: "GREATER_THAN", threshold: 0.10, tactic_id: "handle_data_drift" }
                 ],
+                associated_qas: ["r2_score", "energy", "model_used"]
+            },
+            "reg_greedy_switch": {
+                policy_id: "reg_greedy_switch",
+                quality_attribute: "score",
+                adaptation_boundary: { type: "STATIC_THRESHOLD", condition: "LESS_THAN", threshold: 0.78 },
+                tactics: [ { tactic_id: "execute_mape_plan", priority: 1, tactic_endpoint: "http://localhost:8080/adaptor/tactic" } ],
+                secondary_boundaries: [
+                    { quality_attribute: "kl_div", condition: "GREATER_THAN", threshold: 0.10, tactic_id: "handle_data_drift" }
+                ],
+                associated_qas: ["r2_score", "energy", "model_used"]
+            },
+            "reg_violation_aware": {
+                policy_id: "reg_violation_aware",
+                quality_attribute: "score",
+                adaptation_boundary: { type: "STATIC_THRESHOLD", condition: "LESS_THAN", threshold: 0.78 },
+                tactics: [ { tactic_id: "execute_mape_plan", priority: 1, tactic_endpoint: "http://localhost:8080/adaptor/tactic" } ],
+                secondary_boundaries: [
+                    { quality_attribute: "kl_div", condition: "GREATER_THAN", threshold: 0.10, tactic_id: "handle_data_drift" }
+                ],
+                associated_qas: ["r2_score", "energy", "model_used"]
+            },
+            "reg_pareto": {
+                policy_id: "reg_pareto",
+                quality_attribute: "score",
+                adaptation_boundary: { type: "STATIC_THRESHOLD", condition: "LESS_THAN", threshold: 0.78 },
+                tactics: [ { tactic_id: "execute_mape_plan", priority: 1, tactic_endpoint: "http://localhost:8080/adaptor/tactic" } ],
+                secondary_boundaries: [
+                    { quality_attribute: "kl_div", condition: "GREATER_THAN", threshold: 0.10, tactic_id: "handle_data_drift" }
+                ],
+                associated_qas: ["r2_score", "energy", "model_used"]
+            },
+            "reg_switch_r2": {
+                policy_id: "reg_switch_r2",
+                quality_attribute: "r2_score",
+                adaptation_boundary: { condition: "LESS_THAN", threshold: 0.70 },
+                tactics: [ { tactic_id: "switch_model_r2_baseline", priority: 1, tactic_endpoint: "http://localhost:8080/adaptor/tactic" } ],
+                associated_qas: ["r2_score", "energy", "model_used"]
+            },
+            "reg_random_switch": {
+                policy_id: "reg_random_switch",
+                quality_attribute: "r2_score",
+                adaptation_boundary: { condition: "LESS_THAN", threshold: 0.70 },
+                tactics: [ { tactic_id: "random_switch", priority: 1, tactic_endpoint: "http://localhost:8080/adaptor/tactic" } ],
                 associated_qas: ["r2_score", "energy", "model_used"]
             },
             "reg_harmone_drift": {
                 policy_id: "reg_harmone_drift",
-                quality_attribute: "kl_div", 
+                quality_attribute: "kl_div",
                 adaptation_boundary: { condition: "GREATER_THAN", threshold: 0.75 },
                 tactics: [ { tactic_id: "handle_data_drift", priority: 1, tactic_endpoint: "http://localhost:8080/adaptor/tactic" } ],
                 associated_qas: ["kl_div", "model_used"]
             },
-            "reg_switch_r2": {
-                policy_id: "reg_switch_r2",
-                quality_attribute: "r2_score", 
-                adaptation_boundary: { condition: "LESS_THAN", threshold: 0.70 },
-                tactics: [ { tactic_id: "switch_model_r2_baseline", priority: 1, tactic_endpoint: "http://localhost:8080/adaptor/tactic" } ],
-                associated_qas: ["r2_score", "energy", "model_used"] 
-            },
-            
+
             // --- CV PRESETS ---
             "cv_harmone_score": {
                 policy_id: "cv_harmone_score",
-                quality_attribute: "score", 
+                quality_attribute: "score",
                 adaptation_boundary: { type: "STATIC_THRESHOLD", condition: "LESS_THAN", threshold: 0.54 },
                 tactics: [ { tactic_id: "execute_mape_plan", priority: 1, tactic_endpoint: "http://localhost:8080/adaptor/tactic" } ],
                 secondary_boundaries: [
-                    {
-                        quality_attribute: "kl_div",
-                        condition: "GREATER_THAN", 
-                        threshold: 0.07,
-                        tactic_id: "handle_data_drift"
-                    }
+                    { quality_attribute: "kl_div", condition: "GREATER_THAN", threshold: 0.07, tactic_id: "handle_data_drift" }
+                ],
+                associated_qas: ["confidence", "energy", "model_used"]
+            },
+            "cv_greedy_switch": {
+                policy_id: "cv_greedy_switch",
+                quality_attribute: "score",
+                adaptation_boundary: { type: "STATIC_THRESHOLD", condition: "LESS_THAN", threshold: 0.54 },
+                tactics: [ { tactic_id: "execute_mape_plan", priority: 1, tactic_endpoint: "http://localhost:8080/adaptor/tactic" } ],
+                secondary_boundaries: [
+                    { quality_attribute: "kl_div", condition: "GREATER_THAN", threshold: 0.07, tactic_id: "handle_data_drift" }
+                ],
+                associated_qas: ["confidence", "energy", "model_used"]
+            },
+            "cv_violation_aware": {
+                policy_id: "cv_violation_aware",
+                quality_attribute: "score",
+                adaptation_boundary: { type: "STATIC_THRESHOLD", condition: "LESS_THAN", threshold: 0.54 },
+                tactics: [ { tactic_id: "execute_mape_plan", priority: 1, tactic_endpoint: "http://localhost:8080/adaptor/tactic" } ],
+                secondary_boundaries: [
+                    { quality_attribute: "kl_div", condition: "GREATER_THAN", threshold: 0.07, tactic_id: "handle_data_drift" }
                 ],
                 associated_qas: ["confidence", "energy", "model_used"]
             },
             "cv_harmone_drift": {
                 policy_id: "cv_harmone_drift",
-                quality_attribute: "kl_div", 
+                quality_attribute: "kl_div",
                 adaptation_boundary: { condition: "GREATER_THAN", threshold: 0.07 },
                 tactics: [ { tactic_id: "handle_data_drift", priority: 1, tactic_endpoint: "http://localhost:8080/adaptor/tactic" } ],
                 associated_qas: ["kl_div", "model_used"]
             },
             "cv_switch_conf": {
                 policy_id: "cv_switch_confidence",
-                quality_attribute: "confidence", 
+                quality_attribute: "confidence",
                 adaptation_boundary: { condition: "LESS_THAN", threshold: 0.70 },
                 tactics: [ { tactic_id: "switch_model_r2_baseline", priority: 1, tactic_endpoint: "http://localhost:8080/adaptor/tactic" } ],
-                associated_qas: ["confidence", "energy", "model_used"] 
+                associated_qas: ["confidence", "energy", "model_used"]
             }
         };
 
     
+        // === PLANNER MODAL ===
+
+        function showPlannerModal(system) {
+            pendingHarmonESystem = system;
+            selectedPlannerId = 'harmone_original';
+
+            const container = document.getElementById('planner-options');
+            container.innerHTML = PLANNERS.map((p, i) => `
+                <label class="flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-colors planner-option
+                              ${i === 0 ? 'border-blue-400 bg-blue-50' : 'border-gray-200 bg-gray-50 hover:bg-blue-50'}"
+                       data-planner="${p.id}">
+                    <input type="radio" name="planner" value="${p.id}" ${i === 0 ? 'checked' : ''}
+                           class="mt-0.5 accent-blue-600 flex-shrink-0">
+                    <div>
+                        <div class="font-medium text-gray-900 text-sm">${p.name}</div>
+                        <div class="text-xs text-gray-500 mt-0.5">${p.desc}</div>
+                    </div>
+                </label>
+            `).join('');
+
+            container.querySelectorAll('.planner-option').forEach(el => {
+                el.addEventListener('click', () => {
+                    container.querySelectorAll('.planner-option').forEach(e => {
+                        e.classList.remove('border-blue-400', 'bg-blue-50');
+                        e.classList.add('border-gray-200', 'bg-gray-50');
+                    });
+                    el.classList.add('border-blue-400', 'bg-blue-50');
+                    el.classList.remove('border-gray-200', 'bg-gray-50');
+                    el.querySelector('input[type=radio]').checked = true;
+                    selectedPlannerId = el.dataset.planner;
+                });
+            });
+
+            document.getElementById('planner-modal').classList.remove('hidden');
+        }
+
+        async function launchHarmonE(system, plannerId) {
+            const isCV = system === 'cv';
+            const approachKey = isCV ? 'cv_harmone_score' : 'reg_harmone_score';
+            const presetKey = plannerId === 'harmone_original'
+                ? approachKey
+                : (isCV ? `cv_${plannerId}` : `reg_${plannerId}`);
+            const preset = HARMONY_PRESETS[presetKey] || HARMONY_PRESETS[approachKey];
+
+            // Set planner in thresholds.json via API
+            try {
+                await fetch(`${ACP_SERVER_URL}/api/set-planner`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ planner: plannerId, system: isCV ? 'cv' : 'regression' })
+                });
+            } catch (e) {
+                console.warn('set-planner failed (server may not be running yet):', e);
+            }
+
+            await resetServerKnowledge();
+            populateFormWithPreset(preset);
+            policyIdInput.value = preset.policy_id;
+            document.getElementById('policy-presets').value = presetKey in HARMONY_PRESETS ? presetKey : approachKey;
+
+            const plannerLabel = PLANNERS.find(p => p.id === plannerId)?.name || plannerId;
+            showMessage(`Loaded HarmonE (${plannerLabel}) for ${isCV ? 'CV' : 'Regression'}. Click 'Start Managed System' to begin`, "info");
+            showView('dashboard');
+            document.querySelector('.tab-btn[data-tab="policy"]').click();
+            await writeApproachConfig(approachKey);
+            await savePolicyToFolder();
+            document.getElementById("adaptive-start-container").classList.remove("hidden");
+        }
+
         // === HELPER: RESET SERVER KNOWLEDGE ===
         async function resetServerKnowledge() {
             try {
@@ -588,17 +741,8 @@
             });
 
             // REGRESSION BUTTONS
-            document.getElementById('modal-btn-reg-harmone').addEventListener('click', async () => {
-                await resetServerKnowledge(); 
-                populateFormWithPreset(HARMONY_PRESETS.reg_harmone_score);
-                policyIdInput.value = HARMONY_PRESETS.reg_harmone_score.policy_id;
-                document.getElementById('policy-presets').value = 'reg_harmone_score';
-                showMessage("Loaded 'REG: HarmonE Demo' preset. Click 'Start Managed System' to begin", "info");
-                showView('dashboard');
-                document.querySelector('.tab-btn[data-tab="policy"]').click();
-                await writeApproachConfig('reg_harmone_score');
-                await savePolicyToFolder(); 
-                document.getElementById("adaptive-start-container").classList.remove("hidden");
+            document.getElementById('modal-btn-reg-harmone').addEventListener('click', () => {
+                showPlannerModal('reg');
             });
 
             document.getElementById('modal-btn-reg-switch').addEventListener('click', async () => {
@@ -620,22 +764,9 @@
             });
 
             // CV BUTTONS
-            const cvHarmoneBtn = document.getElementById('modal-btn-cv-harmone');
-
-            if (cvHarmoneBtn) {
-                cvHarmoneBtn.addEventListener('click', async () => {
-                    await resetServerKnowledge(); // <--- RESET ADDED
-                    populateFormWithPreset(HARMONY_PRESETS.cv_harmone_score);
-                    policyIdInput.value = HARMONY_PRESETS.cv_harmone_score.policy_id;
-                    document.getElementById('policy-presets').value = 'cv_harmone_score';
-                    showMessage("Loaded 'CV: HarmonE Demo' preset. Click 'Start Managed System' to begin", "info");
-                    showView('dashboard');
-                    document.querySelector('.tab-btn[data-tab="policy"]').click();
-                    await writeApproachConfig('cv_harmone_score');
-                    await savePolicyToFolder();
-                    document.getElementById("adaptive-start-container").classList.remove("hidden");
-                });
-            }
+            document.getElementById('modal-btn-cv-harmone').addEventListener('click', () => {
+                showPlannerModal('cv');
+            });
 
 
             document.getElementById('modal-btn-cv-switch').addEventListener('click', async () => {
@@ -654,6 +785,19 @@
             document.getElementById('modal-btn-cv-single').addEventListener('click', () => {
                 currentSystemType = "cv";
                 showModelSelectionModal();
+            });
+
+            // PLANNER MODAL CONFIRM / CANCEL
+            document.getElementById('confirm-planner-btn').addEventListener('click', async () => {
+                document.getElementById('planner-modal').classList.add('hidden');
+                if (pendingHarmonESystem) {
+                    await launchHarmonE(pendingHarmonESystem, selectedPlannerId);
+                    pendingHarmonESystem = null;
+                }
+            });
+            document.getElementById('cancel-planner-btn').addEventListener('click', () => {
+                document.getElementById('planner-modal').classList.add('hidden');
+                pendingHarmonESystem = null;
             });
 
             // CUSTOM BUTTON
