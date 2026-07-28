@@ -1,149 +1,82 @@
 #!/usr/bin/env bash
+# harmone_start.sh — HarmonE launcher for Arch Linux (GUI terminal emulator).
+#
+# Spawns three GUI terminal windows (gnome-terminal / konsole / xterm / etc.).
+# For WSL or headless use, use harmone_start_wsl.sh instead.
+#
+# Usage:
+#   cd tool/
+#   ./harmone_start.sh
 
-# ==========================
-# CONFIG
-# ==========================
-PROJECT_DIR="$(pwd)"
-VENV_NAME="harmone_env"
-VENV_PATH="$PROJECT_DIR/$VENV_NAME/bin/activate"
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$SCRIPT_DIR"
 
 echo "=============================="
-echo "  HarmonE: Setup + Launch"
+echo "  HarmonE: Setup + Launch (Arch)"
 echo "=============================="
 
-# ---------------------------
-# Detect Python interpreter
-# ---------------------------
-detect_python() {
-    for cmd in python3 python python3.12 python3.11; do
-        if command -v "$cmd" &>/dev/null; then
-            echo "$cmd"
+# Source shared setup (venv creation, pip install, preflight)
+# shellcheck source=scripts/_launch_common.sh
+source "$SCRIPT_DIR/scripts/_launch_common.sh"
+
+cd "$PROJECT_DIR"
+
+# ── RAPL permissions (Arch; skip silently if not available) ───────────────────
+
+echo "[arch] Setting pyJoules RAPL energy permissions ..."
+sudo chmod -R a+r /sys/class/powercap/intel-rapl/ 2>/dev/null \
+    && echo "[arch]  RAPL readable." \
+    || echo "[arch]  RAPL not available — EnergyMeter will use null meters."
+
+# ── Detect terminal emulator ───────────────────────────────────────────────────
+
+_detect_terminal() {
+    for term in gnome-terminal konsole xfce4-terminal tilix xterm; do
+        if command -v "$term" &>/dev/null; then
+            echo "$term"
             return
         fi
     done
     echo ""
 }
 
-PYTHON_CMD=$(detect_python)
-
-if [[ -z "$PYTHON_CMD" ]]; then
-    echo "No valid Python interpreter found!"
-    echo "Install Python 3 first."
-    exit 1
-else
-    echo "[✔] Using Python: $PYTHON_CMD"
-fi
-
-# pip command mapped to python -m pip (always available)
-PIP_CMD="$PYTHON_CMD -m pip"
-
-# ---------------------------
-# Detect a usable terminal
-# ---------------------------
-detect_terminal() {
-    if command -v gnome-terminal &>/dev/null; then
-        echo "gnome-terminal"
-    elif command -v konsole &>/dev/null; then
-        echo "konsole"
-    elif command -v xfce4-terminal &>/dev/null; then
-        echo "xfce4-terminal"
-    elif command -v tilix &>/dev/null; then
-        echo "tilix"
-    elif command -v xterm &>/dev/null; then
-        echo "xterm"
-    else
-        echo ""
-    fi
-}
-
-TERMINAL=$(detect_terminal)
+TERMINAL=$(_detect_terminal)
 
 if [[ -z "$TERMINAL" ]]; then
-    echo "No supported terminal found!"
-    echo "Install xterm or GNOME Terminal."
+    echo "ERROR: No supported terminal emulator found (tried gnome-terminal, konsole, xfce4-terminal, tilix, xterm)." >&2
+    echo "       Install one, or use ./harmone_start_wsl.sh for headless use." >&2
     exit 1
-else
-    echo "[✔] Using terminal: $TERMINAL"
 fi
 
-# Helper to launch commands in user’s terminal
-launch_terminal() {
-    CMD="$1"
+echo "[arch] Using terminal: $TERMINAL"
 
+_launch_terminal() {
+    local cmd="$1"
     case "$TERMINAL" in
-        gnome-terminal)
-            gnome-terminal -- bash -c "$CMD; exec bash"
-            ;;
-        konsole)
-            konsole -e bash -c "$CMD; exec bash"
-            ;;
-        xfce4-terminal)
-            xfce4-terminal --hold -e "bash -c '$CMD; exec bash'"
-            ;;
-        tilix)
-            tilix -e "bash -c '$CMD; exec bash'"
-            ;;
-        xterm)
-            xterm -hold -e "bash -c '$CMD; exec bash'"
-            ;;
+        gnome-terminal) gnome-terminal -- bash -c "$cmd; exec bash" ;;
+        konsole)        konsole -e bash -c "$cmd; exec bash" ;;
+        xfce4-terminal) xfce4-terminal --hold -e "bash -c '$cmd; exec bash'" ;;
+        tilix)          tilix -e "bash -c '$cmd; exec bash'" ;;
+        xterm)          xterm -hold -e "bash -c '$cmd; exec bash'" ;;
     esac
 }
 
-# ---------------------------
-# Step 1: Environment Setup
-# ---------------------------
-echo "[1] Navigating to project directory..."
-cd "$PROJECT_DIR" || { echo "Directory not found!"; exit 1; }
+# ── Launch terminals ───────────────────────────────────────────────────────────
 
-echo "[2] Creating virtual environment..."
-if [ ! -d "$VENV_NAME" ]; then
-    $PYTHON_CMD -m venv "$VENV_NAME"
-    echo "[✔] Virtual environment created."
-else
-    echo "[✔] Virtual environment already exists."
-fi
+echo "[arch] Launching ACP server ..."
+_launch_terminal "cd $PROJECT_DIR; source $VENV_PATH; $PYTHON_CMD app.py"
 
-echo "[3] Activating environment..."
-source "$VENV_PATH"
+echo "[arch] Launching dashboard ..."
+_launch_terminal "cd $PROJECT_DIR/frontend; $PYTHON_CMD -m http.server 8000"
 
-echo "[4] Installing dependencies..."
-$PIP_CMD install -r requirements.txt \
-  --extra-index-url https://download.pytorch.org/whl/cpu
+echo "[arch] Opening managed system console ..."
+_launch_terminal "cd $PROJECT_DIR; source $VENV_PATH; echo 'Run: $PYTHON_CMD run_managed_system.py'; exec bash"
 
-
-# ---------------------------
-# Step 2: PyRAPL Permissions
-# ---------------------------
-echo "[5] Setting PyRAPL energy permissions..."
-sudo chmod -R 777 /sys/class/powercap/intel-rapl/ 2>/dev/null
-echo "[✔] Energy permissions applied."
-
-# ---------------------------
-# Step 3: Launching Terminals
-# ---------------------------
-
-echo "[6] Launching ACP Server..."
-launch_terminal "
-cd $PROJECT_DIR;
-source $VENV_PATH;
-$PYTHON_CMD app.py
-"
-
-echo "[7] Launching Dashboard..."
-launch_terminal "
-cd $PROJECT_DIR/frontend;
-$PYTHON_CMD -m http.server 8000
-"
-
-echo "[8] Opening Managed System Console..."
-launch_terminal "
-cd $PROJECT_DIR;
-source $VENV_PATH;
-echo 'Run: $PYTHON_CMD run_managed_system.py'
-exec bash
-"
-
-echo "=================================="
-echo "   All systems launched!"
-echo "   Dashboard: http://localhost:8000/dashboard.html"
-echo "=================================="
+echo ""
+echo "=============================="
+echo "  All systems launched!"
+echo "  Dashboard: http://localhost:8000/dashboard.html"
+echo "  ACP server: http://localhost:5000/"
+echo "=============================="
