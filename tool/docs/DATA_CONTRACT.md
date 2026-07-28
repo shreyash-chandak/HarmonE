@@ -88,17 +88,76 @@ Optional columns:
 }
 ```
 
-### 2.3 Init script
+### 2.3 CV task keys (v2, added in prototype sprint)
+
+When `domain: "cv"`, four additional groups of keys are supported:
+
+```jsonc
+// Task dispatch (required for non-detection tasks)
+"task":         "detection",        // "detection" | "classification" | "segmentation"
+"task_adapter": "adapters.tasks.detection.DetectionAdapter",  // resolved from task if omitted
+"num_classes":  80,                 // required for classification and segmentation
+"ignore_index": 255,                // segmentation only — pixel value to exclude from mIoU
+
+// Embedding drift (required only when drift_detector is mmd_embedding/frechet_embedding)
+"embedding_model":        "yolo_n",    // pinned model for drift embedding extraction (R4)
+"embedding_dim":          256,         // embedding vector length — validated on first extraction
+"embedding_sample_every": 5,           // extract every N frames (default 1)
+"drift_window_size":      500,         // ring-buffer size for EmbeddingStore
+
+// Retrain tactics
+"pseudo_label_threshold": 0.5,         // confidence threshold for pseudo-label acceptance
+"rollback_if_worse":      true,        // rollback new weights if proxy score drops after retrain
+```
+
+All these keys are documented with inline comments in
+`configs/datasets/_template.json` and validated by `core/dataset_validator.py`.
+Per-dataset specifics live in `docs/datasets/`.
+
+### 2.4 Awaiting-data status
+
+```json
+"status": "awaiting_data"
+```
+
+When a config has this key set, the validator skips all data-path existence checks
+and reports SKIPPED (not FAIL). Use this for configs whose data has not yet been
+downloaded. Remove the key once data is in place.
+
+### 2.5 Init script
 
 ```
-python scripts/init_cv.py --config <name>
+python scripts/init_cv.py --config <name> [--skip-embeddings]
 ```
 
 Produces (idempotent):
 - `managed_system_cv/versionedMR/{model}_v1.pt` — copy of base weights (VMR seed)
 - `managed_system_cv/versionedMR/{model}_v1_hist.json` — avg luminance histogram over reference images
-- `managed_system_cv/knowledge/model.csv` — default active model (yolo_s)
+- `managed_system_cv/knowledge/model.csv` — default active model
 - `managed_system_cv/knowledge/mape_info.json` — blank EMA state
+- `managed_system_cv/knowledge/reference_embeddings.npz` — fixed reference embeddings for
+  embedding-based drift detectors (§5.2); requires embedding_model weights; skipped when
+  `--skip-embeddings` is passed or when `drift_detector` is not embedding-based
+
+Per-dataset specs and preprocessing recipes: see `docs/datasets/`.
+
+---
+
+## 2a. Per-Dataset Specs
+
+Detailed dataset documentation (raw form, preprocessing recipe, drift-stream
+construction, license) lives in `docs/datasets/`:
+
+| Dataset | Doc | Config |
+|---------|-----|--------|
+| PeMS node 2 | [pems_node2.md](datasets/pems_node2.md) | `configs/datasets/pems_node2.json` |
+| UCI Electricity | [uci_electricity.md](datasets/uci_electricity.md) | `configs/datasets/uci_electricity.json` |
+| ERCOT Spot Prices | [spot_prices.md](datasets/spot_prices.md) | `configs/datasets/spot_prices.json` |
+| BDD100K | [bdd100k.md](datasets/bdd100k.md) | `configs/datasets/bdd100k.json` |
+| iWildCam | [iwildcam.md](datasets/iwildcam.md) | `configs/datasets/iwildcam.json` |
+| ACDC | [acdc.md](datasets/acdc.md) | `configs/datasets/acdc.json` |
+
+All schema statements in those docs are cross-checked against `core/dataset_validator.py`.
 
 ---
 
