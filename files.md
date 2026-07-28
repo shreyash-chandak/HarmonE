@@ -24,13 +24,22 @@ HarmonE-tool/
 └── tool/                           # Main package — all runnable code lives here
     ├── app.py                      # ACP server (Flask)
     ├── approach.conf               # System/mode selector
-    ├── harmone_start.sh            # 3-process live launcher
+    ├── harmone_start.sh            # 3-process live launcher (Arch Linux, GUI terminals)
+    ├── harmone_start_wsl.sh        # WSL/headless launcher; processes in background
+    ├── harmone_stop.sh             # Kill from pidfile + psutil sweep
     ├── run_managed_system.py       # Master wrapper + process manager
     │
     ├── adapters/
     │   ├── base.py
     │   ├── loaders.py
-    │   └── regression_csv.py
+    │   ├── regression_csv.py
+    │   ├── cv_imagedir.py            # CVImageDirAdapter — image-dir / manifest-CSV dataset adapter
+    │   └── tasks/
+    │       ├── __init__.py
+    │       ├── base.py               # TaskAdapter ABC + _TASK_REGISTRY + get_task_adapter()
+    │       ├── detection.py          # YOLO detection adapter (SPPF hook, spatial mean-pool)
+    │       ├── classification.py     # torchvision classification adapter
+    │       └── segmentation.py       # SegFormer segmentation adapter (upsample before argmax)
     │
     ├── configs/
     │   ├── datasets/
@@ -38,7 +47,12 @@ HarmonE-tool/
     │   │   ├── pems_node1.json
     │   │   ├── bdd100k.json
     │   │   ├── toy_regression.json
-    │   │   └── toy_cv.json
+    │   │   ├── toy_cv.json
+    │   │   ├── pems_node2.json       # awaiting_data
+    │   │   ├── uci_electricity.json  # awaiting_data
+    │   │   ├── spot_prices.json      # awaiting_data
+    │   │   ├── iwildcam.json         # awaiting_data
+    │   │   └── acdc.json             # awaiting_data
     │   └── experiments/
     │       ├── _template.yaml
     │       └── baseline.yaml
@@ -54,7 +68,8 @@ HarmonE-tool/
     │   │   ├── kl_fixed_ref.py
     │   │   ├── luminance_kl.py
     │   │   ├── mmd_embedding.py
-    │   │   └── frechet_embedding.py
+    │   │   ├── frechet_embedding.py
+    │   │   └── embedding_store.py    # float16 ring buffer for drift embeddings
     │   ├── planners/
     │   │   ├── base.py
     │   │   ├── naive.py
@@ -71,7 +86,19 @@ HarmonE-tool/
     │       └── agreement.py
     │
     ├── docs/
-    │   └── DATA_CONTRACT.md        # (documentation, not code)
+    │   ├── DATA_CONTRACT.md        # Plug-and-play data contract
+    │   ├── datasets/               # Per-dataset expectation specs
+    │   │   ├── index.md
+    │   │   ├── pems_node2.md
+    │   │   ├── uci_electricity.md
+    │   │   ├── spot_prices.md
+    │   │   ├── bdd100k.md
+    │   │   ├── iwildcam.md
+    │   │   └── acdc.md
+    │   └── checkpoints/            # Sprint checkpoint reports
+    │       ├── CP0.md
+    │       ├── CP1.md
+    │       └── CP2.md
     │
     ├── experiments/
     │   ├── metrics.py
@@ -150,8 +177,9 @@ HarmonE-tool/
     │   └── custom_cv_policy.json
     │
     ├── scripts/
+    │   ├── _launch_common.sh       # Shared venv/pip/preflight steps for both launchers
     │   ├── init_regression.py
-    │   ├── init_cv.py
+    │   ├── init_cv.py              # +--skip-embeddings; seeds reference_embeddings.npz (§5.2)
     │   ├── make_toy_datasets.py
     │   ├── probe_energy.py
     │   ├── setup_energy_permissions.sh
@@ -173,7 +201,8 @@ HarmonE-tool/
         ├── test_phase4_energy.py
         ├── test_phase5_harness.py
         ├── test_live_run_fixes.py
-        └── test_plug_and_play.py
+        ├── test_plug_and_play.py
+        └── test_task_adapters.py   # §4 task adapter + EmbeddingStore + plug-and-play CV
 ```
 
 ---

@@ -121,3 +121,28 @@ runs/detect/
 runs/train/
 runs/val/
 tool/managed_system_cv/runs/
+runs_artifact/
+
+# ── EmbeddingStore runtime files (ring buffer, too large for git) ─────────────
+tool/managed_system_*/knowledge/embeddings.f16.npy
+tool/managed_system_*/knowledge/embeddings_index.csv
+tool/managed_system_*/knowledge/reference_embeddings.npz
+
+# ── EnergyMeter probe cache ───────────────────────────────────────────────────
+tool/managed_system_*/knowledge/.energy_backends.json
+.energy_backends.json
+
+# ── MAPE runtime state files ──────────────────────────────────────────────────
+tool/managed_system_*/knowledge/command.txt
+tool/managed_system_*/knowledge/drift*.csv
+tool/managed_system_*/knowledge/drift*.json
+tool/managed_system_*/knowledge/detector_*.json
+tool/managed_system_*/knowledge/detector_*.npz
+
+# ── Process management ────────────────────────────────────────────────────────
+*.pids
+tool/logs/
+
+# ── Model weights (large binary; download separately) ─────────────────────────
+tool/managed_system_*/models/
+tool/managed_system_*/base_models/

@@ -4,6 +4,76 @@
 **License:** MIT (Copyright 2025 The Authors)  
 **Repository:** `D:/Desktop/HarmonE-tool`
 
+> **Note:** Sections 1–10 below describe the original *Harmonica* tool as published.
+> Section 11 documents the v2 architecture extensions added during the HarmonE prototype sprint.
+
+---
+
+## 11. v2 Architecture — HarmonE Prototype Extensions
+
+This section describes structural changes made in the `feat/final-prototype` sprint (July 2026) that extend the original Harmonica architecture. All original MAPE-K semantics are preserved; these are additive extensions.
+
+### 11.1 Unified CV Task-Adapter Layer
+
+The original CV managed system had hard-coded YOLO detection calls throughout `inference.py` and the MAPE logic. The v2 architecture introduces a `TaskAdapter` abstract base class (`tool/adapters/tasks/base.py`) with three concrete implementations:
+
+| Adapter | Task | Key method |
+|---------|------|-----------|
+| `DetectionAdapter` | Object detection (YOLO) | `extract_proxy()`: mean box confidence; `extract_embedding()`: SPPF hook spatial mean-pool |
+| `ClassificationAdapter` | Image classification (torchvision) | `extract_proxy()`: max softmax probability; `weights=None` fix (R5-c) |
+| `SegmentationAdapter` | Semantic segmentation (SegFormer) | `extract_proxy()`: max logit; `offline_accuracy()`: bilinear upsample before argmax then mIoU (R5-b) |
+
+Task selection is driven entirely by the `task` key in the dataset config — no code changes are needed to switch between detection, classification, and segmentation.
+
+### 11.2 EmbeddingStore Ring Buffer (§5)
+
+`tool/core/drift/embedding_store.py` implements a float16 ring buffer for storing backbone feature vectors extracted during inference. Key properties:
+
+- **Capacity**: 2 × `drift_window_size` rows (allows both the current window and a rolling-reference window)
+- **Storage**: `knowledge/embeddings.f16.npy` + `knowledge/embeddings_index.csv`
+- **Cursor persistence**: `mape_info.json["embedding_cursor"]` survives process restarts
+- **Thread safety**: atomic cursor update via `os.replace(tmp_path, target_path)`
+
+`EmbeddingStore.last_window(n)` returns the most recent `n` vectors as float32, or `None` if fewer than `n` have been collected (warmup period — no fabricated telemetry, invariant I5).
+
+### 11.3 Fixed-Reference Embedding Drift (§5.2–§5.3)
+
+The paper's luminance-KL detector is preserved as the default and is suitable for luminance-visible drift (clear → night, etc.). For semantic drift invisible to luminance (e.g., geographic domain shift in iWildCam), two embedding-based detectors are now wired:
+
+- **`mmd_embedding`**: unbiased MMD² with RBF kernel; bandwidth frozen at fit time via median heuristic
+- **`frechet_embedding`**: Fréchet/Wasserstein-2 distance between Gaussian approximations (cheaper for high dimensions)
+
+Both detectors are fitted against **fixed reference embeddings** extracted at init time by `scripts/init_cv.py` and stored in `knowledge/reference_embeddings.npz`. The fixed-reference design (R3 fix) prevents the detector from tracking gradual drift and going blind, which was a bug in the cv_guide's rolling-reference design.
+
+The pinned `embedding_model` config key (R4) ensures the same backbone is always used for embedding extraction regardless of which model is currently serving inference, preventing embedding-space inconsistency across model switches.
+
+### 11.4 VMR Embedding Signatures (§5.4)
+
+When the active drift detector is embedding-based, model versions stored in `versionedMR/` include an embedding signature file (`{version}_emb_sig.json`) alongside the existing luminance histogram file (`{version}_hist.json`). The signature contains the mean and diagonal covariance of the embedding distribution at retrain time.
+
+Version-matching at drift response time (in `analyse.py`) dispatches based on signature type:
+- Luminance config → KL distance between histograms
+- Embedding config → Fréchet distance between Gaussian approximations of embedding signatures
+- Cross-type mismatch → `ValueError` (invariant I6)
+
+### 11.5 WSL Launcher (§6)
+
+`tool/harmone_start_wsl.sh` launches all three processes (ACP server, dashboard, managed system) in the background with log files and a PID file. A 30-second health poll confirms ports 5000 and 8080 are responsive before reporting success. `tool/harmone_stop.sh` kills from the PID file then runs a psutil sweep for orphan processes.
+
+`tool/harmone_start.sh` (Arch) now sources shared setup from `tool/scripts/_launch_common.sh`, eliminating duplication between the two launchers.
+
+### 11.6 Energy Metering — pyJoules Migration
+
+The original tool used pyRAPL. The v2 implementation uses pyJoules with three backends:
+- `_PyJoulesRaplBackend`: Intel RAPL (Linux only; requires `/sys/class/powercap/intel-rapl/` read access)
+- `_PyJoulesNvmlBackend`: NVIDIA GPU via NVML
+- `_PollingGPUBackend`: polling fallback for GPUs without NVML support
+- `_NullBackend`: silent fallback when no probes are available (always used on Windows and WSL)
+
+All nine call sites in the codebase use the unified `core/energy.EnergyMeter` context manager. Energy results include `cpu_valid` and `gpu_valid` flags indicating whether the readings are real (backend available) or zero (null backend).
+
+For full details of all changes from the original paper design, see `CHANGES_FROM_PAPER.md`.
+
 ---
 
 ## Table of Contents

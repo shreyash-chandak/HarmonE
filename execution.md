@@ -592,7 +592,7 @@ during this sprint — no aspirational commands.
 3. Sanity greps before push: no absolute `D:/` or `/home/<user>` paths in
    code; no `import pyRAPL`; no TODO in P0 paths without a DECISIONS_PENDING
    reference; `pip freeze`-verified `requirements.txt` +
-   `requirements_cv.txt` (pinned; cu-index documented in the header comment).
+   `requirements_cv.txt` (pinned; cu-index documented in the header comment). DO NOT PUSH yourself, just notify the user everything is ready.
 4. LICENSE present (MIT per repo) — verify authors line.
 5. Final: full `pytest -q` green → commit → merge `feat/final-prototype`
    into the main working branch → tag `v2.0-prototype` → push branch + tag
