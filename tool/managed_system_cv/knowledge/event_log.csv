@@ -1,1 +1,3 @@
 event_type,last_line,model,version,details
+switch,1,yolo_n,,
+switch,1,yolo_m,,

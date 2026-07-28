@@ -1,0 +1,48 @@
+{
+  "name": "spot_prices",
+  "domain": "regression",
+  "adapter": "adapters.regression_csv.RegressionCSVAdapter",
+  "status": "awaiting_data",
+
+  "data_path": "data/spot_prices/spot_prices.csv",
+  "value_column": "value",
+  "seq_length": 24,
+  "train_frac": 0.60,
+  "val_frac": 0.15,
+  "stream_delay_s": 0.0,
+
+  "models": {
+    "lstm": {
+      "weights_path": "managed_system_regression/models/lstm_spot_prices.pt",
+      "loader": "adapters.loaders.lstm_loader",
+      "cost_class": "medium"
+    },
+    "ridge": {
+      "weights_path": "managed_system_regression/models/ridge_spot_prices.pkl",
+      "loader": "adapters.loaders.sklearn_loader",
+      "cost_class": "light"
+    },
+    "svr": {
+      "weights_path": "managed_system_regression/models/svr_spot_prices.pkl",
+      "loader": "adapters.loaders.sklearn_loader",
+      "cost_class": "medium"
+    }
+  },
+
+  "min_score": 0.50,
+  "max_energy": 0.50,
+  "E_ref": 0.5,
+  "delta": 0.05,
+  "beta": 0.95,
+  "gamma": 0.8,
+  "alpha": 0.1,
+  "E_m": 0,
+  "E_M": 5000000,
+  "tau_drift": 0.05,
+  "drift_reference": "both",
+
+  "planner": "harmone_original",
+  "energy_required": ["cpu"],
+
+  "_comment": "ERCOT day-ahead prices 2019-2022. Structural break at ~2021-02-13 (Winter Storm Uri). HarmonE is EXPECTED to fail here — this is a designed stress test. See docs/datasets/spot_prices.md."
+}

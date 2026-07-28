@@ -1,8 +1,9 @@
 # research/sustainable-mlops/HarmonEXT/mape/plan.py
 import json
 import random
-import logging # <-- Good to add logging
+import logging
 import os
+import time
 from analyse import analyse_mape, analyse_drift
 
 # Define the base directory dynamically based on the script's location
@@ -38,11 +39,24 @@ def plan_mape(trigger="local"):
     """
     Decide on a model switch based on performance analysis, energy constraints,
     and an exploratory strategy.
-    
+
     If trigger == 'acp', it bypasses local analysis.
     """
     # 1. Exploratory Action (Alpha-based random switching)
     thresholds = json.load(open(thresholds_file))
+
+    # L5 anti-thrash cooldown
+    cooldown_s = thresholds.get("switch_cooldown_s", 30)
+    mape_info = load_mape_info()
+    last_switch_ts = mape_info.get("last_switch_ts", 0.0)
+    elapsed = time.time() - last_switch_ts
+    if elapsed < cooldown_s:
+        logging.info(
+            f"[MAPE-PLAN] Cooldown active — last switch {elapsed:.1f}s ago "
+            f"(cooldown={cooldown_s}s). Returning noop."
+        )
+        return None
+
     alpha = thresholds.get("alpha", 0.1)
     if random.random() < alpha:
         chosen = random.choice(MODELS)
@@ -128,28 +142,49 @@ def plan_drift(trigger="local"):
     # --- END OF CHANGE ---
 
     # The analysis already determined the best action (switch_version or retrain)
+    # B2 alignment: analyse_drift() now returns "version" key (not "best_version")
     if drift_analysis.get("action") == "switch_version":
-        version_path = drift_analysis["best_version"]
+        version_path = drift_analysis["version"]
         print(f"[DRIFT-PLAN] Planning to switch to a better-suited previous version: {version_path}")
         return {"action": "switch_version", "version_path": version_path}
-    else: # action == "retrain" or default
+    else:
         print("[DRIFT-PLAN] Drift detected and no suitable version found. Planning to retrain.")
         return {"action": "retrain"}
 
-def plan_simple_switch():
-    """
-    A simple baseline plan: just switch to a different model.
-    Picks one of the *other* available models at random.
-    """
-    logging.info("PLAN (Simple Switch): Triggered by R² baseline.")
+def plan_random_switch(trigger="local"):
+    """Random baseline (A1 rename of plan_simple_switch): picks uniformly at random."""
+    logging.info(f"PLAN (Random Switch): Triggered by {trigger.upper()} baseline.")
     current_model = get_current_model()
-    available_models = ["yolo_n", "yolo_s", "yolo_m"]
-
-    # Remove the current model from the list
-    available_models.remove(current_model)
-
-    # Randomly pick from the remaining two
+    available_models = [m for m in MODELS if m != current_model]
     chosen_model = random.choice(available_models)
+    logging.info(f"PLAN (Random Switch): {current_model.upper()} → {chosen_model.upper()}.")
+    return chosen_model
 
-    logging.info(f"PLAN (Simple Switch): Switching from '{current_model.upper()}' to '{chosen_model.upper()}'.")
+
+# Backward-compat alias
+plan_simple_switch = plan_random_switch
+
+
+def plan_greedy_switch(trigger="local"):
+    """Greedy baseline (S3): always switches to the highest-EMA non-current model."""
+    logging.info(f"PLAN (Greedy Switch): Triggered by {trigger.upper()}.")
+    mape_info = load_mape_info()
+    ema_scores = mape_info.get("ema_scores", {m: 0.5 for m in MODELS})
+    current_model = get_current_model()
+
+    best_alternative = sorted(ema_scores.items(), key=lambda x: x[1], reverse=True)
+    chosen_model = next((m for m, _ in best_alternative if m != current_model), None)
+
+    if not chosen_model:
+        logging.warning("PLAN (Greedy Switch): No alternative models found.")
+        return None
+
+    if chosen_model == current_model:
+        logging.info("PLAN (Greedy Switch): Already on best model.")
+        return None
+
+    logging.info(
+        f"PLAN (Greedy Switch): Best alternative to '{current_model.upper()}' is "
+        f"'{chosen_model.upper()}' (EMA={ema_scores.get(chosen_model, 'N/A')})."
+    )
     return chosen_model

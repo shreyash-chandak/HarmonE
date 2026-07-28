@@ -1,10 +1,13 @@
 import os
+import sys
 import time
 import numpy as np
 import pandas as pd
 from pathlib import Path
 from ultralytics import YOLO
-import pyRAPL
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
+from core.energy import EnergyMeter
 
 # -----------------------
 # CONFIG
@@ -21,10 +24,6 @@ WINDOW = 50    # consecutive images per window
 MAX_IMAGES = 70000  # stop when exceeding 70k
 SAVE_DIR = Path("pilot")
 SAVE_DIR.mkdir(parents=True, exist_ok=True)
-
-# Setup energy meter
-pyRAPL.setup()
-energy_meter = pyRAPL.Measurement("block_eval")
 
 # Collect all image paths
 image_files = sorted([p for p in IMAGES_DIR.glob("*.jpg")])
@@ -93,18 +92,11 @@ for model_name, model_path in MODELS.items():
         if not subset:
             continue
 
-        # Start measurement
-        energy_meter.begin()
-        start_time = time.time()
-
-        # Inference
-        preds = model(subset, verbose=False, save=False)
-
-        total_time = time.time() - start_time
-        energy_meter.end()
-
-        # Energy measurement
-        energy_usage = energy_meter.result.pkg[0] if energy_meter.result.pkg else 0.0
+        with EnergyMeter("block_eval", backend="auto") as _em:
+            start_time = time.time()
+            preds = model(subset, verbose=False, save=False)
+            total_time = time.time() - start_time
+        energy_usage = _em.total_uJ or 0.0
 
         confidences = []
         all_preds_thr = {thr: [] for thr in IOU_THRESHOLDS}

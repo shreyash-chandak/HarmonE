@@ -1,9 +1,14 @@
 import os
+import sys
 import json
 import numpy as np
 import pandas as pd
 from scipy.stats import entropy
 from monitor import monitor_mape, monitor_drift
+
+# Allow importing from tool/core
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
+from core.scoring import update_energy_threshold
 
 # Define the base directory dynamically based on the script's location
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -40,15 +45,20 @@ def analyse_mape():
 
     min_score = thresholds["min_score"]
     original_energy_threshold = thresholds["max_energy"]
+    e_ref = thresholds.get("E_ref", 0.7)
+    delta = thresholds.get("delta", 0.1)
 
     # Load current MAPE info
     mape_info = load_mape_info()
     current_energy_threshold = mape_info.get("current_energy_threshold", original_energy_threshold)
     recovery_cycles = mape_info["recovery_cycles"]
 
-    # Update energy threshold dynamically
+    # B1 fix: Eq. 3 — adaptive threshold (was monotonically increasing, never tightened)
     used_energy = mape_data["normalized_energy"]
-    new_energy_threshold = current_energy_threshold + 0.95 * (original_energy_threshold - used_energy)
+    new_energy_threshold = update_energy_threshold(
+        current_energy_threshold, e_ref, used_energy, delta,
+        lo=0.1, hi=1.0,
+    )
     mape_info["current_energy_threshold"] = new_energy_threshold
 
     # Check if switching is needed
@@ -143,13 +153,28 @@ def get_best_version(model_name):
     return best_version if min_kl_div < 0.75 else None  # Use version if KL is below threshold
 
 def analyse_drift():
-    """Analyze drift & decide if retraining is needed or if an existing version can be used."""
+    """Analyze drift & decide if retraining is needed or if an existing version can be used.
+
+    Return contract (B2 fix — was using "best_version" key, plan_drift reads "action"/"version"):
+      drift not detected → {"drift_detected": False, "action": None, "version": None}
+      drift, VMR hit     → {"drift_detected": True,  "action": "replace", "version": <path>}
+      drift, no VMR      → {"drift_detected": True,  "action": "retrain", "version": None}
+    """
     drift_data = monitor_drift()
     if not drift_data:
         return None
 
     kl_div = drift_data["kl_div"]
-    drift_detected = kl_div > 0.5  #? Threshold for drift detection
+    if kl_div is None:
+        # Warmup period — not enough data for a reliable signal
+        return {"drift_detected": False, "action": None, "version": None}
+
+    # Load tau_drift from config (was hardcoded 0.5)
+    with open(thresholds_file, "r") as f:
+        thresholds = json.load(f)
+    tau_drift = thresholds.get("tau_drift", 0.5)
+
+    drift_detected = kl_div > tau_drift
 
     if drift_detected:
         print(f"🚨 Drift detected! KL divergence = {kl_div:.4f}")
@@ -168,9 +193,9 @@ def analyse_drift():
 
         if best_version:
             print(f"✔ Best version found with lower KL divergence: {best_version}")
-            return {"drift_detected": True, "best_version": best_version}
+            return {"drift_detected": True, "action": "replace", "version": best_version}
 
         # No suitable previous version found → Retrain needed
-        return {"drift_detected": True, "best_version": None}
+        return {"drift_detected": True, "action": "retrain", "version": None}
 
-    return {"drift_detected": False}
+    return {"drift_detected": False, "action": None, "version": None}

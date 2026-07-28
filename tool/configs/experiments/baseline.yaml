@@ -1,0 +1,49 @@
+# configs/experiments/baseline.yaml
+#
+# HarmonE baseline experiment grid: all planners × 2 seeds on pems_node1.
+#
+# Run with:
+#   cd tool
+#   python experiments/run_grid.py configs/experiments/baseline.yaml
+#
+# Then aggregate:
+#   python experiments/metrics.py aggregate --grid-dir runs/baseline --by-planner --out metrics.csv
+#   python experiments/metrics.py latex     --grid-dir runs/baseline --out table.tex
+
+# Datasets to include
+datasets:
+  - pems_node1
+
+# Planners to compare (S1–S6; bandit excluded until implemented)
+planners:
+  - naive
+  - random_switch
+  - greedy_switch
+  - harmone_original
+  - violation_aware
+  - pareto
+
+# Seeds for reproducibility
+seeds:
+  - 1
+  - 2
+
+# MAPE cycle length in number of predictions (shorter than live system for speed)
+monitor_interval: 50
+
+# Cooldown between runs on the same hardware (minutes; 0 for experiments)
+cooldown_minutes: 0
+
+# Where run dirs are created
+runs_dir: runs/baseline
+
+# Skip already-completed runs (safe to re-launch interrupted grids)
+resume: true
+
+# Energy measurement backend:
+#   "null"  — no hardware required (Windows/CI)
+#   "auto"  — use RAPL on Linux if available, else null
+# Override the dataset config's energy_meter key here:
+extra_thresholds:
+  energy_meter: "null"
+  stream_delay_s: 0.0

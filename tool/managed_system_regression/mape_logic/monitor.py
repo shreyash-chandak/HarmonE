@@ -1,3 +1,4 @@
+import sys
 import pandas as pd
 import numpy as np
 from sklearn.metrics import r2_score
@@ -8,6 +9,12 @@ import os
 # Get the absolute path of the current script's directory
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 KNOWLEDGE_DIR = os.path.join(BASE_DIR, "..", "knowledge")
+
+# Allow importing from tool/core
+sys.path.insert(0, os.path.join(BASE_DIR, '..', '..'))
+from core.drift.kl_fixed_ref import KLFixedRefDetector
+from core.drift.kl_rolling import KLRollingDetector
+from core.scoring import update_separated_emas
 
 mape_info_file = os.path.join(KNOWLEDGE_DIR, "mape_info.json")
 thresholds_file = os.path.join(KNOWLEDGE_DIR, "thresholds.json")
@@ -46,66 +53,11 @@ def monitor_mape():
         df = pd.read_csv(predictions_file, skiprows=range(1, last_line + 1))
         df.columns = df.columns.str.strip()
         
-        # If no new data, return cached values based on recent data
+        # L1-c: No new rows since last check — do NOT re-serve stale cached data.
+        # Return fresh=False so the telemetry pusher skips the ACP POST entirely.
         if df.empty:
-            print("📉 No new data to process in predictions.csv, using recent data for telemetry")
-            # Read the last 50 rows to compute current metrics
-            try:
-                recent_df = pd.read_csv(predictions_file).tail(50)
-                recent_df.columns = recent_df.columns.str.strip()
-                
-                if not recent_df.empty and 'energy' in recent_df.columns and 'true_value' in recent_df.columns and 'predicted_value' in recent_df.columns:
-                    r2 = r2_score(recent_df["true_value"], recent_df["predicted_value"])
-                    
-                    # Load thresholds
-                    with open(thresholds_file, "r") as f:
-                        thresholds = json.load(f)
-                    energy_min, energy_max = thresholds["E_m"], thresholds["E_M"]
-                    
-                    # Calculate actual and normalized energy
-                    avg_energy = recent_df["energy"].mean()
-                    if energy_max > energy_min:
-                        energy_normalized = (avg_energy - energy_min) / (energy_max - energy_min)
-                        energy_normalized = max(0.0, min(1.0, energy_normalized))  # Clamp between 0 and 1
-                    else:
-                        energy_normalized = 0.0
-                    
-                    # Use cached EMA score
-                    final_score = info["ema_scores"].get(current_model, 0.5)
-                    
-                    print(f"🔄 Using recent data: R²={r2:.4f}, Actual Energy={avg_energy:.2f}, Normalized Energy={energy_normalized:.4f}, Score={final_score:.4f}")
-                    
-                    # Include event counters in telemetry
-                    event_counters = info.get("event_counters", {
-                        "model_switches": 0,
-                        "retrains": 0, 
-                        "vmr_events": 0,
-                        "mape_k_energy_uJ": 0.0
-                    })
-                    
-                    # Include simple switch counters
-                    simple_switch_counters = info.get("simple_switch_counters", {
-                        "simple_switches": 0
-                    })
-                    
-                    return {
-                        "r2_score": round(r2, 4),
-                        "energy": round(avg_energy, 2),  # Return actual energy for display
-                        "normalized_energy": round(energy_normalized, 4),  # Keep for internal calculations
-                        "score": round(final_score, 4),
-                        "model_used": current_model,
-                        "model_switches": event_counters["model_switches"],
-                        "retrains": event_counters["retrains"],
-                        "vmr_events": event_counters["vmr_events"],
-                        "mape_k_energy_uJ": round(event_counters["mape_k_energy_uJ"], 2),
-                        "simple_switches": simple_switch_counters["simple_switches"]
-                    }
-                else:
-                    print("⚠️ Required columns missing in recent data")
-                    return None
-            except Exception as e:
-                print(f"⚠️ Error reading recent data: {e}")
-                return None
+            print("📉 No new data in predictions.csv — skipping telemetry (inference may have stalled).")
+            return {"fresh": False}
             
     except FileNotFoundError:
         print("⚠️ No predictions.csv file found.")
@@ -140,8 +92,9 @@ def monitor_mape():
     prev_score = info["ema_scores"].get(current_model, 0.5)
     final_score = gamma * model_score + (1 - gamma) * prev_score
 
-    # Update MAPE info
+    # Update MAPE info (combined score + Phase 2.4 separated signals)
     info["ema_scores"][current_model] = final_score
+    update_separated_emas(info, current_model, r2, energy_normalized, gamma)
     info["last_line"] += len(df)
 
     # Log computed values
@@ -182,37 +135,56 @@ def monitor_mape():
     }
 
 def monitor_drift():
-    """Monitor data drift without enforcing immediate retraining."""
+    """Monitor data drift using fixed-reference KL divergence (B3 fix).
+
+    B3 fix: uses KLFixedRefDetector (current ‖ training reference) rather than
+    adjacent-window KL, which cannot detect gradual drift. The rolling signal is
+    also computed and returned as secondary telemetry ("kl_div_rolling").
+
+    B5 fix: returns {"kl_div": None} during warmup instead of a random placeholder
+    that could falsely straddle the ACP secondary threshold.
+    """
+    reference_path = os.path.join(KNOWLEDGE_DIR, "reference_distribution.json")
+
+    with open(thresholds_file, "r") as f:
+        thresholds = json.load(f)
+    tau_drift = thresholds.get("tau_drift", 0.5)
+    drift_ref_mode = thresholds.get("drift_reference", "both")
+
     try:
         df = pd.read_csv(predictions_file)
         df.columns = df.columns.str.strip()
-        
+
         if df.empty:
             print("Drift Monitor: No predictions yet.")
             return None
 
-        window_size = 1200
-        if len(df) >= window_size * 2:
-            reference_window = df['true_value'].iloc[-2*window_size:-window_size]
-            current_window = df['true_value'].iloc[-window_size:]
-            
-            # Calculate KL divergence
-            ref_hist, _ = np.histogram(reference_window, bins=50, density=True)
-            curr_hist, _ = np.histogram(current_window, bins=50, density=True)
-            
-            # Add small epsilon to avoid log(0)
-            ref_hist = ref_hist + 1e-10
-            curr_hist = curr_hist + 1e-10
-            
-            kl_div = entropy(ref_hist, curr_hist)
-            
-            print(f"🌊 Drift: KL={kl_div:.4f}")
-            return {"kl_div": round(kl_div, 4)}
-        else:
-            print(f"Not enough data for drift detection. Have {len(df)} samples, need {window_size * 2}")
-            # Return a placeholder drift value for now
-            return {"kl_div": round(np.random.uniform(0.01, 0.15), 4)}
-    
+        values = df["true_value"].tolist()
+
+        # Fixed-reference detector (primary signal — B3 fix)
+        fixed_detector = KLFixedRefDetector(
+            reference_path=reference_path,
+            tau_drift=tau_drift,
+            window_size=1200,
+            n_bins=50,
+        )
+        fixed_result = fixed_detector.detect(values)
+
+        # Rolling detector (secondary telemetry — paper's original method, retained for comparison)
+        rolling_detector = KLRollingDetector(tau_drift=tau_drift, window_size=1200, n_bins=50)
+        rolling_result = rolling_detector.detect(values)
+
+        kl_primary = fixed_result["kl_div"] if drift_ref_mode != "rolling" else rolling_result["kl_div"]
+        kl_rolling = rolling_result["kl_div"]
+
+        print(f"🌊 Drift: KL_fixed={fixed_result['kl_div']} KL_rolling={kl_rolling}")
+
+        return {
+            "kl_div": kl_primary,
+            "kl_div_rolling": kl_rolling,
+            "drift_detected": fixed_result["drift_detected"],
+        }
+
     except FileNotFoundError:
         print("Drift Monitor: No predictions found.")
         return None

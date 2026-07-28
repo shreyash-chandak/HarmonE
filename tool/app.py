@@ -42,6 +42,19 @@ def get_historical_average(policy_id, metric_key):
     return statistics.mean(metric_values) if metric_values else None
 
 
+def evaluate_boundary(value, condition, threshold):
+    """L4: None-safe boundary evaluation. Returns False when value is None."""
+    if value is None:
+        logging.debug(f"[ANALYZE] Skipping boundary check: value is None (warmup or stalled inference).")
+        return False
+    if condition == "GREATER_THAN":
+        return value > threshold
+    if condition == "LESS_THAN":
+        return value < threshold
+    logging.warning(f"[ANALYZE] Unknown condition '{condition}'. Returning False.")
+    return False
+
+
 def analyze_telemetry(policy, metric_value, metric_key):
     """
     Analyzes telemetry against the policy's primary adaptation boundary.
@@ -54,23 +67,15 @@ def analyze_telemetry(policy, metric_value, metric_key):
 
     violation = False
 
-    # ---- STATIC THRESHOLD CHECK ----
-    if condition == "GREATER_THAN":
-        if metric_value > static_threshold:
-            logging.info(f"[ANALYZE] Static threshold VIOLATED: {metric_value} > {static_threshold}")
-            violation = True
+    # ---- STATIC THRESHOLD CHECK (L4: uses None-safe evaluate_boundary) ----
+    if condition in ("GREATER_THAN", "LESS_THAN"):
+        violation = evaluate_boundary(metric_value, condition, static_threshold)
+        if violation:
+            logging.info(f"[ANALYZE] Static threshold VIOLATED: {metric_value} {condition} {static_threshold}")
         else:
-            logging.info(f"[ANALYZE] Static threshold NOT violated: {metric_value} <= {static_threshold}")
+            if metric_value is not None:
+                logging.info(f"[ANALYZE] Static threshold NOT violated: {metric_value} {condition} {static_threshold}")
             return False
-
-    elif condition == "LESS_THAN":
-        if metric_value < static_threshold:
-            logging.info(f"[ANALYZE] Static threshold VIOLATED: {metric_value} < {static_threshold}")
-            violation = True
-        else:
-            logging.info(f"[ANALYZE] Static threshold NOT violated: {metric_value} >= {static_threshold}")
-            return False
-
     else:
         logging.warning(f"[ANALYZE] Unknown condition '{condition}'. No action taken.")
         return False
@@ -154,60 +159,63 @@ def plan_and_execute(policy, trigger_value, trigger_metric=None):
 # ============================================================
 
 def periodic_secondary_checks(interval=30):
-    """
-    Periodically evaluate secondary boundaries (like KL divergence)
-    even when the primary metric (score) violates often.
+    """L4: Periodically evaluate secondary boundaries (KL divergence).
+
+    Thread is resilient — a bad payload logs and continues rather than dying.
+    Heartbeat logged every iteration so a dead thread is detectable.
     """
     logging.info(f"[SECONDARY] Starting periodic evaluator every {interval}s")
+    iteration = 0
 
     while True:
         time.sleep(interval)
+        iteration += 1
+        logging.debug(f"[SECONDARY] Heartbeat iteration {iteration}")
 
-        for policy_id, policy in KNOWLEDGE_BASE["policies"].items():
-
-            secondary = policy.get("secondary_boundaries", [])
-            if not secondary:
-                continue
-
-            telemetry_history = KNOWLEDGE_BASE["telemetry_data"].get(policy_id, [])
-            if not telemetry_history:
-                continue
-
-            latest = telemetry_history[-1]
-
-            for sec in secondary:
-                qa = sec["quality_attribute"]
-                if qa not in latest:
+        for policy_id, policy in list(KNOWLEDGE_BASE["policies"].items()):
+            try:
+                secondary = policy.get("secondary_boundaries", [])
+                if not secondary:
                     continue
 
-                value = latest[qa]
-                condition = sec["condition"]
-                threshold = sec["threshold"]
-                tactic_id = sec["tactic_id"]
+                telemetry_history = KNOWLEDGE_BASE["telemetry_data"].get(policy_id, [])
+                if not telemetry_history:
+                    continue
 
-                violated = (
-                    (condition == "GREATER_THAN" and value > threshold)
-                    or
-                    (condition == "LESS_THAN" and value < threshold)
+                latest = telemetry_history[-1]
+
+                for sec in secondary:
+                    qa = sec["quality_attribute"]
+                    value = latest.get(qa)  # None during warmup (B5 fix)
+                    condition = sec["condition"]
+                    threshold = sec["threshold"]
+                    tactic_id = sec["tactic_id"]
+
+                    # L4: None-safe check; skips warmup period silently
+                    if value is None:
+                        logging.debug(
+                            f"[SECONDARY] Skipping boundary check for '{qa}': "
+                            f"value is None (warmup or stalled inference)."
+                        )
+                        continue
+
+                    violated = evaluate_boundary(value, condition, threshold)
+
+                    if violated:
+                        logging.info(f"[SECONDARY] KL DRIFT DETECTED: {qa}={value} {condition} {threshold}")
+
+                        endpoint = policy["tactics"][0]["tactic_endpoint"]
+                        drift_policy = {
+                            "policy_id": policy_id,
+                            "tactics": [{"tactic_id": tactic_id, "priority": 1, "tactic_endpoint": endpoint}],
+                        }
+                        plan_and_execute(drift_policy, value, qa)
+
+            except Exception:
+                # L4: thread survives bad payloads — logs full traceback and continues
+                logging.exception(
+                    f"[SECONDARY] Error evaluating policy '{policy_id}' — continuing."
                 )
-
-                if violated:
-                    logging.info(f"[SECONDARY] KL DRIFT DETECTED: {qa}={value} {condition} {threshold}")
-
-                    endpoint = policy["tactics"][0]["tactic_endpoint"]
-
-                    drift_policy = {
-                        "policy_id": policy_id,
-                        "tactics": [
-                            {
-                                "tactic_id": tactic_id,
-                                "priority": 1,
-                                "tactic_endpoint": endpoint
-                            }
-                        ]
-                    }
-
-                    plan_and_execute(drift_policy, value, qa)
 
 # ============================================================
 # ---------------------- API ENDPOINTS ------------------------

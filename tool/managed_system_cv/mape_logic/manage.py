@@ -1,8 +1,9 @@
 import threading
 import time
-import pyRAPL
 import csv
 import os
+import sys
+import json
 import pandas as pd
 import logging
 
@@ -10,18 +11,30 @@ import logging
 # Make sure your execute.py has all three of these
 from execute import execute_mape, execute_drift, execute_simple_switch
 
-pyRAPL.setup()
+# Make core/ importable
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+from core.energy import EnergyMeter
 
 # --- File Paths ---
 # Define the base directory dynamically based on the script's location
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 KNOWLEDGE_DIR = os.path.join(BASE_DIR, "..", "knowledge")
 
+# Load energy backend from thresholds
+try:
+    with open(os.path.join(KNOWLEDGE_DIR, "thresholds.json")) as _tf:
+        _thresholds = json.load(_tf)
+except Exception:
+    _thresholds = {}
+_energy_backend = _thresholds.get("energy_meter", "auto")
+
 log_file = os.path.join(KNOWLEDGE_DIR, "mape_log.csv")
 predictions_file = os.path.join(KNOWLEDGE_DIR, "predictions.csv")
 drift_file = os.path.join(KNOWLEDGE_DIR, "drift.csv")
 COMMAND_FILE_PATH = os.path.join(KNOWLEDGE_DIR, "command.txt")
 config_file = os.path.join("approach.conf")
+
+_CMD_MAX_AGE_S = 30
 
 # --- Setup Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [CV-Manage] - %(levelname)s - %(message)s')
@@ -79,28 +92,51 @@ def execute_tactic_locally(tactic_id):
     """
     logging.info(f"Command '{tactic_id}' received. Triggering local CV logic...")
     
-    # Measure energy of the execution
-    meter = pyRAPL.Measurement(tactic_id)
-    meter.begin()
-    
-    # These IDs must match your policies in the /policies folder
-    if tactic_id == "execute_mape_plan":
-        execute_mape(trigger="acp") # <-- Pass "acp" trigger
-        
-    elif tactic_id == "handle_data_drift":
-        # execute_drift(trigger="acp") # <-- Pass "acp" trigger
-        pass
+    with EnergyMeter(tactic_id, backend=_energy_backend) as _em:
+        # These IDs must match your policies in the /policies folder
+        if tactic_id == "execute_mape_plan":
+            execute_mape(trigger="acp")
 
-    elif tactic_id == "switch_model_r2_baseline":
-        # execute_simple_switch(trigger="acp") # <-- Pass "acp" trigger
-        execute_mape(trigger="acp")
+        elif tactic_id == "handle_data_drift":
+            # execute_drift(trigger="acp")
+            pass
 
-    else:
-        logging.warning(f"Unknown local tactic_id: '{tactic_id}'")
+        elif tactic_id == "switch_model_r2_baseline":
+            execute_mape(trigger="acp")
 
-    meter.end()
-    energy_used = meter.result.pkg[0] if meter.result.pkg else 0.0
-    log_energy(tactic_id, energy_used)
+        else:
+            logging.warning(f"Unknown local tactic_id: '{tactic_id}'")
+
+    log_energy(tactic_id, _em.total_uJ or 0.0)
+
+def _clear_stale_command() -> None:
+    """L2-a: truncate command.txt on startup to prevent cross-session replay."""
+    if os.path.exists(COMMAND_FILE_PATH):
+        open(COMMAND_FILE_PATH, "w").close()
+        logging.info("Cleared stale command.txt from previous session.")
+
+
+def _parse_and_validate_command(raw: str) -> "str | None":
+    """L2-c: parse 'tactic_id|unix_ts' and reject commands older than _CMD_MAX_AGE_S."""
+    if not raw:
+        return None
+    if '|' not in raw:
+        logging.warning("Received legacy command without timestamp — discarding (L2-c).")
+        return None
+    tactic_id, ts_str = raw.rsplit('|', 1)
+    tactic_id = tactic_id.strip()
+    try:
+        age = time.time() - float(ts_str)
+        if age > _CMD_MAX_AGE_S:
+            logging.warning(
+                f"Discarding stale command '{tactic_id}' (age {age:.1f}s > {_CMD_MAX_AGE_S}s)."
+            )
+            return None
+    except ValueError:
+        logging.warning(f"Bad timestamp in command '{raw}' — discarding.")
+        return None
+    return tactic_id
+
 
 # --- NEW: ACP-Driven Command Listener ---
 def acp_command_listener():
@@ -113,19 +149,20 @@ def acp_command_listener():
         if os.path.exists(COMMAND_FILE_PATH):
             try:
                 with open(COMMAND_FILE_PATH, 'r') as f:
-                    tactic_id = f.read().strip()
+                    raw = f.read().strip()
                 os.remove(COMMAND_FILE_PATH)
-                
+
+                tactic_id = _parse_and_validate_command(raw)
                 if tactic_id:
                     logging.info(f"Received command '{tactic_id}' from ACP Wrapper.")
                     execute_tactic_locally(tactic_id)
-                
+
             except Exception as e:
                 logging.error(f"Error processing command file: {e}")
                 if os.path.exists(COMMAND_FILE_PATH):
-                    os.remove(COMMAND_FILE_PATH) # Clear bad/corrupt command
-                    
-        time.sleep(1) # Poll for command file every second
+                    os.remove(COMMAND_FILE_PATH)
+
+        time.sleep(1)
 
 # --- Configuration Loader (Unchanged) ---
 def get_approach_config():
@@ -138,6 +175,7 @@ def get_approach_config():
 
 # --- REVISED: Main Execution Logic ---
 if __name__ == "__main__":
+    _clear_stale_command()  # L2-a: clear any leftover command from a previous session
     approach = get_approach_config()
     logging.info(f"Running config: {approach}")
 

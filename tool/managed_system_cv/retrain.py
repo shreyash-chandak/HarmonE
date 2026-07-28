@@ -8,12 +8,13 @@ from ultralytics import YOLO
 from pathlib import Path
 from PIL import Image
 from tqdm import tqdm
-import pyRAPL
 import csv
 
-# Add utility path to import drift utils
+# Add utility and core paths
 import sys
 sys.path.append(os.path.abspath(os.path.dirname(__file__)))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from core.energy import EnergyMeter
 from utility.drift_utils import luminance_histogram
 from torchvision.transforms.functional import adjust_brightness
 
@@ -152,10 +153,58 @@ def create_augmented_retrain_set(image_paths, label_dir, drift_type):
     avg_hist = (total_hist / images_processed) if images_processed > 0 else None
     return avg_hist
 
+def _save_embedding_signature(thresholds: dict, version_base_name: str) -> None:
+    """Compute and save an embedding signature for a newly-stored model version (§5.4).
+
+    Reads the current embedding window from EmbeddingStore, computes mean and
+    diagonal covariance, and writes {version_base_name}_emb_sig.json to versionedMR/.
+    Signature format: {"type": "embedding", "mean": [...], "cov_diag": [...],
+                        "model": embedding_model_name, "dim": D}
+    """
+    emb_model_name = thresholds.get("embedding_model", "")
+    emb_dim = thresholds.get("embedding_dim")
+    drift_window = int(thresholds.get("drift_window_size", 500))
+    if not emb_model_name or not emb_dim:
+        print(f"[RETRAIN] §5.4 embedding_model/embedding_dim not configured; skipping emb signature.")
+        return
+
+    try:
+        from core.drift.embedding_store import EmbeddingStore
+        store = EmbeddingStore(str(KNOWLEDGE_DIR), embedding_dim=emb_dim, drift_window=drift_window)
+        window = store.last_window(drift_window)  # (N, D) or None
+    except Exception as exc:
+        print(f"[RETRAIN] §5.4 Could not load EmbeddingStore: {exc}; skipping signature.")
+        return
+
+    if window is None:
+        print(f"[RETRAIN] §5.4 EmbeddingStore underfilled; skipping emb signature for {version_base_name}.")
+        return
+
+    mean = window.mean(axis=0).tolist()                   # (D,)
+    cov_diag = window.var(axis=0).tolist()                # (D,) diagonal only
+
+    sig = {
+        "type": "embedding",
+        "mean": mean,
+        "cov_diag": cov_diag,
+        "model": emb_model_name,
+        "dim": int(emb_dim),
+    }
+    sig_path = VERSIONED_DIR / f"{version_base_name}_emb_sig.json"
+    with open(sig_path, "w") as f:
+        json.dump(sig, f, indent=4)
+    print(f"✔ §5.4 Saved embedding signature to {sig_path.name} (dim={emb_dim}, n={len(window)})")
+
+
 # --- MAIN RETRAIN FUNCTION ---
 
 def retrain_yolo():
-    pyRAPL.setup()
+    try:
+        with open(KNOWLEDGE_DIR / "thresholds.json") as _tf:
+            _rt_thresholds = json.load(_tf)
+    except Exception:
+        _rt_thresholds = {}
+    _rt_energy_backend = _rt_thresholds.get("energy_meter", "auto")
 
     try:
         with open(KNOWLEDGE_DIR / "model.csv", "r") as f:
@@ -218,17 +267,13 @@ names: {{ {', '.join([f'{i}: {i}' for i in range(80)])} }}
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"✅ Fine-tuning setup complete. Trainable parameters: {trainable_params}")
 
-    meter = pyRAPL.Measurement("model_training")
-    meter.begin()
+    with EnergyMeter("model_training", backend=_rt_energy_backend) as _em:
+        model.train(
+            data=train_yaml_path, epochs=5, imgsz=640,
+            batch=4 if model_name == "yolo_n" else (1 if model_name == "yolo_m" else 2),
+            workers=2, patience=3, pretrained=True, cache="disk")
 
-    model.train(
-        data=train_yaml_path, epochs=5, imgsz=640,
-        batch=4 if model_name == "yolo_n" else (1 if model_name == "yolo_m" else 2),
-        workers=2, patience=3, pretrained=True, cache="disk")
-
-    meter.end()
-
-    energy_used = meter.result.pkg[0] if meter.result.pkg else 0.0
+    energy_used = _em.total_uJ or 0.0
     log_energy(model_name, energy_used)
     print(f"⚡ Energy consumed for training: {energy_used} uJ")
 
@@ -242,6 +287,11 @@ names: {{ {', '.join([f'{i}: {i}' for i in range(80)])} }}
         json.dump({"average_histogram": avg_retrain_hist.tolist()}, f, indent=4)
     print(f"✔ Saved versioned model to {versioned_model_path}")
     print(f"✔ Saved versioned histogram to {versioned_hist_path}")
+
+    # §5.4 Embedding signature for embedding-primary configs
+    _EMBEDDING_DETECTORS = {"mmd_embedding", "frechet_embedding"}
+    if _rt_thresholds.get("drift_detector", "luminance_kl") in _EMBEDDING_DETECTORS:
+        _save_embedding_signature(_rt_thresholds, new_version_base_name)
 
     active_model_path = ACTIVE_MODELS_DIR / f"{model_name}.pt"
     shutil.copy(versioned_model_path, active_model_path)

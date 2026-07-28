@@ -1,0 +1,77 @@
+{
+  "_comment_purpose": "Dataset config template. Copy, rename, and fill all fields. Remove _comment_* keys.",
+  "_comment_required_vs_optional": "Keys marked REQUIRED must be present. OPTIONAL keys have defaults shown.",
+
+  "name": "REQUIRED: short identifier used in run directories and experiment configs, e.g. pems_node1",
+  "domain": "REQUIRED: 'regression' or 'cv'",
+  "adapter": "REQUIRED: adapter class to use, e.g. 'adapters.regression_csv.RegressionCSVAdapter'",
+
+  "_comment_data": "== DATA PATHS ==",
+  "data_path": "REQUIRED (regression): path to the CSV file, relative to this config file or absolute",
+  "image_dir": "REQUIRED (cv): path to image directory or manifest CSV",
+  "value_column": "REQUIRED (regression): name of the column to predict",
+  "seq_length": "OPTIONAL (regression): sliding window length in timesteps (default: 5)",
+  "train_frac": "OPTIONAL: fraction of data used for training (default: 0.8)",
+  "val_frac": "OPTIONAL: fraction of data used for validation / proxy calibration (default: 0.0)",
+  "stream_delay_s": "OPTIONAL: seconds to sleep between streaming steps, for real-time simulation (default: 0.0)",
+
+  "_comment_models": "== MODEL CATALOGUE ==",
+  "models": {
+    "model_name_1": {
+      "_comment": "Key = model name used in model.csv, ema_scores, and event log",
+      "weights_path": "REQUIRED: path to weights file (absolute or relative to config)",
+      "loader": "REQUIRED: dotted module path to a load() function, e.g. 'adapters.loaders.lstm_loader'",
+      "cost_class": "OPTIONAL: 'light' | 'medium' | 'heavy' — qualitative energy tier (default: 'medium')"
+    }
+  },
+
+  "_comment_thresholds": "== SCORING THRESHOLDS (override knowledge/thresholds.json via adapter) ==",
+  "min_score": "OPTIONAL: minimum acceptable HarmonE score (default from thresholds.json)",
+  "max_energy": "OPTIONAL: initial energy threshold upper bound (default from thresholds.json)",
+  "E_ref": "OPTIONAL: reference normalised energy for Eq.3 threshold update (default: 0.7)",
+  "delta": "OPTIONAL: step size for Eq.3 threshold update (default: 0.1)",
+  "beta": "OPTIONAL: accuracy weight in score formula (default: 0.95)",
+  "gamma": "OPTIONAL: EMA smoothing factor (default: 0.8)",
+  "alpha": "OPTIONAL: epsilon-greedy exploration probability (default: 0.1)",
+  "E_m": "OPTIONAL: minimum raw energy µJ for normalisation (default: 0)",
+  "E_M": "OPTIONAL: maximum raw energy µJ for normalisation (CALIBRATE per hardware+dataset)",
+  "tau_drift": "OPTIONAL: KL divergence threshold for drift detection (CALIBRATE per dataset)",
+  "drift_reference": "OPTIONAL: 'fixed' | 'rolling' | 'both' (default: 'both')",
+
+  "_comment_cv_task": "== CV TASK KEYS (cv domain only) ==",
+  "task": "OPTIONAL (cv): 'detection' | 'classification' | 'segmentation' (default: 'detection')",
+  "task_adapter": "OPTIONAL (cv): dotted class path for the TaskAdapter (default resolved from task)",
+  "num_classes": "OPTIONAL (cv classification/segmentation): number of output classes",
+  "ignore_index": "OPTIONAL (cv segmentation): pixel label value to ignore in mIoU (default: 255)",
+  "embedding_model": "OPTIONAL (cv): model name used ONLY for drift embedding extraction (R4 — pinned regardless of active inference model; default: lightest model in spectrum)",
+  "embedding_dim": "OPTIONAL (cv): expected embedding vector dimension. Validated on first extraction.",
+  "embedding_sample_every": "OPTIONAL (cv): extract embedding every N frames (default: 1; set >1 to reduce overhead)",
+  "drift_window_size": "OPTIONAL (cv): number of embeddings in drift detection window (default: 500)",
+  "pseudo_label_threshold": "OPTIONAL (cv pseudo_label tactic): minimum confidence for pseudo-label acceptance (default: 0.5)",
+  "rollback_if_worse": "OPTIONAL (cv): rollback new weights if proxy score drops after retrain (default: true)",
+
+  "_comment_planner": "== PLANNER ==",
+  "planner": "OPTIONAL: planner strategy name (default: 'harmone_original'). Options: naive, random_switch, greedy_switch, harmone_original, violation_aware, pareto, bandit",
+  "w_acc": "OPTIONAL (pareto): accuracy weight in Chebyshev distance (default: 1.0)",
+  "w_e": "OPTIONAL (pareto): energy weight in Chebyshev distance (default: 1.0)",
+  "ema_head_start": "OPTIONAL (cv): EMA boost applied after VMR deploy (default: 0.1; set 0 to disable)",
+
+  "_comment_drift_induction": "== DRIFT INDUCTION (optional, for experiments with synthetic drift) ==",
+  "induced_drift": {
+    "_comment": "Remove this block entirely if no drift induction is needed",
+    "type": "'shift' | 'scale' | 'shift_scale' (regression) | 'brightness' | 'contrast' (cv)",
+    "start_frac": "Fraction of stream at which drift begins (e.g. 0.5 = halfway through)",
+    "end_frac": "Fraction of stream at which drift ends (e.g. 1.0 = until end of stream)",
+    "shift": "Additive shift amount (regression shift/shift_scale only)",
+    "scale": "Multiplicative scale factor (regression scale/shift_scale only)",
+    "strength": "Drift strength 0–1 (cv only)"
+  },
+
+  "_comment_energy": "== ENERGY CALIBRATION ==",
+  "energy_required": ["cpu"],
+  "_comment_energy_required": "List of required energy backends: ['cpu'] or ['cpu','gpu']. Runs missing a required backend are flagged energy_valid=false.",
+
+  "_comment_splits": "== CHRONOLOGICAL SPLIT BOUNDARIES (override train_frac/val_frac with explicit indices) ==",
+  "train_end_index": "OPTIONAL: absolute row index for end of training split (overrides train_frac)",
+  "val_end_index": "OPTIONAL: absolute row index for end of validation split (overrides val_frac)"
+}

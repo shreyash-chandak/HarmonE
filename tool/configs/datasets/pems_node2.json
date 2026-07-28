@@ -1,0 +1,48 @@
+{
+  "name": "pems_node2",
+  "domain": "regression",
+  "adapter": "adapters.regression_csv.RegressionCSVAdapter",
+  "status": "awaiting_data",
+
+  "data_path": "data/pems_node2/pems_node2.csv",
+  "value_column": "value",
+  "seq_length": 5,
+  "train_frac": 0.8,
+  "val_frac": 0.1,
+  "stream_delay_s": 0.0,
+
+  "models": {
+    "lstm": {
+      "weights_path": "managed_system_regression/models/lstm_pems_node2.pt",
+      "loader": "adapters.loaders.lstm_loader",
+      "cost_class": "medium"
+    },
+    "ridge": {
+      "weights_path": "managed_system_regression/models/ridge_pems_node2.pkl",
+      "loader": "adapters.loaders.sklearn_loader",
+      "cost_class": "light"
+    },
+    "svr": {
+      "weights_path": "managed_system_regression/models/svr_pems_node2.pkl",
+      "loader": "adapters.loaders.sklearn_loader",
+      "cost_class": "medium"
+    }
+  },
+
+  "min_score": 0.50,
+  "max_energy": 0.50,
+  "E_ref": 0.5,
+  "delta": 0.05,
+  "beta": 0.95,
+  "gamma": 0.8,
+  "alpha": 0.1,
+  "E_m": 0,
+  "E_M": 5000000,
+  "tau_drift": 0.05,
+  "drift_reference": "both",
+
+  "planner": "harmone_original",
+  "energy_required": ["cpu"],
+
+  "_comment": "Calibrate E_M and tau_drift per hardware after downloading data. See docs/datasets/pems_node2.md."
+}
