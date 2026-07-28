@@ -1,17 +1,29 @@
+# tool/.gitignore — tool-subdirectory overrides.
+# The root .gitignore covers Python cache, venvs, OS files, experiment runs,
+# and all knowledge runtime state.  Only tool-specific additions live here.
+
+# Virtual environments inside tool/
 venv/
 venv311/
 harmone_env/
-managed_system_custom
-managed_system_cv/knowledge/inferences
 
-compiledir.py
-combined_output.txt
-
+# Compiled Python (belt-and-suspenders; root .gitignore already covers these)
 __pycache__/
 *.pyc
 
+# Secrets
 .env
+
+# OS
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
+
+# Tool-specific scratch
+compiledir.py
+combined_output.txt
+
+# managed_system_cv: CV-specific runtime artefacts
+managed_system_cv/knowledge/inferences/
+managed_system_custom/

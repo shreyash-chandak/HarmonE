@@ -23,6 +23,8 @@ LOG_FILE = os.path.join(KNOWLEDGE_DIR, "mape_log.csv")
 PREDICTIONS_FILE = os.path.join(KNOWLEDGE_DIR, "predictions.csv")
 DRIFT_FILE = os.path.join(KNOWLEDGE_DIR, "drift.csv")
 
+_CMD_MAX_AGE_S = 30  # discard commands older than this
+
 # --- Local Tactic Execution ---
 # def execute_tactic_locally(tactic_id):
 #     """Executes the correct local logic based on the tactic_id."""
@@ -60,27 +62,58 @@ def run_mape_loop(approach):
         logging.info("Running in 'harmone_acp' mode. Listening for commands...")
         while True:
             try:
-                # Check for the command file created by the wrapper
                 if os.path.exists(COMMAND_FILE_PATH):
                     with open(COMMAND_FILE_PATH, 'r') as f:
-                        tactic_id = f.read().strip()
-                    
-                    # Command processed, delete the file so it doesn't run again
+                        raw = f.read().strip()
                     os.remove(COMMAND_FILE_PATH)
-                    
+
+                    tactic_id = _parse_and_validate_command(raw)
                     if tactic_id:
                         execute_tactic_locally(tactic_id)
-                        
+
             except FileNotFoundError:
-                # This is normal, means the file was deleted before we could read it
-                pass 
+                pass
             except Exception as e:
                 logging.error(f"Error in ACP command loop: {e}")
-                
-            time.sleep(5) # Check for a new command every 5 seconds
+
+            time.sleep(5)
     else:
         logging.info(f"Mode '{approach}' requires no local MAPE loop. Exiting.")
-        
+
+
+def _clear_stale_command() -> None:
+    """L2-a: truncate command.txt on startup to prevent cross-session replay."""
+    if os.path.exists(COMMAND_FILE_PATH):
+        open(COMMAND_FILE_PATH, "w").close()
+        logging.info("Cleared stale command.txt from previous session.")
+
+
+def _parse_and_validate_command(raw: str) -> str | None:
+    """L2-c: parse 'tactic_id|unix_ts' and reject commands older than _CMD_MAX_AGE_S.
+
+    Legacy format (no pipe) is treated as expired — safe default.
+    Returns the tactic_id string if fresh, else None.
+    """
+    if not raw:
+        return None
+    if '|' not in raw:
+        logging.warning("Received legacy command without timestamp — discarding (L2-c).")
+        return None
+    tactic_id, ts_str = raw.rsplit('|', 1)
+    tactic_id = tactic_id.strip()
+    try:
+        age = time.time() - float(ts_str)
+        if age > _CMD_MAX_AGE_S:
+            logging.warning(
+                f"Discarding stale command '{tactic_id}' (age {age:.1f}s > {_CMD_MAX_AGE_S}s)."
+            )
+            return None
+    except ValueError:
+        logging.warning(f"Bad timestamp in command '{raw}' — discarding.")
+        return None
+    return tactic_id
+
+
 def execute_tactic_locally(tactic_id):
     """Executes the correct local logic based on the tactic_id."""
     logging.info(f"Command '{tactic_id}' received. Triggering local logic...")
@@ -102,12 +135,14 @@ def execute_tactic_locally(tactic_id):
 
 # --- Startup ---
 if __name__ == "__main__":
+    _clear_stale_command()  # L2-a: clear any leftover command from a previous session
+
     try:
         with open(APPROACH_CONFIG_FILE, 'r') as f:
             approach = f.read().strip().lower()
     except FileNotFoundError:
         logging.error(f"'{APPROACH_CONFIG_FILE}' not found. Cannot start.")
         sys.exit(1)
-        
+
     run_mape_loop(approach)
 

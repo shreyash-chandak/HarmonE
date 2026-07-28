@@ -6,14 +6,26 @@
         "yolo_s": 0.55,
         "yolo_m": 0.57
     },
+    "ema_accuracy": {
+        "yolo_n": 0.5,
+        "yolo_s": 0.5,
+        "yolo_m": 0.5
+    },
+    "ema_energy": {
+        "yolo_n": 0.5,
+        "yolo_s": 0.5,
+        "yolo_m": 0.5
+    },
     "recovery_cycles": 0,
     "event_counters": {
-        "model_switches": 0,
+        "model_switches": 2,
         "retrains": 0,
         "vmr_events": 0,
-        "mape_k_energy_uJ": 0.0
+        "mape_k_energy_uJ": 40998.0,
+        "noops": 0
     },
     "simple_switch_counters": {
         "simple_switches": 0
-    }
+    },
+    "hil_events": []
 }

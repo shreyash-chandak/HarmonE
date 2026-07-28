@@ -1,7 +1,7 @@
 import os
+import sys
 import time
 import pandas as pd
-import pyRAPL
 import torch
 import shutil
 from pathlib import Path
@@ -11,6 +11,9 @@ import numpy as np
 import json
 from tqdm import tqdm
 
+# Make core/ importable when this script runs from managed_system_cv/
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from core.energy import EnergyMeter
 from utility.drift_utils import luminance_histogram
 
 # Setup directories
@@ -19,9 +22,13 @@ os.makedirs("models", exist_ok=True)
 os.makedirs("versionedMR", exist_ok=True)
 os.makedirs("knowledge/inferences", exist_ok=True)
 
-# Setup PyRAPL
-pyRAPL.setup()
-energy_meter = pyRAPL.Measurement("inference")
+# Load energy backend from thresholds
+try:
+    with open("knowledge/thresholds.json") as _tf:
+        _inf_thresholds = json.load(_tf)
+except Exception:
+    _inf_thresholds = {}
+_energy_backend = _inf_thresholds.get("energy_meter", "auto")
 
 # Output file for inference results
 results_file = "knowledge/predictions.csv"
@@ -52,6 +59,28 @@ MODEL_PATHS = {
     "yolo_s": "models/yolo_s.pt",
     "yolo_m": "models/yolo_m.pt"    
 }
+
+# L3: GPU compatibility guard — fail fast with a clear message instead of
+# crashing mid-warmup with AcceleratorError.
+if torch.cuda.is_available():
+    cc = torch.cuda.get_device_capability(0)
+    arch_list = torch.cuda.get_arch_list()  # e.g. ['sm_50', 'sm_60', ..., 'sm_90']
+    target_sm = f"sm_{cc[0]}{cc[1]}"
+    # Accept if the exact SM is listed, or if a higher SM is (forward compat)
+    supported = any(
+        a == target_sm or (a.startswith("sm_") and int(a[3:]) >= cc[0] * 10 + cc[1])
+        for a in arch_list
+    )
+    if not supported:
+        raise RuntimeError(
+            f"Installed torch has no kernels for this GPU "
+            f"(compute capability {cc[0]}.{cc[1]} / {target_sm}). "
+            f"Supported arches: {arch_list}. "
+            f"Reinstall PyTorch with a CUDA build that includes {target_sm}. "
+            f"See live-run-report.md §L3 for instructions (cu129 or cu133)."
+        )
+    print(f"✔ GPU: {torch.cuda.get_device_name(0)} (cc {cc[0]}.{cc[1]}) — "
+          f"torch {torch.__version__} supports {target_sm}.")
 
 print("--- Initializing Model Versions ---")
 REF_IMAGE_DIR = Path("data/bdd100k/images/test")
@@ -100,12 +129,11 @@ for i, image_path in enumerate(image_files):
     print(f"[{i+1}/{len(image_files)}] Running inference on {image_path.name} with model {chosen_model.upper()}...")
     model = YOLO(model_path)
     
-    energy_meter.begin()
-    start_time = time.time()
-    results = model(image_path, verbose=False)
-    inference_time = time.time() - start_time
-    energy_meter.end()
-    energy_usage_uJ = energy_meter.result.pkg[0] if energy_meter.result.pkg else 0.0
+    with EnergyMeter("inference", backend=_energy_backend) as _em:
+        start_time = time.time()
+        results = model(image_path, verbose=False)
+        inference_time = time.time() - start_time
+    energy_usage_uJ = _em.total_uJ or 0.0
 
     boxes = results[0].boxes
     top_conf = float(boxes.conf.mean().item()) if boxes is not None and len(boxes.conf) > 0 else 0.0

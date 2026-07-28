@@ -1,4 +1,3 @@
-# research/sustainable-mlops/HarmonEXT/mape/analyse.py
 import os
 import json
 import re
@@ -9,6 +8,10 @@ import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from utility.drift_utils import kl_divergence
 from monitor import monitor_mape, monitor_drift
+
+# Allow importing from tool/core
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..')))
+from core.scoring import update_energy_threshold
 
 # Define the base directory dynamically based on the script's location
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -22,7 +25,6 @@ drift_kl_file = os.path.join(KNOWLEDGE_DIR, "drift_kl.json")
 versioned_dir = "versionedMR"
 
 ALL_MODELS = ["yolo_n", "yolo_s", "yolo_m"]
-DRIFT_THRESHOLD = 0.07
 
 def load_mape_info():
     """Load stored MAPE info including energy threshold and recovery cycles."""
@@ -52,13 +54,19 @@ def analyse_mape():
     thresholds = json.load(open(thresholds_file))
     min_score = thresholds["min_score"]
     original_energy_threshold = thresholds["max_energy"]
+    e_ref = thresholds.get("E_ref", 0.5)
+    delta = thresholds.get("delta", 0.05)
 
     mape_info = load_mape_info()
     current_energy_threshold = mape_info.get("current_energy_threshold", original_energy_threshold)
     recovery_cycles = mape_info.get("recovery_cycles", 0)
 
+    # B1 fix: Eq. 3 — adaptive threshold (was monotonically increasing, never tightened)
     used_energy_norm = data["normalized_energy"]
-    new_energy_threshold = current_energy_threshold + 0.4 * (original_energy_threshold - used_energy_norm)
+    new_energy_threshold = update_energy_threshold(
+        current_energy_threshold, e_ref, used_energy_norm, delta,
+        lo=0.1, hi=1.0,
+    )
     mape_info["current_energy_threshold"] = new_energy_threshold
 
     switch_needed = False
@@ -129,11 +137,18 @@ def analyse_drift():
         return None
 
     kl_div = drift["kl_div"]
-    if kl_div <= DRIFT_THRESHOLD:
-        print(f"[DRIFT] No significant drift detected. KL ({kl_div:.4f}) <= {DRIFT_THRESHOLD}")
-        return {"drift_detected": False}
+    if kl_div is None:
+        print("[DRIFT] Warmup period — insufficient data for drift detection.")
+        return {"drift_detected": False, "action": None, "version": None}
 
-    print(f"[DRIFT] Drift detected! KL ({kl_div:.4f}) > {DRIFT_THRESHOLD}")
+    thresholds = json.load(open(thresholds_file))
+    tau_drift = thresholds.get("tau_drift", 0.07)
+
+    if kl_div <= tau_drift:
+        print(f"[DRIFT] No significant drift detected. KL ({kl_div:.4f}) <= {tau_drift}")
+        return {"drift_detected": False, "action": None, "version": None}
+
+    print(f"[DRIFT] Drift detected! KL ({kl_div:.4f}) > {tau_drift}")
 
     # --- Drift is detected, now find the best possible version across ALL models ---
     try:
@@ -173,9 +188,9 @@ def analyse_drift():
         }, f, indent=4)
 
     # Decide on the final action
-    if overall_min_kl_div < DRIFT_THRESHOLD:
+    if overall_min_kl_div < tau_drift:
         print(f"[DRIFT] Found suitable version across all models: {overall_best_version_path} (KL={overall_min_kl_div:.4f})")
-        return {"drift_detected": True, "best_version": overall_best_version_path, "action": "switch_version"}
+        return {"drift_detected": True, "action": "switch_version", "version": overall_best_version_path}
     else:
         print("[DRIFT] No suitable previous version found across any model type. A full retrain is needed.")
-        return {"drift_detected": True, "best_version": None, "action": "retrain"}
+        return {"drift_detected": True, "action": "retrain", "version": None}

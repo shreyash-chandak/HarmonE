@@ -8,12 +8,13 @@ from ultralytics import YOLO
 from pathlib import Path
 from PIL import Image
 from tqdm import tqdm
-import pyRAPL
 import csv
 
-# Add utility path to import drift utils
+# Add utility and core paths
 import sys
 sys.path.append(os.path.abspath(os.path.dirname(__file__)))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from core.energy import EnergyMeter
 from utility.drift_utils import luminance_histogram
 from torchvision.transforms.functional import adjust_brightness
 
@@ -155,7 +156,12 @@ def create_augmented_retrain_set(image_paths, label_dir, drift_type):
 # --- MAIN RETRAIN FUNCTION ---
 
 def retrain_yolo():
-    pyRAPL.setup()
+    try:
+        with open(KNOWLEDGE_DIR / "thresholds.json") as _tf:
+            _rt_thresholds = json.load(_tf)
+    except Exception:
+        _rt_thresholds = {}
+    _rt_energy_backend = _rt_thresholds.get("energy_meter", "auto")
 
     try:
         with open(KNOWLEDGE_DIR / "model.csv", "r") as f:
@@ -218,17 +224,13 @@ names: {{ {', '.join([f'{i}: {i}' for i in range(80)])} }}
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"✅ Fine-tuning setup complete. Trainable parameters: {trainable_params}")
 
-    meter = pyRAPL.Measurement("model_training")
-    meter.begin()
+    with EnergyMeter("model_training", backend=_rt_energy_backend) as _em:
+        model.train(
+            data=train_yaml_path, epochs=5, imgsz=640,
+            batch=4 if model_name == "yolo_n" else (1 if model_name == "yolo_m" else 2),
+            workers=2, patience=3, pretrained=True, cache="disk")
 
-    model.train(
-        data=train_yaml_path, epochs=5, imgsz=640,
-        batch=4 if model_name == "yolo_n" else (1 if model_name == "yolo_m" else 2),
-        workers=2, patience=3, pretrained=True, cache="disk")
-
-    meter.end()
-
-    energy_used = meter.result.pkg[0] if meter.result.pkg else 0.0
+    energy_used = _em.total_uJ or 0.0
     log_energy(model_name, energy_used)
     print(f"⚡ Energy consumed for training: {energy_used} uJ")
 

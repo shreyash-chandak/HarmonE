@@ -1,0 +1,50 @@
+{
+  "name": "bdd100k",
+  "domain": "cv",
+  "adapter": "adapters.cv_imagedir.CVImageDirAdapter",
+
+  "image_dir": "../../managed_system_cv/knowledge/images",
+  "manifest_csv": null,
+  "seq_length": 1,
+  "train_frac": 0.8,
+  "val_frac": 0.1,
+  "stream_delay_s": 0.0,
+
+  "models": {
+    "yolo_n": {
+      "weights_path": "../../managed_system_cv/models/yolo_n.pt",
+      "loader": "adapters.loaders.yolo_loader",
+      "cost_class": "light"
+    },
+    "yolo_s": {
+      "weights_path": "../../managed_system_cv/models/yolo_s.pt",
+      "loader": "adapters.loaders.yolo_loader",
+      "cost_class": "medium"
+    },
+    "yolo_m": {
+      "weights_path": "../../managed_system_cv/models/yolo_m.pt",
+      "loader": "adapters.loaders.yolo_loader",
+      "cost_class": "heavy"
+    }
+  },
+
+  "min_score": 0.54,
+  "max_energy": 0.43,
+  "E_ref": 0.5,
+  "delta": 0.05,
+  "beta": 0.96,
+  "gamma": 0.8,
+  "alpha": 0.15,
+  "E_m": 0,
+  "E_M": 10000000,
+  "tau_drift": 0.07,
+  "drift_reference": "both",
+  "planner": "harmone_original",
+  "ema_head_start": 0.1,
+  "w_acc": 1.0,
+  "w_e": 1.0,
+
+  "energy_required": ["cpu"],
+
+  "_comment_calibration": "E_M and tau_drift must be calibrated per hardware. Run experiments/calibrate_energy_bounds.py and experiments/calibrate_drift_threshold.py before using these values for paper experiments."
+}
