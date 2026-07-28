@@ -52,8 +52,10 @@ def init_regression(config_name: str = "pems_node1", force: bool = False) -> Non
     value_col = cfg.get("value_column", "flow")
     train_frac = float(cfg.get("train_frac", 0.8))
 
-    # The managed system knowledge dir is adjacent to the dataset
-    knowledge_dir = data_path.parent  # managed_system_regression/knowledge/
+    # Artifacts always go to managed_system_regression/knowledge/ regardless of where
+    # the dataset file lives (data/ for toy configs, knowledge/ for real configs).
+    knowledge_dir = _TOOL_DIR / "managed_system_regression" / "knowledge"
+    knowledge_dir.mkdir(parents=True, exist_ok=True)
     scaler_path = knowledge_dir / "scaler.pkl"
     ref_path = knowledge_dir / "reference_distribution.json"
 
