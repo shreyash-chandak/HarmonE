@@ -1,0 +1,23 @@
+{
+  "policy_id": "cv_single_yolo_n",
+  "quality_attribute": "confidence",
+  "adaptation_boundary": {
+    "type": "STATIC_THRESHOLD",
+    "condition": "LESS_THAN",
+    "threshold": 0
+  },
+  "tactics": [
+    {
+      "tactic_id": "",
+      "priority": 1,
+      "tactic_type": "CORE",
+      "tactic_endpoint": "http://localhost:8080/adaptor/tactic"
+    }
+  ],
+  "secondary_boundaries": [],
+  "associated_qas": [
+    "confidence",
+    "energy",
+    "model_used"
+  ]
+}
