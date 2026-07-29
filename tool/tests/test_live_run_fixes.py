@@ -338,6 +338,24 @@ class TestRunReset:
         assert (knowledge / "reference_distribution.json").exists(), \
             "reference_distribution.json must be preserved"
 
+    def test_thresholds_json_preserved_entirely(self, regression_dir: Path) -> None:
+        """G4: reset must never touch thresholds.json — planner config survives across runs."""
+        from experiments.run_reset import reset_run_state
+        knowledge = regression_dir / "knowledge"
+        thresholds = {
+            "min_score": 0.78, "max_energy": 0.6, "planner": "greedy_switch",
+            "energy_meter": "auto", "switch_cooldown_s": 30,
+        }
+        (knowledge / "thresholds.json").write_text(json.dumps(thresholds))
+
+        reset_run_state(str(regression_dir))
+
+        after = json.loads((knowledge / "thresholds.json").read_text())
+        assert after["planner"] == "greedy_switch", \
+            "reset must NOT touch thresholds.json — planner key must survive"
+        assert after["min_score"] == 0.78, \
+            "reset must NOT touch thresholds.json — config values must survive"
+
     def test_volatile_files_deleted(self, regression_dir: Path) -> None:
         from experiments.run_reset import reset_run_state
         reset_run_state(str(regression_dir))
@@ -544,6 +562,54 @@ class TestEnergyMeterNullBackend:
 # =============================================================================
 # L3: CV inference CUDA arch guard function
 # =============================================================================
+
+# =============================================================================
+# G7: CV handle_data_drift must dispatch to execute_drift, not pass
+# =============================================================================
+
+class TestCVDriftTacticDispatch:
+    """G7: execute_tactic_locally('handle_data_drift') must call execute_drift(trigger='acp')."""
+
+    def test_handle_data_drift_calls_execute_drift(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        mape_logic_dir = _TOOL_DIR / "managed_system_cv" / "mape_logic"
+
+        mock_execute = MagicMock()
+        mock_execute.execute_mape = MagicMock()
+        mock_execute.execute_drift = MagicMock()
+        mock_execute.execute_simple_switch = MagicMock()
+
+        monkeypatch.setitem(sys.modules, "execute", mock_execute)
+        monkeypatch.syspath_prepend(str(mape_logic_dir))
+
+        spec = importlib.util.spec_from_file_location(
+            "cv_manage_g7_test", str(mape_logic_dir / "manage.py")
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        mod.execute_tactic_locally("handle_data_drift")
+
+        mock_execute.execute_drift.assert_called_once_with(trigger="acp")
+        mock_execute.execute_mape.assert_not_called()
+
+    def test_execute_mape_plan_not_confused_with_drift(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        mape_logic_dir = _TOOL_DIR / "managed_system_cv" / "mape_logic"
+
+        mock_execute = MagicMock()
+        monkeypatch.setitem(sys.modules, "execute", mock_execute)
+        monkeypatch.syspath_prepend(str(mape_logic_dir))
+
+        spec = importlib.util.spec_from_file_location(
+            "cv_manage_g7b_test", str(mape_logic_dir / "manage.py")
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        mod.execute_tactic_locally("execute_mape_plan")
+
+        mock_execute.execute_mape.assert_called_once_with(trigger="acp")
+        mock_execute.execute_drift.assert_not_called()
+
 
 class TestCudaArchGuard:
     """The arch-guard logic must correctly identify supported/unsupported GPUs."""

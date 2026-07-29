@@ -62,6 +62,41 @@ Version-matching at drift response time (in `analyse.py`) dispatches based on si
 
 `tool/harmone_start.sh` (Arch) now sources shared setup from `tool/scripts/_launch_common.sh`, eliminating duplication between the two launchers.
 
+### 11.7 Dashboard Planner Selection Modal
+
+A planning strategy modal was added to the dashboard to expose the five implemented
+planners (S1–S6 excluding the bandit stub) without requiring manual JSON edits.
+
+**UI flow:** Clicking the HarmonE approach button (regression or CV) opens a modal
+listing the five planners. Selecting one and clicking Continue calls `/api/set-planner`
+(POST `{"planner": "<id>", "system": "regression"|"cv"}`), which writes `planner` into
+the relevant `managed_system_{domain}/knowledge/thresholds.json`. The standard approach
+launch then proceeds with the new planner already set.
+
+**`/api/set-planner` endpoint** (`tool/app.py`): resolves the thresholds path from
+`system`, reads the JSON, writes the `planner` key, and returns `{"status": "ok"}`.
+No server restart is needed; the MAPE loop reads `thresholds["planner"]` on every cycle
+via `plan.py`'s dispatcher.
+
+**Planner IDs exposed in dashboard:**
+- `harmone_original` — ε-greedy EMA-weighted (paper baseline, default)
+- `greedy_switch` — always switches to highest-EMA non-current model
+- `violation_aware` — separate handling for energy vs score violations
+- `pareto` — Chebyshev distance on the (accuracy, energy) Pareto front
+- `random_switch` — uniform random selection (ablation baseline)
+
+**Approach config mapping** (`write_approach_config` in `app.py`): the five per-planner
+preset keys (`reg_greedy_switch`, `reg_violation_aware`, `reg_pareto`, `reg_random_switch`,
+`cv_greedy_switch`, `cv_violation_aware`) all map to the `reg_harmone`/`cv_harmone`
+approach file so that `approach.conf` stays constant; only `thresholds.json["planner"]`
+changes.
+
+**CV HarmonE re-enabled:** The CV HarmonE button (previously commented out pending CV
+generalisation work) is now active and routes through the same planner modal.
+
+**`HARMONY_PRESETS` expansion:** Increased from 6 to 12 entries, adding per-planner
+preset keys for both regression and CV variants.
+
 ### 11.6 Energy Metering — pyJoules Migration
 
 The original tool used pyRAPL. The v2 implementation uses pyJoules with three backends:

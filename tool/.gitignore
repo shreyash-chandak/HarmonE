@@ -23,6 +23,7 @@ Thumbs.db
 # Tool-specific scratch
 compiledir.py
 combined_output.txt
+managed_system_startup.log
 
 # managed_system_cv: CV-specific runtime artefacts
 managed_system_cv/knowledge/inferences/

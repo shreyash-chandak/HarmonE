@@ -158,9 +158,45 @@ But it must be configurable so experiments can test with and without it.
 
 ---
 
+---
+
+## D10 — Dashboard Planner Selection Modal
+
+**Decision:** Expose the five selectable planners (S1–S6 excluding bandit) through a dashboard UI modal that intercepts the HarmonE approach button, prompts the user to pick a planner, then calls `/api/set-planner` before starting the managed system.
+
+**Rationale:** Running experiments with different planners previously required manually editing `thresholds.json` before each run, which was error-prone and not reproducible from the dashboard alone. A modal flow decouples planner selection from policy selection and makes the choice explicit.
+
+**Config:** `/api/set-planner` (POST) writes `planner` key to the relevant `thresholds.json` (regression or CV). The approach config mapping in `write_approach_config()` was extended to map `reg_greedy_switch`, `reg_violation_aware`, `reg_pareto`, `reg_random_switch`, `cv_greedy_switch`, `cv_violation_aware` preset keys to the base `reg_harmone`/`cv_harmone` approach files (so the approach.conf stays unchanged; only `thresholds.json["planner"]` changes).
+
+**CV HarmonE:** The CV HarmonE button (previously commented out) was re-enabled; it now goes through the same planner modal. `HARMONY_PRESETS` expanded from 6 to 12 entries (adding per-planner CV variants).
+
+**Effect:** Users can now select any of the five implemented planners for either domain entirely from the browser, without touching JSON files.
+
+---
+
+## D11 — Integration Hardening Outcomes (CP7)
+
+**Decision:** Following the D10 dashboard changes, a full integration audit (CP7) was performed. The decisions below were confirmed or made during that audit.
+
+**Endpoint set (canonical):** `/api/write-approach`, `/api/save-policy`, `/api/reset`, `/api/set-planner`, `/api/set-model`, `/api/start-managed-system`, `/api/stop-managed-system`, `/api/upload-custom-mape`. Old names `/api/set-approach` and `/api/adaptor/upload` were documentation drift (never existed in code).
+
+**Planner single source of truth:** `thresholds.json["planner"]` is the only location for the active planner name. `approach.conf` carries only the approach token. Confirmed no dead code reads planner from approach.conf. `dispatch_plan()` in regression `plan.py` reads thresholds per-call (fresh); planner changes take effect on the next MAPE cycle without restarting.
+
+**Policy ID contract (G2):** All HarmonE planner-variant presets (reg_greedy_switch, reg_violation_aware, reg_pareto, cv_greedy_switch, cv_violation_aware) now save their policy with the base approach key's policy_id (`reg_harmone_score` / `cv_harmone_score`), not the variant key. This ensures run_managed_system's prefix scan finds the file. Dashboard polls `/api/knowledge/<currentPolicyId>` using this base id.
+
+**Startup error surfacing (G8):** `/api/start-managed-system` now waits 4 s, polls the child process, and returns HTTP 500 + last 20 log lines if the process exits early (e.g., missing artifacts). Dashboard gates polling start on HTTP 200.
+
+**Set-planner validation (G9):** Valid planner set: `{harmone_original, greedy_switch, violation_aware, pareto, random_switch}`. Anything else → HTTP 400. `bandit` is excluded because its `plan()` raises NotImplementedError.
+
+**CV planner limitation (DP11):** CV domain still uses legacy `plan_mape()` / `execute_mape()` (not `dispatch_plan()`). The `thresholds.json["planner"]` key is written for CV but ignored at runtime. Only 3 of 5 modal planners are behaviorally distinct for CV (harmone_original = greedy_switch = violation_aware at the plan level). Pareto and random_switch planners are shown in the modal but fall back to legacy behavior. Deferred to DP11.
+
+---
+
 ## Open Decisions (→ DECISIONS_PENDING.md)
 
 - DP1: Which datasets to use for the journal extension (not yet chosen)
 - DP2: Whether Platt scaling or NLL minimisation for temperature scaling (CV proxy calibration)
 - DP3: Whether LinUCB bandit (S7) is implemented or stubbed for the paper deadline
 - DP4: `tau_drift` values — empirically calibrated per dataset or shared defaults
+- DP10: `reg_random_switch` standalone baseline needs its own approach token (`reg_random`) for proper policy prefix routing; currently falls through to `reg_harmone` path
+- DP11: CV domain upgrade to `dispatch_plan()` + planner registry (mirrors regression architecture)

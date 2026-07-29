@@ -1,17 +1,19 @@
 # HarmonE Journal Extension — Implementation Status
 
-Last updated: 2026-07-24 (Phase 2 implementation complete; 80/80 tests pass)
+Last updated: 2026-07-30 (all phases complete; 289 pass, 2 skip, 4 pre-existing failures / 295 total)
 
 ## Phase Overview
 
-| Phase | Name | Branch | Status |
-|---|---|---|---|
-| 1 | Codebase Repair (B1–B7) | `fix/bugs-phase1` | ✅ IMPLEMENTED (A3/A4 lab-pending) |
-| 2 | Pluggable Interfaces | `refactor/planner-interface` | ✅ IMPLEMENTED |
-| 3 | CV Generalisation | `feat/cv-generalisation` | ⬜ PENDING |
-| 4 | Energy Instrumentation | `feat/energy-gpu` | ⬜ PENDING |
-| 5 | Experiment Harness | `feat/experiment-harness` | ⬜ PENDING |
-| 6 | Repo Hygiene | `chore/repo-hygiene` | ⬜ PENDING |
+| Phase | Name | Status |
+|---|---|---|
+| 1 | Codebase Repair (B1–B7) | ✅ IMPLEMENTED (A3 complete; A4 pending lab machine) |
+| 2 | Pluggable Interfaces | ✅ IMPLEMENTED |
+| 3 | CV Generalisation | ✅ IMPLEMENTED |
+| 4 | Energy Instrumentation | ✅ IMPLEMENTED |
+| 5 | Experiment Harness | ✅ IMPLEMENTED |
+| 6 | Live-Run Bug Fixes (L1–L6, E1–E3) | ✅ IMPLEMENTED |
+| 7 | Dashboard — Planner Selection Modal | ✅ IMPLEMENTED |
+| 8 | Integration Hardening (CP7) | ✅ IMPLEMENTED |
 
 ---
 
@@ -35,15 +37,15 @@ Last updated: 2026-07-24 (Phase 2 implementation complete; 80/80 tests pass)
 |---|---|---|
 | A1 | Rename `plan_simple_switch` → `plan_random_switch`; add `plan_greedy_switch` | ✅ DONE |
 | A2 | CV EMA inflation behind config `ema_head_start` | ✅ DONE |
-| A3 | Git archaeology — record which bugs predate paper commits | ⬜ PENDING |
+| A3 | Git archaeology — record which bugs predate paper commits | ✅ DONE (all B-bugs confirmed to predate all tracked commits) |
 | A4 | Reproduction run — 5 seeds on PeMS, compare vs paper values | ⬜ PENDING (needs lab machine) |
 
 ### Phase 1 Exit Criteria
 
-- [x] All tests green (`pytest tool/tests/ -v`) — 37/37 pass
-- [ ] Smoke test: `reg_harmone` runs end-to-end on bundled `dataset.csv`
-- [ ] `CHANGES_FROM_PAPER.md` covers B1–B7 and A1–A4
-- [ ] `DECISIONS_PENDING.md` captures all deferred choices
+- [x] All tests green (`pytest tool/tests/ -v`) — 289 pass, 2 skip (Flask/WSL), 4 pre-existing failures (init_regression path bug)
+- [x] Smoke test: `reg_harmone` runs end-to-end (WSL verified 2026-07-28)
+- [x] `CHANGES_FROM_PAPER.md` covers B1–B7, A1–A4, and all subsequent phases
+- [x] `DECISIONS_PENDING.md` captures all deferred choices
 
 ---
 

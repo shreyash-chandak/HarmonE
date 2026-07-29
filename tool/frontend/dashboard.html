@@ -465,7 +465,7 @@
             { id: 'greedy_switch',     name: 'Greedy Switch',        desc: 'Always picks the highest-EMA non-current model' },
             { id: 'violation_aware',   name: 'Violation Aware',      desc: 'Deprioritises models that recently violated energy budget' },
             { id: 'pareto',            name: 'Pareto Optimal',       desc: 'Selects from accuracy-energy Pareto frontier' },
-            { id: 'random_switch',     name: 'Random Switch',        desc: 'Random selection — ablation baseline' },
+            { id: 'random_switch',     name: 'Random Switch (HarmonE policy)',  desc: 'Random model selection under the HarmonE score+drift policy — ablation baseline (distinct from the Switch approach button)' },
         ];
 
         let pendingHarmonESystem = null; // 'reg' or 'cv' — set when planner modal is triggered
@@ -640,7 +640,9 @@
 
             await resetServerKnowledge();
             populateFormWithPreset(preset);
-            policyIdInput.value = preset.policy_id;
+            // Use approachKey as policy_id so run_managed_system.py finds the file via prefix match
+            // (e.g. cv_harmone_score matches prefix "cv_harmone"; cv_greedy_switch would not)
+            policyIdInput.value = approachKey;
             document.getElementById('policy-presets').value = presetKey in HARMONY_PRESETS ? presetKey : approachKey;
 
             const plannerLabel = PLANNERS.find(p => p.id === plannerId)?.name || plannerId;
@@ -1927,11 +1929,17 @@
                 const response = await fetch("http://localhost:5000/api/start-managed-system", {
                     method: "POST",
                 });
-        
+
                 const data = await response.json();
+                if (!response.ok) {
+                    showMessage("Startup failed:\n" + data.message, "error");
+                    return false;
+                }
                 showMessage(data.message, "success");
+                return true;
             } catch (err) {
                 showMessage("Could not start managed system: " + err, "error");
+                return false;
             }
         }
         
@@ -2051,23 +2059,28 @@
 
         document.getElementById("adaptive-start-btn").addEventListener("click", async () => {
             showMessage("Starting managed system...", "info");
-            await runManagedSystem();
-            
+            const started = await runManagedSystem();
+
+            if (!started) {
+                // startup failed — keep button visible so user can retry after fixing the issue
+                return;
+            }
+
             document.getElementById("adaptive-start-container").classList.add("hidden");
-            
+
             if (policyIdInput.value) {
                 currentPolicyId = policyIdInput.value;
                 document.getElementById('policy-title-dashboard').textContent = `Policy: ${currentPolicyId}`;
-                
+
                 if (pollingIntervalId) {
                     clearInterval(pollingIntervalId);
                 }
-                
+
                 await fetchKnowledge();
                 pollingIntervalId = setInterval(fetchKnowledge, POLLING_INTERVAL);
-                
+
                 document.querySelector('.tab-btn[data-tab="dashboard"]').click();
-                
+
                 showMessage(`Managed system started! Monitoring policy: ${currentPolicyId}`, "success");
             }
         });

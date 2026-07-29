@@ -470,6 +470,47 @@ is a contract violation.
 
 ---
 
+## Phase 7 — Dashboard Planner Selection Modal (D10)
+
+The `frontend/dashboard.html` was extended with a planner selection modal that intercepts any HarmonE button click (regression or CV). 
+
+**Changes to dashboard.html:**
+- `HARMONY_PRESETS` expanded from 6 → 12 entries: added 5 per-planner regression variants (`reg_greedy_switch`, `reg_violation_aware`, `reg_pareto`, `reg_random_switch`) and 5 CV equivalents.
+- `PLANNERS` array: 5 entries driving the modal (harmone_original, greedy_switch, violation_aware, pareto, random_switch).
+- `launchHarmonE(approachKey, domain)` function: shows modal, waits for planner selection, calls `/api/set-planner`, then proceeds with `reset` → `writeApproachConfig` → `savePolicyToFolder` → start button.
+- CV HarmonE button re-enabled (was commented out).
+
+**Changes to app.py:**
+- `/api/set-planner` endpoint added. Writes the selected planner name to `thresholds.json["planner"]` for the relevant domain. The planner takes effect on the next MAPE cycle; no restart required.
+
+**Effect on paper numbers:** None — only the dashboard UI and the `thresholds.json["planner"]` key are new. All existing planner implementations preexisted; the modal just exposes them without requiring manual JSON edits before each run.
+
+---
+
+## Phase 8 — Integration Hardening (CP7)
+
+A full audit of the dashboard → backend → managed-system integration path was performed. Nine code bugs and five documentation drift issues were resolved.
+
+**Code fixes:**
+
+| ID | Fix |
+|---|---|
+| G1 | `import json` missing from `app.py` top-level; `/api/set-planner` would crash with `NameError` |
+| G2 | `launchHarmonE()` used variant key (e.g. `reg_greedy_switch`) as policy_id; prefix scan in `run_managed_system.py` uses base approach (`reg_harmone`); policy file was never found. Fixed: use `approachKey` (`reg_harmone_score`) as policy_id |
+| G7 | CV `execute_tactic_locally("handle_data_drift")` was `pass` — drift tactic silently dropped. Fixed: `execute_drift(trigger="acp")` |
+| G8 | `/api/start-managed-system` returned HTTP 200 immediately; dashboard began polling even if the managed system died within seconds. Fixed: endpoint waits 4 s, polls process, returns HTTP 500 + last 20 log lines on early exit; dashboard keeps start button visible for retry |
+| G9 | `/api/set-planner` had no input validation. Fixed: `_VALID_PLANNERS` set; bandit/unknown → HTTP 400 |
+| G12b | `random_switch` tactic case missing in both `manage.py` files. Fixed: `execute_simple_switch(trigger="acp")` handler added to regression and CV manage.py |
+| G5 | `random_switch` label ambiguous (same name as a standalone baseline). Fixed: renamed to "Random Switch (HarmonE policy)" in PLANNERS array |
+
+**Documentation drift fixed:** Endpoint names corrected in all context docs (`/api/adaptor/upload` → `/api/upload-custom-mape`; `/api/set-approach` → `/api/write-approach`). Test count updated.
+
+**Known limitation — G_CV_PLAN:** CV domain calls `plan_mape()` directly, not `dispatch_plan()`. `thresholds.json["planner"]` is written for CV but ignored at runtime. Planner selection in the CV HarmonE modal has no effect on planning behaviour. Documented as DP11; deferred to a future pass.
+
+**Effect on paper numbers:** None — the bugs fixed were in the dashboard/ACP layer, not the MAPE-K algorithms themselves. CV drift tactic now fires when triggered by ACP (G7), but the paper's results came from local-mode runs where manage.py ran the MAPE loop independently without ACP-commanded tactics.
+
+---
+
 ## A3 — Git Archaeology
 
 **Evidence basis:** `git log --oneline --follow <file>` run on all B-bug files 2026-07-29.

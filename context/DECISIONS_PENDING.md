@@ -155,6 +155,20 @@ tuning. Estimated cost: ~2 days engineering. Not included in the prototype evalu
 1. LinUCB with context = [EMA slope, drift signal, steps-since-switch, energy budget]
 2. Thompson sampling over Beta(win, loss) per model
 
+### DP10 — reg_random_switch standalone baseline routing (CP7 G12/DP6)
+
+**Status:** Partially wired (CP7). The `reg_random_switch` preset can be invoked two ways: (1) via the HarmonE planner modal with planner=random_switch → uses `reg_harmone_score` policy + `execute_mape_plan` tactic; (2) via the policy dropdown → preset defines tactic `random_switch`, which now has a handler (G12b fix), but the approach still maps to `reg_harmone`, so the prefix scan finds `reg_harmone_score.json` rather than an isolated baseline file.
+
+**Decision needed:** Introduce a dedicated approach token `reg_random` (new `approach.conf` value, new policy file `reg_random_switch_r2.json`) to give the standalone random-switch baseline its own isolated approach path. Currently the tactic routing works, but the approach mapping is shared with HarmonE.
+
+### DP11 — CV planner registry / dispatch_plan (CP7 G_CV_PLAN)
+
+**Status:** Documented limitation (CP7). CV domain calls `plan_mape()` / `execute_mape()` directly in `execute.py`, bypassing `dispatch_plan()` and the planner registry in `core/planners/`. `thresholds.json["planner"]` is written by `/api/set-planner` for CV but is never read at runtime.
+
+**Decision needed:** Refactor CV `execute.py` to call `dispatch_plan()` (mirrors regression architecture from Phase 2). Requires: wiring `PlanningContext` in CV `plan.py`, routing all five modal planners through `get_planner()`, and verifying that `cv_greedy_switch` / `cv_violation_aware` / `cv_pareto` / `cv_random_switch` functions in CV `plan.py` return `Decision` objects compatible with `dispatch_plan()`'s return contract.
+
+**Cost:** ~1 day. Not blocking current experiments (CV always runs `harmone_original` logic regardless of modal selection).
+
 ### DP9 — DeepLab variants for ACDC segmentation
 
 **Status:** Deferred (P2). ACDC config uses SegFormer-B0 and SegFormer-B2 only.

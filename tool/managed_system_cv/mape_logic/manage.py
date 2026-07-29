@@ -98,11 +98,13 @@ def execute_tactic_locally(tactic_id):
             execute_mape(trigger="acp")
 
         elif tactic_id == "handle_data_drift":
-            # execute_drift(trigger="acp")
-            pass
+            execute_drift(trigger="acp")
 
         elif tactic_id == "switch_model_r2_baseline":
             execute_mape(trigger="acp")
+
+        elif tactic_id == "random_switch":
+            execute_simple_switch(trigger="acp")
 
         else:
             logging.warning(f"Unknown local tactic_id: '{tactic_id}'")

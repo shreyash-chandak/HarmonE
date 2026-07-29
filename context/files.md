@@ -98,7 +98,12 @@ HarmonE-tool/
     │   └── checkpoints/            # Sprint checkpoint reports
     │       ├── CP0.md
     │       ├── CP1.md
-    │       └── CP2.md
+    │       ├── CP2.md
+    │       ├── CP3.md
+    │       ├── CP4.md
+    │       ├── CP5.md
+    │       ├── CP6.md
+    │       └── CP7_integration_audit.md
     │
     ├── experiments/
     │   ├── metrics.py
@@ -202,7 +207,9 @@ HarmonE-tool/
         ├── test_phase5_harness.py
         ├── test_live_run_fixes.py
         ├── test_plug_and_play.py
-        └── test_task_adapters.py   # §4 task adapter + EmbeddingStore + plug-and-play CV
+        ├── test_task_adapters.py   # §4 task adapter + EmbeddingStore + plug-and-play CV
+        ├── test_api_endpoints.py   # G9 set-planner validation, G13 CORS, G2 policy routing, L4 None-safe (skips if Flask unavailable)
+        └── test_dashboard_flow.py  # G2 policy poll routing, G8 startup error surfacing, planner variant flow (skips if Flask unavailable)
 ```
 
 ---
@@ -234,8 +241,8 @@ HarmonE-tool/
 
 | File | Purpose |
 |---|---|
-| `app.py` | **ACP server.** Flask app (port 5000). Receives telemetry POSTs from `run_managed_system.py`, evaluates quality-attribute boundaries defined in the active policy JSON, fires tactic commands to the adaptation handler at port 8080. Also exposes REST endpoints for the dashboard and handles secondary boundary checks (`kl_div` drift) on a background thread. |
-| `approach.conf` | System/mode selector. Sets `system` (`reg`/`cv`), `run_mode` (`local`/`acp`), and `planner` name. Read by `run_managed_system.py` and both `manage.py` files at startup. |
+| `app.py` | **ACP server.** Flask app (port 5000). Receives telemetry POSTs from `run_managed_system.py`, evaluates quality-attribute boundaries defined in the active policy JSON, fires tactic commands to the adaptation handler at port 8080. Exposes REST endpoints for the dashboard: `/api/telemetry`, `/api/policy`, `/api/knowledge/<policy_id>`, `/api/set-model`, `/api/set-planner` (writes `planner` key to `thresholds.json`; validates against 5-planner allowlist), `/api/write-approach`, `/api/save-policy`, `/api/reset`, `/api/start-managed-system` (waits 4 s; returns HTTP 500 + last 20 log lines on early exit), `/api/stop-managed-system`, `/api/upload-custom-mape`. Handles secondary boundary checks (`kl_div` drift) on a background monitoring thread with heartbeat logging and None-safe boundary evaluation. |
+| `approach.conf` | System/mode selector. Single-token file: `reg_harmone`, `cv_switch`, etc. Carries the approach token only — never the planner name (planner lives in `thresholds.json["planner"]`). Read by `run_managed_system.py` at startup to select the managed system directory and policy file prefix. |
 | `harmone_start.sh` | Convenience Bash script that opens three terminals (inference, MAPE manage, dashboard) and starts them in the correct order. Arch Linux entry point for a live run. |
 | `run_managed_system.py` | **Master wrapper.** Reads `approach.conf`, performs the L1-b startup artifact health check, spawns the three subprocesses (inference, manage, dashboard server), streams telemetry from `predictions.csv` to the ACP, polls subprocess liveness every cycle, and shuts everything down cleanly on any child death or SIGINT. Also hosts the adaptation handler endpoint (port 8080) that receives tactic commands from the ACP and writes timestamped `command.txt`. |
 
@@ -267,6 +274,29 @@ HarmonE-tool/
 |---|---|
 | `_template.yaml` | Annotated grid config template showing all keys (`datasets`, `planners`, `seeds`, `overrides`). |
 | `baseline.yaml` | Paper baseline grid: `pems_node1` × 6 planners (naive → pareto) × seeds [1, 2]. Overrides `energy_meter=null` and `stream_delay_s=0` for Windows-safe headless runs. |
+
+---
+
+### `docs/`
+
+| File | Purpose |
+|---|---|
+| `docs/DATA_CONTRACT.md` | Plug-and-play data contract spec: required fields for regression CSV and CV manifest schemas, validation rules enforced by `core/dataset_validator.py`. |
+| `docs/datasets/index.md` | Index of all six dataset specs with links and status (`awaiting_data` for five; toy datasets ready). |
+| `docs/datasets/pems_node2.md` | Expected data schema and preprocessing recipe for PeMS node 2 regression dataset. |
+| `docs/datasets/uci_electricity.md` | Expected schema for UCI Electricity dataset. |
+| `docs/datasets/spot_prices.md` | Expected schema for Spot Prices structural-break dataset. |
+| `docs/datasets/bdd100k.md` | Expected schema and YOLO label format for BDD100K. |
+| `docs/datasets/iwildcam.md` | Expected schema for iWildCam classification dataset. |
+| `docs/datasets/acdc.md` | Expected schema for ACDC adverse-conditions segmentation dataset. |
+| `docs/checkpoints/CP0.md` | Phase 0 checkpoint: environment and baseline green. |
+| `docs/checkpoints/CP1.md` | Phase 1 checkpoint: B1–B7 fixes, 37/37 tests. |
+| `docs/checkpoints/CP2.md` | Phase 2 checkpoint: pluggable interfaces, planner registry, adapter ABC. |
+| `docs/checkpoints/CP3.md` | Phase 3 checkpoint: CV generalisation, task adapters, embedding drift, proxy validation. |
+| `docs/checkpoints/CP4.md` | WSL smoke test checkpoint: regression smoke verified 2026-07-28; CV smoke pending lab machine. |
+| `docs/checkpoints/CP5.md` | Documentation verification checkpoint: endpoint names corrected, context docs consistency audit. |
+| `docs/checkpoints/CP6.md` | Pre-push checkpoint: 290/290 tests, hygiene greps clean, runtime files untracked. |
+| `docs/checkpoints/CP7_integration_audit.md` | Integration hardening audit: G1–G16 findings, G12 preset matrix (10/10 PASS), endpoint inventory, DoD audit. |
 
 ---
 
@@ -331,7 +361,7 @@ HarmonE-tool/
 
 | File | Purpose |
 |---|---|
-| `dashboard.html` | **Live monitoring dashboard.** Single-page Tailwind + Chart.js app served by `app.py` at port 8000. Plots rolling R²/confidence score, energy normalised, EMA scores per model, and model switches in real time. Connects to the ACP REST API (`/api/telemetry`, `/api/policy`) to fetch and display the current system state. |
+| `dashboard.html` | **Live monitoring dashboard.** Single-page Tailwind + Chart.js app served at port 8000. Plots rolling R²/confidence score, normalised energy, per-model EMA scores, and model switches in real time. Welcome screen has buttons for all 10 policy presets across four optgroups; clicking a HarmonE button opens the **Planner Selection Modal** (5 planners: harmone_original, greedy_switch, violation_aware, pareto, random_switch) before launching. Calls `/api/set-planner` to persist the planner choice, then proceeds with the standard approach flow. CV HarmonE is fully enabled. 12 `HARMONY_PRESETS` (was 6) and 5-planner `PLANNERS` array drive the modal and preset form. |
 
 ---
 
@@ -430,6 +460,7 @@ Policy JSON files consumed by `app.py`. Each defines one `quality_attribute` pri
 | `reg_single_svm.json` | No adaptation; SVM always active. |
 | `cv_harmone_score.json` | Fire `execute_mape_plan` when confidence < 0.54; secondary: drift tactic. Main CV policy. |
 | `cv_switch_confidence.json` | Fire `execute_random_switch` on confidence violation. CV random-switch baseline. |
+| `cv_single_yolo_n.json` | No adaptation; YOLOv8-N always active. Lightest single-model baseline. |
 | `cv_single_yolo_s.json` | No adaptation; YOLOv8-S always active. |
 | `cv_single_yolo_m.json` | No adaptation; YOLOv8-M always active. |
 | `custom_regression_policy.json` | User-editable template for a regression policy. Copy and modify thresholds without touching code. |
@@ -468,5 +499,7 @@ Policy JSON files consumed by `app.py`. Each defines one `quality_attribute` pri
 | `test_phase3_vmr.py` | Tests `VMR.store()`, `best_match()` with both strategies, and `restore()` path invariants. |
 | `test_phase4_energy.py` | Tests `EnergyMeter`: null backend validity, backends dict structure, `cpu_valid`/`gpu_valid` flags, unit conversion consistency. |
 | `test_phase5_harness.py` | Tests `run_experiment()` inline loop, `run_grid()` resume logic, `compute_run_metrics()`, `aggregate_by_planner()`, and model loaders. |
-| `test_live_run_fixes.py` | 38 tests covering the July 24 live-run bug fixes: L2 command gating, L4 None-safe boundary eval, L1-c stale monitor, L2-b/L6 run reset (incl. `last_switch_ts`), L1-a init_regression, E3 energy abstraction (no pyRAPL, nesting, null backend), L3 GPU arch guard. |
+| `test_live_run_fixes.py` | Tests covering the July 24 live-run bug fixes plus CP7 additions: L2 command gating, L4 None-safe boundary eval, L1-c stale monitor, L2-b/L6 run reset (incl. `last_switch_ts`), L1-a init_regression, E3 energy abstraction (no pyRAPL, nesting, null backend), L3 GPU arch guard, G4 reset preserves thresholds.json, G7 CV drift tactic dispatch. |
 | `test_plug_and_play.py` | 15 conformance tests proving config-only dataset onboarding: validator schema enforcement, NaN detection, CV image checks, init_regression end-to-end, force-overwrite behaviour. |
+| `test_api_endpoints.py` | CP7 Phase 3 tests: G9 set-planner validation (valid/invalid/bandit/bad-system), G13 CORS registration, G2 policy routing, G8 startup error surfacing, L4 None kl_div skip. Skips if Flask not installed (`pytest.importorskip`). |
+| `test_dashboard_flow.py` | CP7 Phase 3 tests: scripted dashboard flow simulation — set-planner accepted, policy registered under base policy_id, telemetry populates history, planner variants use correct policy_id, startup errors surface as HTTP 500. Skips if Flask not installed. |

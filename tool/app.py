@@ -1,6 +1,7 @@
 import time
 import statistics
 import threading
+import json
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
@@ -335,7 +336,6 @@ def save_policy_file():
 
     os.makedirs("policies", exist_ok=True)
     with open(f"policies/{pid}.json", "w") as f:
-        import json
         json.dump(policy, f, indent=2)
 
     return jsonify({"message": "Policy saved"}), 200
@@ -360,11 +360,18 @@ def set_model():
     return jsonify({"message": "Model set"}), 200
 
 
+_VALID_PLANNERS = {'harmone_original', 'greedy_switch', 'violation_aware', 'pareto', 'random_switch'}
+
 @app.route('/api/set-planner', methods=['POST'])
 def set_planner():
     data = request.json
     planner = data.get('planner', 'harmone_original')
     system = data.get('system', 'regression')
+
+    if planner not in _VALID_PLANNERS:
+        return jsonify({'error': f"Unknown planner '{planner}'. Valid: {sorted(_VALID_PLANNERS)}"}), 400
+    if system not in ('regression', 'cv'):
+        return jsonify({'error': f"Unknown system '{system}'. Valid: regression, cv"}), 400
 
     path = (
         'managed_system_cv/knowledge/thresholds.json'
@@ -406,10 +413,27 @@ def home():
 def favicon():
     return "", 204
 
+_STARTUP_LOG = "managed_system_startup.log"
+
 @app.route("/api/start-managed-system", methods=["POST"])
 def start_managed_system():
     try:
-        subprocess.Popen(["python3", "run_managed_system.py"])
+        with open(_STARTUP_LOG, "w") as log_f:
+            proc = subprocess.Popen(
+                ["python3", "run_managed_system.py"],
+                stdout=log_f,
+                stderr=subprocess.STDOUT,
+            )
+        time.sleep(4)
+        rc = proc.poll()
+        if rc is not None:
+            try:
+                with open(_STARTUP_LOG) as log_f:
+                    lines = log_f.read().strip().splitlines()[-20:]
+                msg = "\n".join(lines) or f"Process exited early (code {rc})"
+            except Exception:
+                msg = f"Process exited early (code {rc})"
+            return jsonify({"status": "error", "message": msg}), 500
         return jsonify({"status": "ok", "message": "Managed system started"})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500

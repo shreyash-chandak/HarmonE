@@ -88,41 +88,57 @@ python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_
 
 ---
 
-## 3. RAPL Energy Measurement (Intel only)
+## 3. RAPL Energy Measurement
 
-pyRAPL reads CPU energy from the Linux power-cap sysfs interface.
-Skip this section if you have an AMD CPU or run without energy measurement.
+HarmonE uses **pyJoules** for energy measurement (pyRAPL has been removed). Both Intel
+and AMD CPUs that expose the RAPL power-cap sysfs interface are supported. GPU energy
+uses pyJoules NVML, falling back to 50 ms nvidia-smi polling on cards without a
+cumulative NVML counter.
 
-### Enable the kernel module
+Skip this section if you are running on Windows/WSL or if you do not need energy measurements
+(set `"energy_meter": "null"` in your dataset config or grid YAML — this is the default).
 
-```bash
-# Usually auto-loaded on Intel systems; if not:
-sudo modprobe intel_rapl_common
-sudo modprobe intel_rapl_msr
+### Energy backend config precedence
 
-# Persist across reboots
-echo intel_rapl_common | sudo tee /etc/modules-load.d/rapl.conf
-echo intel_rapl_msr    | sudo tee -a /etc/modules-load.d/rapl.conf
-```
+**Live managed system (Scenario A/B):** `energy_meter` is read from `knowledge/thresholds.json` in the active domain directory. Edit that file directly or use the `/api/set-planner`-equivalent flow.
 
-### Grant read access
+**Headless experiment (Scenario C/D):** `energy_meter` comes from `configs/datasets/<name>.json`, overridable via the grid YAML's `extra_thresholds.energy_meter`. The harness defaults to `"null"` for Windows/CI safety.
 
-```bash
-sudo chmod -R 777 /sys/class/powercap/intel-rapl/
-```
+### One-time setup (run once per machine)
 
-> This permission resets on reboot. To make it permanent, create a udev rule:
-> ```bash
-> echo 'SUBSYSTEM=="powercap", ACTION=="add", RUN+="/bin/chmod -R 777 /sys/class/powercap/intel-rapl/"' \
->   | sudo tee /etc/udev/rules.d/99-rapl.rules
-> sudo udevadm control --reload-rules
-> ```
-
-### Test pyRAPL
+A convenience script handles module loading and permissions:
 
 ```bash
-python -c "import pyRAPL; pyRAPL.setup(); m = pyRAPL.Measurement('test'); m.begin(); m.end(); print(m.result)"
+cd /path/to/HarmonE-tool/tool
+sudo bash scripts/setup_energy_permissions.sh
 ```
+
+This loads `msr`, `intel_rapl_common`, `intel_rapl_msr` kernel modules and sets
+`/sys/class/powercap/intel-rapl/` permissions to 777. Permissions reset on reboot;
+re-run after each boot or create a persistent udev rule (see the script comments).
+
+### Probe available backends
+
+```bash
+cd /path/to/HarmonE-tool/tool
+source harmone_env/bin/activate
+python scripts/probe_energy.py
+```
+
+Expected output when RAPL is accessible:
+```
+[cpu] pyJoules RAPL ... OK  (non-zero reading)
+[gpu] pynvml energy counter ... OK  (or: falling back to nvidia-smi polling)
+```
+
+If the CPU probe returns zero despite loading modules, RAPL is not accessible on this
+hardware. Set `"energy_meter": "null"` and note it in your paper's threats section.
+
+### AMD CPU note
+
+AMD Zen 2+ CPUs expose an Intel-compatible RAPL interface. The same setup applies;
+pyJoules reads from the same `/sys/class/powercap/intel-rapl/` sysfs path. Accuracy
+is typically ±10–15% (versus ±5% for Intel) — record this in your threats section.
 
 ---
 
@@ -475,11 +491,13 @@ If you install PyYAML (`pip install pyyaml`), `.yaml` grid configs also work.
 
 ### Expected output
 
-All 210 tests should pass:
+289 tests pass; 2 skip (Flask not installed — pass in WSL); 4 pre-existing failures (init_regression path resolution — unrelated to this work). Total: 295.
 
 ```
-============ 210 passed in X.Xs ============
+============ 289 passed, 2 skipped, 4 failed in X.Xs ============
 ```
+
+The 4 failures (`TestInitRegression::test_scaler_fitted_on_train_split`, `test_reference_distribution_written`, and two `TestInitRegressionPlugAndPlay` tests) are a known issue: `init_regression.py` resolves config paths relative to the CWD, which causes failures when pytest runs from the `tests/` directory. These fail on `main` too; run from `tool/` to pass them.
 
 ---
 
@@ -551,8 +569,7 @@ sudo modprobe intel_rapl_common intel_rapl_msr
 sudo chmod -R 777 /sys/class/powercap/intel-rapl/
 ```
 
-If you have an AMD CPU, pyRAPL is not supported. Set `energy_meter: "null"` in
-your dataset config or `extra_thresholds` in the grid YAML.
+HarmonE uses pyJoules (not pyRAPL, which has been removed). AMD Zen 2+ CPUs expose an Intel-compatible RAPL sysfs interface; the same `setup_energy_permissions.sh` applies. Set `energy_meter: "null"` in your dataset config or grid YAML's `extra_thresholds` if RAPL is not available.
 
 ### PyTorch not found (LSTM model unavailable)
 
