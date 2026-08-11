@@ -34,6 +34,7 @@ class PlanDecision:
     model: str | None = None            # target model name for "switch"
     version_path: str | None = None     # path to VMR weights for "replace"
     reason: str = ""                    # logged to event log verbatim
+    metadata: dict | None = None        # planner-specific data (e.g. bandit pending record)
 
 
 class Planner(ABC):

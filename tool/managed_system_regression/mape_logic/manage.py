@@ -1,8 +1,10 @@
+import json
 import threading
 import time
 import os
 import sys
 import logging
+from pathlib import Path
 from execute import execute_mape, execute_drift, execute_simple_switch
 
 # --- Setup ---
@@ -41,6 +43,69 @@ _CMD_MAX_AGE_S = 30  # discard commands older than this
 #     else:
 #         logging.warning(f"Unknown local tactic_id: '{tactic_id}'")
 
+def _load_thresholds() -> dict:
+    """Read thresholds.json; return empty dict on failure."""
+    path = os.path.join(KNOWLEDGE_DIR, "thresholds.json")
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _load_mape_info() -> dict:
+    """Read mape_info.json; return empty dict on failure."""
+    path = os.path.join(KNOWLEDGE_DIR, "mape_info.json")
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _init_bandit_if_needed(thresholds: dict):
+    """Create and register the LinUCB bandit when planner=='bandit'.
+
+    Returns the LinUCBBandit instance, or None if planner != 'bandit'.
+    """
+    if thresholds.get("planner") != "bandit":
+        return None
+    try:
+        sys.path.insert(0, os.path.join(BASE_DIR, "..", ".."))
+        from core.planners.bandit import load_or_create_bandit, set_bandit_instance
+        models = thresholds.get("models", ["lstm", "linear", "svm"])
+        if isinstance(models, dict):
+            models = list(models.keys())
+        dataset_id = thresholds.get("dataset_id", "unknown")
+        bandit = load_or_create_bandit(thresholds, models, KNOWLEDGE_DIR, dataset_id=dataset_id)
+        set_bandit_instance(bandit)
+        logging.info(
+            "[Bandit] LinUCB bandit loaded for dataset='%s': "
+            "%d prior decisions, %d prior updates.",
+            dataset_id, bandit.total_decisions, bandit.total_updates,
+        )
+        return bandit
+    except Exception as exc:
+        logging.error("[Bandit] Failed to initialise bandit: %s", exc)
+        return None
+
+
+def _maybe_resolve_bandit_pending(bandit, thresholds: dict) -> None:
+    """Check for a pending bandit reward and resolve it if enough time has passed."""
+    if bandit is None:
+        return
+    pending_path = Path(KNOWLEDGE_DIR) / "bandit_pending.json"
+    if not pending_path.exists():
+        return
+    try:
+        sys.path.insert(0, os.path.join(BASE_DIR, "..", ".."))
+        from core.planners.bandit import resolve_pending
+        mape_info = _load_mape_info()
+        resolve_pending(bandit, pending_path, thresholds, mape_info)
+    except Exception as exc:
+        logging.warning("[Bandit] Pending resolution error: %s", exc)
+
+
 # --- Main MAPE Loop ---
 def run_mape_loop(approach):
     """The main loop that drives the local MAPE logic."""
@@ -48,11 +113,17 @@ def run_mape_loop(approach):
     if approach == "harmone_local":
         # --- Original HarmonE Logic ---
         logging.info("Running in 'harmone_local' mode. Using internal timer.")
+        _thresholds = _load_thresholds()
+        _bandit = _init_bandit_if_needed(_thresholds)
         while True:
             time.sleep(40) # Original 40-second timer
+            # Reload thresholds in case planner changed at runtime
+            _thresholds = _load_thresholds()
+            # Resolve any pending bandit reward BEFORE the MAPE cycle
+            _maybe_resolve_bandit_pending(_bandit, _thresholds)
             logging.info("Local timer triggered. Running MAPE plan...")
             execute_mape(trigger="local")
-            
+
             # Add drift check logic here if needed
             # time.sleep(400)
             # execute_drift(trigger="local")

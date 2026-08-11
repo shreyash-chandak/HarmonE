@@ -306,7 +306,8 @@ class TestPlannerRegistry:
         with pytest.raises(KeyError):
             get_planner("nonexistent_planner_xyz")
 
-    def test_bandit_raises_not_implemented(self):
+    def test_bandit_is_in_registry(self):
         from core.planners.bandit import BanditPlanner
-        with pytest.raises(NotImplementedError):
-            BanditPlanner().plan(NO_VIOLATION)
+        _register()
+        assert "bandit" in REGISTRY
+        assert REGISTRY["bandit"] is BanditPlanner

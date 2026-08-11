@@ -123,7 +123,12 @@ def reset_run_state(domain_dir: str, dry_run: bool = False) -> dict:
             print("[dry-run] Would truncate predictions.csv to header only")
 
     # ── Volatile files — delete ───────────────────────────────────────────────
-    _DELETE_FILES = ["command.txt", "drift.csv", "drift_kl.json"]
+    # bandit_state.json is intentionally NOT reset between runs.
+    # The LinUCB bandit (S7) accumulates learning across runs.
+    # To reset the bandit, delete knowledge/bandit_state.json manually.
+    # bandit_pending.json IS cleared so stale pending rewards don't corrupt
+    # the next session's reward signal.
+    _DELETE_FILES = ["command.txt", "drift.csv", "drift_kl.json", "bandit_pending.json"]
     for fname in _DELETE_FILES:
         fpath = knowledge / fname
         if fpath.exists():

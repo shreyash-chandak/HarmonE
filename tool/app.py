@@ -360,7 +360,7 @@ def set_model():
     return jsonify({"message": "Model set"}), 200
 
 
-_VALID_PLANNERS = {'harmone_original', 'greedy_switch', 'violation_aware', 'pareto', 'random_switch'}
+_VALID_PLANNERS = {'harmone_original', 'greedy_switch', 'violation_aware', 'pareto', 'random_switch', 'bandit'}
 
 @app.route('/api/set-planner', methods=['POST'])
 def set_planner():

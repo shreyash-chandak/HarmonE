@@ -466,6 +466,7 @@
             { id: 'violation_aware',   name: 'Violation Aware',      desc: 'Deprioritises models that recently violated energy budget' },
             { id: 'pareto',            name: 'Pareto Optimal',       desc: 'Selects from accuracy-energy Pareto frontier' },
             { id: 'random_switch',     name: 'Random Switch (HarmonE policy)',  desc: 'Random model selection under the HarmonE score+drift policy — ablation baseline (distinct from the Switch approach button)' },
+            { id: 'bandit',            name: 'LinUCB Bandit (S7)',              desc: 'Contextual bandit that learns which model to select given system state — accumulates across runs (bandit_state.json)' },
         ];
 
         let pendingHarmonESystem = null; // 'reg' or 'cv' — set when planner modal is triggered
@@ -585,23 +586,31 @@
     
         // === PLANNER MODAL ===
 
+        // Planners not yet wired to CV dispatch — run as harmone_original (DP11)
+        // bandit is also excluded from CV until DP11 is resolved
+        const CV_UNIMPLEMENTED_PLANNERS = new Set(['pareto', 'random_switch', 'bandit']);
+
         function showPlannerModal(system) {
             pendingHarmonESystem = system;
             selectedPlannerId = 'harmone_original';
+            const isCV = system === 'cv';
 
             const container = document.getElementById('planner-options');
-            container.innerHTML = PLANNERS.map((p, i) => `
+            container.innerHTML = PLANNERS.map((p, i) => {
+                const dp11 = isCV && CV_UNIMPLEMENTED_PLANNERS.has(p.id);
+                return `
                 <label class="flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-colors planner-option
-                              ${i === 0 ? 'border-blue-400 bg-blue-50' : 'border-gray-200 bg-gray-50 hover:bg-blue-50'}"
+                              ${i === 0 ? 'border-blue-400 bg-blue-50' : 'border-gray-200 bg-gray-50 hover:bg-blue-50'}
+                              ${dp11 ? 'opacity-60' : ''}"
                        data-planner="${p.id}">
                     <input type="radio" name="planner" value="${p.id}" ${i === 0 ? 'checked' : ''}
                            class="mt-0.5 accent-blue-600 flex-shrink-0">
                     <div>
-                        <div class="font-medium text-gray-900 text-sm">${p.name}</div>
+                        <div class="font-medium text-gray-900 text-sm">${p.name}${dp11 ? ' <span class="text-orange-500 font-normal">(CV: runs as HarmonE Original — DP11)</span>' : ''}</div>
                         <div class="text-xs text-gray-500 mt-0.5">${p.desc}</div>
                     </div>
-                </label>
-            `).join('');
+                </label>`;
+            }).join('');
 
             container.querySelectorAll('.planner-option').forEach(el => {
                 el.addEventListener('click', () => {

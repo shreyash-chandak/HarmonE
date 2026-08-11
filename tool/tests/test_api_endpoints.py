@@ -103,7 +103,7 @@ class TestSetPlannerValidation:
         assert resp.status_code == 200
         assert resp.get_json()["planner"] == "harmone_original"
 
-    @pytest.mark.parametrize("bad_planner", ["bandit", "naive", "unknown", "", "HARMONE_ORIGINAL"])
+    @pytest.mark.parametrize("bad_planner", ["naive", "unknown", "", "HARMONE_ORIGINAL"])
     def test_unknown_planner_rejected(self, client, bad_planner):
         resp = client.post(
             "/api/set-planner",

@@ -126,6 +126,7 @@ def plan_mape(trigger="local"):
         return None
 
     # 1. ANALYZE (Only for local mode)
+    analysis = None
     if trigger == "local":
         logging.info("Running in 'local' mode, performing local analysis...")
         analysis = analyse_mape()
@@ -133,14 +134,21 @@ def plan_mape(trigger="local"):
             logging.info("Local analysis: No switch needed.")
             return None
         logging.info("Local analysis: Violation detected, proceeding to plan.")
-    
+
     elif trigger == "acp":
         logging.info("Running in 'acp' mode. ACP detected violation. Proceeding to plan.")
         # We skip the local 'analyse_mape()' because the ACP has already made the decision
-    
+
     else:
         logging.warning(f"Unknown trigger '{trigger}'. Aborting plan.")
         return None
+
+    # Route to registry planner when "bandit" is configured (S7).
+    # dispatch_plan() builds PlanningContext and delegates to the BanditPlanner.
+    planner_name = thresholds.get("planner", "harmone_original")
+    if planner_name == "bandit":
+        violation = (analysis.get("threshold_violated") or "score") if analysis else "score"
+        return dispatch_plan(violation, trigger=trigger)
 
     # 2. PLAN (This logic is now shared by both modes)
     
