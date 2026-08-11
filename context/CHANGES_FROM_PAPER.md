@@ -545,6 +545,32 @@ each fix.
 
 ---
 
+## S7 — LinUCB Bandit Planner (Extension beyond both papers)
+
+The HarmonE and Harmonica papers do not include a bandit-based planner.
+The LinUCB implementation adds a contextual bandit (S7) as the seventh planning strategy.
+
+**Key differences from the published approach:**
+- The bandit maintains per-arm A/b matrices that accumulate learning across all runs on
+  a dataset (not reset between runs); `knowledge/bandit_state.json` keyed by dataset_id.
+- Reward is delayed by one monitoring interval to allow the new model to accumulate real
+  EMA data before updating the bandit (pending record in `knowledge/bandit_pending.json`).
+- Context vector: 10 + 2×|models| features (violation type, EMA scores, energy,
+  drift signal, slope, steps-since-switch, retrain count, VMR size, per-model EMA acc/energy).
+- Reward: sustainability gain (weighted ΔaccEMA + ΔenergyEMA) per joule of switching cost,
+  clipped to [-10, 10].
+- Alpha is configurable (`thresholds["bandit_alpha"]`, default 1.0); sensitivity analysis
+  at {0.1, 0.5, 1.0} planned for experiments.
+- run_reset.py preserves bandit_state.json; bandit_pending.json is cleared on reset.
+- NOT wired in CV domain (DP11 still pending).
+- Dashboard modal shows "LinUCB Bandit (S7)" as sixth option; CV marks it unimplemented.
+- `/api/set-planner` now accepts "bandit" (returns HTTP 200).
+
+**Paper representation:** S7 will appear in the journal extension as a novel planner
+contribution, compared against S1–S6 in the experiment grid on all six datasets.
+
+---
+
 ## A4 — Reproduction Run
 
 *TODO: run after lab machine access. Target: ±5% of paper values.*

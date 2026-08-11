@@ -491,13 +491,11 @@ If you install PyYAML (`pip install pyyaml`), `.yaml` grid configs also work.
 
 ### Expected output
 
-289 tests pass; 2 skip (Flask not installed — pass in WSL); 4 pre-existing failures (init_regression path resolution — unrelated to this work). Total: 295.
+293 tests pass; 2 skip (Flask not installed — pass in WSL). Total: 295.
 
 ```
-============ 289 passed, 2 skipped, 4 failed in X.Xs ============
+============ 293 passed, 2 skipped in X.Xs ============
 ```
-
-The 4 failures (`TestInitRegression::test_scaler_fitted_on_train_split`, `test_reference_distribution_written`, and two `TestInitRegressionPlugAndPlay` tests) are a known issue: `init_regression.py` resolves config paths relative to the CWD, which causes failures when pytest runs from the `tests/` directory. These fail on `main` too; run from `tool/` to pass them.
 
 ---
 

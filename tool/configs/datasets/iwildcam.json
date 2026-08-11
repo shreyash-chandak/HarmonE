@@ -59,7 +59,7 @@
   "planner": "harmone_original",
   "ema_head_start": 0.1,
 
-  "energy_required": ["cpu"],
+  "energy_required": ["gpu"],
 
   "_comment": "Geographic drift showcase. embedding-based drift (MMD on EfficientNet-B0 features). See docs/datasets/iwildcam.md. Calibrate tau_drift per hardware."
 }

@@ -143,7 +143,13 @@ Per-dataset specs and preprocessing recipes: see `docs/datasets/`.
 
 ---
 
-## 2a. Per-Dataset Specs
+## 2a. Per-Dataset Schemas
+
+For a single-page summary of exactly what each dataset's rows must look like on
+disk (column names, types, value ranges, drift-stream ordering, and CV config keys),
+see **[`docs/dataset_row_schemas.md`](dataset_row_schemas.md)**.
+
+## 2b. Per-Dataset Specs
 
 Detailed dataset documentation (raw form, preprocessing recipe, drift-stream
 construction, license) lives in `docs/datasets/`:

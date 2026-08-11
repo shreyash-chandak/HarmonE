@@ -905,10 +905,14 @@ versionedMR/
 
 ### 8.1 The Problem
 
-The current codebase uses pyRAPL throughout. pyRAPL reads Intel RAPL registers.
+> **STATUS (2026-07-30):** pyRAPL has been fully removed from the codebase and replaced with pyJoules (Phase 6 / E3). The description below is historical context explaining WHY the switch was needed. The actual implementation is `core/energy.py::EnergyMeter` — see §8.4 SUPERSEDED note and `CHANGES_FROM_PAPER.md` Phase 6.
+
+The original codebase used pyRAPL. pyRAPL reads Intel RAPL registers.
 The machine has an AMD CPU and an NVIDIA RTX 5060 GPU. Two separate problems:
 
-**AMD CPU**: pyRAPL may return zero on AMD. Test with:
+**AMD CPU**: pyRAPL returns zero on AMD. (Resolved via pyJoules, which reads the same `/sys/class/powercap/intel-rapl/` sysfs interface on AMD Zen 2+ CPUs.)
+
+> Historical test that confirmed the AMD problem:
 ```bash
 sudo modprobe msr
 python3 -c "
@@ -920,7 +924,7 @@ m.end()
 print('pkg:', m.result.pkg)
 "
 ```
-If pkg is zero or None, AMD RAPL is inaccessible via pyRAPL on this chip.
+pkg was zero → AMD RAPL inaccessible via pyRAPL on this chip.
 
 **RTX 5060 GPU**: pyJoules's NVML backend calls
 `nvmlDeviceGetTotalEnergyConsumption()`. This function is not implemented on all
@@ -1309,33 +1313,24 @@ Document all calibration choices — reviewers will ask.
 
 ---
 
-## 11. Current Blockers (As of July 25 2026)
+## 11. Blocker Status (Updated 2026-07-30)
 
-In priority order. Nothing can start until each prior blocker is resolved.
+Original blockers from July 25 2026 — updated with current state.
 
-**Blocker 1 — PyTorch CUDA incompatibility (blocks all CV inference)**
-PyTorch 2.13.0+cu126 does not support sm_120. Reinstall with cu129 or cu130.
-Cannot test any CV code until this is fixed.
+**Blocker 1 — PyTorch CUDA incompatibility** ⬜ PARTIALLY RESOLVED
+A fast-fail GPU arch guard was added to `managed_system_cv/inference.py` (L3 fix): the system now exits immediately with a clear remediation message instead of crashing mid-warmup. The guard prints the detected compute capability and the correct pip install command (`cu129`/`cu133`). The actual PyTorch reinstall must be done manually on the lab machine before live CV inference runs.
 
-**Blocker 2 — pyJoules NVML validation (blocks energy abstraction)**
-Cannot know which GPU energy backend to implement until NVML is tested against
-the RTX 5060. Cannot test until Blocker 1 is fixed (environment is broken).
+**Blocker 2 — pyJoules NVML validation** ⬜ IMPLEMENTATION DONE, HARDWARE PENDING
+`core/energy.py::EnergyMeter` is implemented with `_PyJoulesRaplBackend`, `_PyJoulesNvmlBackend`, and `_PollingGPUBackend` (50 ms nvidia-smi integration fallback). `scripts/probe_energy.py` probes all backends and caches results. Hardware validation (confirming non-zero readings on RTX 5060 / Ryzen AI 7 350) is deferred to the lab machine session.
 
-**Blocker 3 — Proxy validation experiment (blocks iWildCam and ACDC integration)**
-Must run on BDD100K before deciding which proxy implementation to use.
-Cannot run until Blocker 1 is fixed.
+**Blocker 3 — Proxy validation experiment** ⬜ PENDING
+BDD100K images and labels must be present. Infrastructure (`experiments/proxy_validation.py`, `experiments/offline_eval.py`, all three detection adapter methods) is ready. Run after Blockers 1 and 5.
 
-**Blocker 4 — Adapter architecture (can build in parallel with Blockers 1–3)**
-`CVAdapter` base class and all three adapters need to exist before dataset
-integration. This is the one thing that can be built while waiting for
-PyTorch reinstall. Build the interface and stub all four methods; fill in
-implementations once inference is running.
+**Blocker 4 — Adapter architecture** ✅ DONE (Phase 3 sprint)
+`tool/adapters/tasks/` package: `base.py` (TaskAdapter ABC + registry), `detection.py` (YOLO), `classification.py` (torchvision), `segmentation.py` (SegFormer). All R5 corrections applied. Tests in `test_task_adapters.py`. CV `inference.py` uses the adapter layer.
 
-**Blocker 5 — Dataset downloads and preprocessing**
-BDD100K requires account registration at bdd-data.berkeley.edu.
-iWildCam available at wilds.stanford.edu/datasets/ without registration.
-ACDC requires registration at acdc.vision.ee.ethz.ch.
-Each needs a drift-ordered stream constructed from metadata (not just raw download).
+**Blocker 5 — Dataset downloads and preprocessing** ⬜ PENDING (lab machine)
+BDD100K, iWildCam, ACDC not yet downloaded. Config skeletons with `"status": "awaiting_data"` exist in `configs/datasets/`; dataset expectation docs in `tool/docs/datasets/`. See RUNNING_ON_ARCH.md for lab setup sequence.
 
 ---
 

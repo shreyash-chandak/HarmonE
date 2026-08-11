@@ -71,17 +71,29 @@ confidence-vs-IoU alignment is more practical but less principled.
 
 ---
 
-## DP3 — Bandit Planner (S7)
+## ✅ DECIDED — DP3 / DP8: LinUCB Bandit Planner (S7)
 
-**Decision needed:** Whether LinUCB bandit planner is fully implemented or left as a
-documented stub for the paper deadline.
+**Decided (2026-08-11):** LinUCB contextual bandit implemented in `core/planners/bandit.py`.
 
-**Current state:** `core/planners/bandit.py` is a documented stub raising
-`NotImplementedError` with the full algorithm specification as a comment.
-
-**Cost to implement:** ~2 days engineering. Requires: feature vector definition
-(EMA slope, drift signal, steps-since-switch, remaining energy budget), reward
-definition (ΔS_i per Joule of switching cost), contextual bandit training loop.
+Key decisions:
+- **Algorithm**: LinUCB with fixed alpha (not decaying). Fixed alpha chosen because sample
+  count per run (~12 decisions) is too low for meaningful decay; fixed alpha provides
+  LinUCB's theoretical regret guarantees.
+- **Context**: 10 + 2×|models| dimensional vector. Features: violation type (one-hot 3),
+  current EMA, normalised energy, drift signal, EMA slope, steps-since-switch, retrain
+  count, VMR size, per-model EMA accuracy, per-model EMA energy.
+- **Reward**: sustainability gain (weighted accuracy improvement + energy reduction) per
+  joule of switching cost. Delayed by one monitoring interval.
+- **State persistence**: `knowledge/bandit_state.json` keyed by dataset_id. NOT reset
+  between runs. `run_reset.py` preserves it (bandit_pending.json IS cleared on reset).
+- **Constructor injection**: module-level `_bandit_instance` in `bandit.py`; `manage.py`
+  calls `set_bandit_instance()` at startup; `get_planner("bandit")` reads it.
+- **plan() delegation**: `plan_mape()` detects `planner=="bandit"` and calls `dispatch_plan()`.
+- **Sensitivity analysis**: alpha ∈ {0.1, 0.5, 1.0} to be run in experiments.
+- **CV domain**: bandit NOT wired in CV domain (DP11 still pending).
+- **Dashboard**: "LinUCB Bandit (S7)" added as sixth option; CV_UNIMPLEMENTED_PLANNERS.
+- **API**: `/api/set-planner` now accepts "bandit" (previously HTTP 400).
+- **Tests**: 30 new tests in `tests/test_bandit_planner.py`; total suite 323 pass.
 
 ---
 
@@ -91,8 +103,8 @@ definition (ΔS_i per Joule of switching cost), contextual bandit training loop.
 `experiments/calibrate_drift_threshold.py`) or set globally from the existing default (0.5)?
 
 **Current state:** Default `tau_drift = 0.5` (regression), `tau_drift = 0.07` (CV).
-`experiments/calibrate_drift_threshold.py` (Phase 3) computes p99 of the null distribution
-for a given dataset+detector.
+`experiments/calibrate_drift_threshold.py` is planned but **not yet implemented** — it would
+compute p99 of the null distribution for a given dataset+detector.
 
 **Issue:** Using the bundled PeMS tau_drift for a new dataset may give very different
 false-positive rates. Calibration is the right approach but requires held-out in-distribution
@@ -106,8 +118,8 @@ windows per dataset.
 splits for initial scaler fitting and reference distribution computation.
 
 **Current default (Phase 1):** First 80% of rows = train, remainder = test (chronological).
-This is implemented in `scripts/init_scaler.py`. The exact split index should be a config
-field in `configs/datasets/pems_node1.json` once that file exists.
+This is implemented in `scripts/init_regression.py`. The exact split index is a config
+field (`train_frac`, default 0.8) in `configs/datasets/pems_node1.json`.
 
 **Sign-off needed on:** whether the paper's original split was 80/20 or something else.
 Check the original experiment setup before finalising.
@@ -145,11 +157,11 @@ confirmed. Document as deferred in any paper draft table of contributions.
 1. SimCLR/MoCo-style contrastive loss on unlabelled retrain window
 2. SupCon if pseudo-labels are available from the pseudo_label tactic
 
-### DP8 — S7: Bandit exploration planner (LinUCB)
+### ✅ DP8 — S7: Bandit exploration planner (LinUCB)
 
-**Status:** Deferred (P2). `core/planners/bandit.py` is a documented stub raising
-`NotImplementedError`. Feature vector and reward definition (see DP3) require empirical
-tuning. Estimated cost: ~2 days engineering. Not included in the prototype evaluation.
+**Status:** IMPLEMENTED (2026-08-11). See DP3 above for full decision record.
+`core/planners/bandit.py` contains complete LinUCBBandit and BanditPlanner.
+30 tests pass. Wired into regression manage.py and plan.py.
 
 **Options when revisited:**
 1. LinUCB with context = [EMA slope, drift signal, steps-since-switch, energy budget]
@@ -168,6 +180,20 @@ tuning. Estimated cost: ~2 days engineering. Not included in the prototype evalu
 **Decision needed:** Refactor CV `execute.py` to call `dispatch_plan()` (mirrors regression architecture from Phase 2). Requires: wiring `PlanningContext` in CV `plan.py`, routing all five modal planners through `get_planner()`, and verifying that `cv_greedy_switch` / `cv_violation_aware` / `cv_pareto` / `cv_random_switch` functions in CV `plan.py` return `Decision` objects compatible with `dispatch_plan()`'s return contract.
 
 **Cost:** ~1 day. Not blocking current experiments (CV always runs `harmone_original` logic regardless of modal selection).
+
+### DP12 — proxy_validation.py API alignment
+
+**Status:** Diverges from checkpoint spec (2026-08-05). Current `experiments/proxy_validation.py` accepts `--run <run_dir>` and produces a Spearman ρ summary for BDD100K/confidence/calibrated/agreement proxies. Checkpoint spec wants `--config configs/datasets/bdd100k.json --max-frames 100`, per-frame iteration in drift order, and a CSV output with columns `interval, confidence_proxy, true_accuracy, model, dataset, condition`.
+
+**Decision needed:** Extend or replace the current script to also support the config-driven per-frame API. The safest path is adding a second entrypoint (`validate_per_frame()`) rather than rewriting the existing Spearman pipeline.
+
+**Cost:** ~0.5 day. Unblocks: the proxy validation smoke test from checkpoint §7.
+
+### DP13 — validate_manifests.py (bulk dataset validator)
+
+**Status:** `scripts/validate_dataset.py` validates one dataset config at a time. Checkpoint §7 smoke test requires `scripts/validate_manifests.py` that loops all 6 dataset configs in one invocation and produces a PASS/FAIL table. Current workaround: run `validate_dataset.py` six times.
+
+**Cost:** ~1 hour. Unblocks: checkpoint §7 smoke test step 5.
 
 ### DP9 — DeepLab variants for ACDC segmentation
 

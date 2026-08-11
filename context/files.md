@@ -87,6 +87,7 @@ HarmonE-tool/
     │
     ├── docs/
     │   ├── DATA_CONTRACT.md        # Plug-and-play data contract
+    │   ├── dataset_row_schemas.md  # Single-page column/type/value-range summary for all 6 datasets
     │   ├── datasets/               # Per-dataset expectation specs
     │   │   ├── index.md
     │   │   ├── pems_node2.md
@@ -188,7 +189,12 @@ HarmonE-tool/
     │   ├── make_toy_datasets.py
     │   ├── probe_energy.py
     │   ├── setup_energy_permissions.sh
-    │   └── validate_dataset.py
+    │   ├── validate_dataset.py
+    │   ├── preprocess_uci_electricity.py  # R2: DST dedup, meter selection, kW CSV
+    │   ├── preprocess_spot_prices.py      # R3: auto-detects ERCOT/NordPool headers
+    │   ├── preprocess_bdd100k.py          # C1: attribute→domain mapping, drift-ordered manifest
+    │   ├── preprocess_iwildcam.py         # C2: WILDS metadata.csv, location-ordered manifest
+    │   └── preprocess_acdc.py             # C3: rgb_anon/gt_trainval pairing, condition-ordered manifest
     │
     └── tests/
         ├── test_b1_energy_threshold.py
@@ -331,7 +337,7 @@ HarmonE-tool/
 | `harmone_original.py` | **S4 — HarmonE original (default).** ε-greedy: with probability α explores randomly; otherwise exploits best EMA alternative. Triggers VMR replace or retrain on drift. Preserves exact paper behaviour. |
 | `violation_aware.py` | **S5 — Violation-aware.** Differentiates score violations (switch to best accuracy model) from energy violations (switch to lightest model); does not mix the two decision paths. |
 | `pareto.py` | **S6 — Pareto.** Selects via weighted Chebyshev distance on the (accuracy, energy) objective space. Weights `w_acc` and `w_e` are config-driven. |
-| `bandit.py` | **S7 — LinUCB stub.** Raises `NotImplementedError`. Placeholder for a contextual bandit planner in future work. |
+| `bandit.py` | **S7 — LinUCB contextual bandit.** Full implementation: `LinUCBBandit` (A/b matrices, select/reward/persist), `BanditPlanner` (Planner ABC; reads module-level `_bandit_instance`), `build_context()` (16-dim feature vector), `load_or_create_bandit()` factory, `resolve_pending()` (called by manage.py each cycle). State persists to `knowledge/bandit_state.json` keyed by dataset_id. NOT wired in CV domain (DP11). |
 
 #### `core/proxies/`
 
@@ -431,9 +437,11 @@ HarmonE-tool/
 
 | File | Purpose |
 |---|---|
-| `thresholds.json` | Regression adaptation thresholds: `min_score`, `max_energy`, `E_m`, `E_M`, `alpha`, `beta`, `gamma`, `tau_drift`, `energy_meter`, `switch_cooldown_s`. |
+| `thresholds.json` | Regression adaptation thresholds: `min_score`, `max_energy`, `E_m`, `E_M`, `alpha`, `beta`, `gamma`, `tau_drift`, `energy_meter`, `switch_cooldown_s`, `monitoring_interval_s`, `bandit_alpha`, `dataset_id` (bandit keys added 2026-08-11). |
 | `mape_info.json` | Live MAPE state mirroring the CV equivalent. |
 | `drift_kl.json` | Last KL drift analysis output for regression. |
+| `bandit_state.json` | LinUCB bandit learning state keyed by dataset_id: per-arm A matrices and b vectors, total_decisions, total_updates. **Intentionally preserved across run_reset.py resets.** Written atomically. Created on first bandit run. |
+| `bandit_pending.json` | One pending bandit decision awaiting reward resolution (at most one file at any time). Written by BanditPlanner.plan(), read and deleted by resolve_pending() at the top of the next MAPE cycle. Cleared by run_reset.py between sessions. |
 
 #### `managed_system_regression/mape_logic/`
 
@@ -441,9 +449,9 @@ HarmonE-tool/
 |---|---|
 | `monitor.py` | Reads new rows from `predictions.csv` since `last_line`. Computes R² over the window, normalises energy against `E_m`/`E_M`, runs both fixed-ref and rolling KL detectors. Returns `{"fresh": False}` when no new rows — stale telemetry path removed (L1-c fix). |
 | `analyse.py` | Evaluates monitor signals against thresholds. Selects the active KL signal based on `drift_reference` config (`"fixed"`, `"rolling"`, or `"both"`). Updates EMA via `core/scoring`. Returns `switch_needed` and `threshold_violated`. |
-| `plan.py` | Regression planning layer. `dispatch_plan()` routes through the planner registry for Phase-2 planners. Legacy `plan_mape()`, `plan_drift()`, `plan_random_switch()`, `plan_greedy_switch()` functions remain for backward compatibility. All paths check `switch_cooldown_s` (L5 guard). |
+| `plan.py` | Regression planning layer. `dispatch_plan()` routes through the planner registry for Phase-2 planners. `plan_mape()` delegates to `dispatch_plan()` when `thresholds["planner"]=="bandit"` (S7, 2026-08-11). Legacy `plan_mape()`, `plan_drift()`, `plan_random_switch()`, `plan_greedy_switch()` functions remain for backward compatibility. All paths check `switch_cooldown_s` (L5 guard). |
 | `execute.py` | Executes the regression plan: writes `model.csv`, runs `retrain.py` or VMR replace, records events, tracks `last_switch_ts`. |
-| `manage.py` | **Regression MAPE orchestrator.** Startup command.txt clear (L2-a), MAPE loop, ACP command listener thread with timestamp gating (L2-b). Identical structure to CV manage.py. |
+| `manage.py` | **Regression MAPE orchestrator.** Startup command.txt clear (L2-a), MAPE loop, ACP command listener thread with timestamp gating (L2-b). S7 bandit lifecycle: creates LinUCBBandit at startup when `thresholds["planner"]=="bandit"`, calls `resolve_pending()` at the top of each MAPE cycle before `execute_mape()`. |
 
 ---
 
@@ -478,6 +486,11 @@ Policy JSON files consumed by `app.py`. Each defines one `quality_attribute` pri
 | `probe_energy.py` | **E1/E2 hardware probe.** Tests whether pyJoules RAPL and NVML backends return non-zero readings on the current machine. Falls back through pynvml power polling → nvidia-smi subprocess for GPU. Caches results to `knowledge/.energy_backends.json` keyed by hostname. Exits 1 if all probes fail. |
 | `setup_energy_permissions.sh` | Once-per-boot shell script (run with sudo). Loads `msr`, `intel_rapl_common`, `intel_rapl_msr` kernel modules and sets powercap sysfs permissions to 777. Required before any RAPL energy measurement on Linux. |
 | `validate_dataset.py` | CLI wrapper for `core/dataset_validator.py`. Accepts a config name or path, prints the PASS/FAIL table, exits 1 on failure. |
+| `preprocess_uci_electricity.py` | **R2 preprocessing.** Reads `LD2011_2014.txt` (semicolon-delimited, European decimals). Drops DST duplicate timestamps (keep-first). Drops leading-zero rows. Extracts one meter column (default `MT_168`) as `timestamp, value` CSV in kW per 15-minute interval. |
+| `preprocess_spot_prices.py` | **R3 preprocessing.** Auto-detects ERCOT vs Nord Pool format from CSV headers. ERCOT: builds timestamp from `Delivery Date` + `Delivery Hour`, filters to one settlement point (default `HB_NORTH`). Nord Pool: filters to one bidding area (default `DK1`), uses `HourUTC` + `SpotPriceEUR`. Outputs `timestamp, value` CSV. |
+| `preprocess_bdd100k.py` | **C1 preprocessing.** Reads BDD100K annotation JSONs, maps `attributes.weather` + `attributes.timeofday` to domain labels (`clear_day / overcast / foggy / dusk / night / rain / snow`). Builds drift-ordered manifest CSV sorted `clear_day → overcast → foggy → dusk → night → rain`. |
+| `preprocess_iwildcam.py` | **C2 preprocessing.** Parses WILDS v2.0 `metadata.csv`. Maps `location` column to `domain`. Outputs manifest CSV sorted by location to create geographic drift sequence. Primary stream is OOD test split (split=4). |
+| `preprocess_acdc.py` | **C3 preprocessing.** Pairs `rgb_anon/{condition}/{split}/{seq}/*.png` with `gt_trainval/gt/{condition}/{split}/{seq}/*_gt_labelTrainIds.png`. Outputs manifest sorted fog → rain → night → snow. Uses `_gt_labelTrainIds.png` (trainIds 0–18 + 255), not `_gt_labelIds.png`. |
 
 ---
 
@@ -493,7 +506,8 @@ Policy JSON files consumed by `app.py`. Each defines one `quality_attribute` pri
 | `test_b6_switch_counter.py` | Verifies B6 fix: `event_counters["model_switches"]` increments only when a model switch actually executes, not on noop planning cycles. |
 | `test_b7_scaler_leakage.py` | Verifies B7 fix: scaler params equal the train-split min/max, not the full-dataset extremes. |
 | `test_adapters.py` | Tests the `DatasetAdapter` interface contract and `RegressionCSVAdapter` stream/split behaviour. |
-| `test_planners.py` | Tests all 7 planners via `PlanningContext` mocks: noop returns, switch selection, cooldown guard, energy vs score separation, Pareto distance. |
+| `test_planners.py` | Tests all 7 planners via `PlanningContext` mocks: noop returns, switch selection, cooldown guard, energy vs score separation, Pareto distance. Includes registry check that `bandit` is registered as `BanditPlanner`. |
+| `test_bandit_planner.py` | **30 S7 bandit tests.** Groups: LinUCBBandit unit (init, state persistence, dataset isolation, select_action, reward, observe_outcome), BanditPlanner integration (switch/noop decisions, pending metadata, fallback), resolve_pending lifecycle (too-soon skip, resolve after interval, corrupt JSON), build_context smoke, load_or_create_bandit factory. |
 | `test_phase3_drift.py` | Tests all drift detectors: KL fixed-ref updates, MMD kernel, Fréchet Gaussian approximation. |
 | `test_phase3_proxies.py` | Tests all three accuracy proxies: confidence mean, calibrated scaling, agreement fallback. |
 | `test_phase3_vmr.py` | Tests `VMR.store()`, `best_match()` with both strategies, and `restore()` path invariants. |

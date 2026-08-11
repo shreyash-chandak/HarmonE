@@ -242,8 +242,8 @@ class TestInitRegressionPlugAndPlay:
         finally:
             ir_mod._TOOL_DIR = orig_tool_dir
 
-        scaler_path = tmp_path / "knowledge" / "scaler.pkl"
-        ref_path = tmp_path / "knowledge" / "reference_distribution.json"
+        scaler_path = tmp_path / "managed_system_regression" / "knowledge" / "scaler.pkl"
+        ref_path = tmp_path / "managed_system_regression" / "knowledge" / "reference_distribution.json"
         assert scaler_path.exists(), "scaler.pkl not created"
         assert ref_path.exists(), "reference_distribution.json not created"
 
@@ -266,7 +266,8 @@ class TestInitRegressionPlugAndPlay:
         _make_regression_csv(csv_path, n=200)
 
         # Write a dummy scaler that should be replaced
-        dummy_path = tmp_path / "knowledge" / "scaler.pkl"
+        dummy_path = tmp_path / "managed_system_regression" / "knowledge" / "scaler.pkl"
+        dummy_path.parent.mkdir(parents=True, exist_ok=True)
         dummy_path.write_bytes(b"dummy")
 
         cfg = {
@@ -290,7 +291,6 @@ class TestInitRegressionPlugAndPlay:
         with open(dummy_path, "rb") as f:
             content = f.read(4)
         assert content != b"dumm", "scaler.pkl should have been overwritten by --force"
-        # Should now be a valid pickle
         with open(dummy_path, "rb") as f:
             obj = pickle.load(f)
         assert hasattr(obj, "transform"), "Expected a fitted sklearn scaler"

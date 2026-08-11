@@ -9,8 +9,11 @@
 > GitHub.
 > **You must read, in this order, before writing code:**
 > `files.md` (current file inventory — treat as the map of what exists),
-> `CHANGES_FROM_PAPER.md`, `live-run-report.md`, `cv_guide.md`,
-> `documentation.md`, `plan.md`, `improvement.md`.
+> `CHANGES_FROM_PAPER.md`, `cv_guide.md`, `documentation.md`.
+>
+> **Note (2026-07-30):** `live-run-report.md`, `plan.md`, and `improvement.md`
+> were deleted during the context-doc cleanup in the 2026-07-30 session and no
+> longer exist. Skip them.
 > **Datasets are NOT downloaded and will NOT be downloaded in this sprint.**
 > Everything must work on the bundled PeMS csv, bundled BDD images, and the
 > generated toy datasets.

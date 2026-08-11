@@ -3,8 +3,9 @@
   "domain": "cv",
   "adapter": "adapters.cv_imagedir.CVImageDirAdapter",
 
-  "image_dir": "../../managed_system_cv/knowledge/images",
-  "manifest_csv": null,
+  "image_dir": "data/bdd100k/images",
+  "manifest_csv": "data/bdd100k/bdd100k_manifest.csv",
+  "status": "awaiting_data",
   "seq_length": 1,
   "train_frac": 0.8,
   "val_frac": 0.1,
@@ -59,7 +60,7 @@
   "w_acc": 1.0,
   "w_e": 1.0,
 
-  "energy_required": ["cpu"],
+  "energy_required": ["gpu"],
 
   "_comment_calibration": "E_M and tau_drift must be calibrated per hardware. Run experiments/calibrate_energy_bounds.py and experiments/calibrate_drift_threshold.py before using these values for paper experiments."
 }

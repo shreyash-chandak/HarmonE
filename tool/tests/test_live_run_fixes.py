@@ -452,7 +452,7 @@ class TestInitRegression:
         finally:
             ir._TOOL_DIR = orig
 
-        scaler_path = tool_dir / "knowledge" / "scaler.pkl"
+        scaler_path = tool_dir / "managed_system_regression" / "knowledge" / "scaler.pkl"
         assert scaler_path.exists(), "scaler.pkl must be written"
 
         with open(scaler_path, "rb") as f:
@@ -479,7 +479,7 @@ class TestInitRegression:
         finally:
             ir._TOOL_DIR = orig
 
-        ref_path = tool_dir / "knowledge" / "reference_distribution.json"
+        ref_path = tool_dir / "managed_system_regression" / "knowledge" / "reference_distribution.json"
         assert ref_path.exists()
         data = json.loads(ref_path.read_text())
         assert "histogram" in data and "bin_edges" in data

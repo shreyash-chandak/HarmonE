@@ -39,6 +39,7 @@
   "E_m": 0,
   "E_M": 5000000,
   "tau_drift": 0.05,
+  "tau_drift_source": "default_pending_calibration",
   "drift_reference": "both",
 
   "planner": "harmone_original",

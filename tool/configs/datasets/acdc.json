@@ -55,7 +55,7 @@
   "planner": "harmone_original",
   "ema_head_start": 0.1,
 
-  "energy_required": ["cpu"],
+  "energy_required": ["gpu"],
 
   "_comment": "Adverse-condition segmentation. clear→fog→rain→night→snow drift stream. Cityscapes label format, ignore_index=255. See docs/datasets/acdc.md. Calibrate tau_drift per hardware."
 }

@@ -62,6 +62,10 @@ plan explicitly says to keep both because they are comparison baselines for the 
 (histogram of `true_value` from the training split). Created by `retrain.py` and by a
 new `scripts/init_reference.py` for the initial setup.
 
+> **[Superseded]** `scripts/init_reference.py` was never written as a standalone file.
+> Its function is consolidated into `scripts/init_regression.py`, which fits the scaler
+> and writes the reference histogram in one idempotent script.
+
 ---
 
 ## D4 — Model Cache with Flag-Based Reload (B4)
@@ -120,7 +124,8 @@ compare planner aggressiveness.
 ## D7 — Scaler Persistence Pattern (B7)
 
 **Decision:** `MinMaxScaler` is fitted once on the training data (`retrain.py` and the
-initial `scripts/init_scaler.py`), then persisted to `knowledge/scaler.pkl`. `inference.py`
+initial `scripts/init_scaler.py` [superseded by `scripts/init_regression.py`]), then
+persisted to `knowledge/scaler.pkl`. `inference.py`
 loads it at startup (not per-iteration) and applies `transform()` only. Refitting on
 `drift.csv` at retrain time overwrites atomically (write to `.tmp` then `os.replace()`).
 
@@ -186,9 +191,27 @@ But it must be configurable so experiments can test with and without it.
 
 **Startup error surfacing (G8):** `/api/start-managed-system` now waits 4 s, polls the child process, and returns HTTP 500 + last 20 log lines if the process exits early (e.g., missing artifacts). Dashboard gates polling start on HTTP 200.
 
-**Set-planner validation (G9):** Valid planner set: `{harmone_original, greedy_switch, violation_aware, pareto, random_switch}`. Anything else → HTTP 400. `bandit` is excluded because its `plan()` raises NotImplementedError.
+**Set-planner validation (G9):** Valid planner set: `{harmone_original, greedy_switch, violation_aware, pareto, random_switch, bandit}` (bandit added 2026-08-11). Anything else → HTTP 400.
 
 **CV planner limitation (DP11):** CV domain still uses legacy `plan_mape()` / `execute_mape()` (not `dispatch_plan()`). The `thresholds.json["planner"]` key is written for CV but ignored at runtime. Only 3 of 5 modal planners are behaviorally distinct for CV (harmone_original = greedy_switch = violation_aware at the plan level). Pareto and random_switch planners are shown in the modal but fall back to legacy behavior. Deferred to DP11.
+
+---
+
+## D12 — LinUCB Bandit Planner Design (S7)
+
+**Decision (2026-08-11):** LinUCB contextual bandit implemented as two classes in `core/planners/bandit.py`: `LinUCBBandit` (raw algorithm) and `BanditPlanner` (Planner ABC adapter). Key design choices:
+
+**Constructor injection:** `get_planner("bandit")` calls `REGISTRY["bandit"]()` with no args. `BanditPlanner.__init__(bandit=None)` reads a module-level `_bandit_instance` slot set by `manage.py` via `set_bandit_instance()`. Tests pass an explicit bandit to avoid the module-level dependency. Alternatives considered: (a) registry kwargs — would require changing `base.py::get_planner()`; (b) singleton in `bandit.py` — chosen as fewest changes to `base.py`.
+
+**Pending reward via file:** `BanditPlanner.plan()` writes `bandit_pending.json` atomically (`.tmp` → `os.replace`). `manage.py` calls `resolve_pending()` at the top of each MAPE cycle. Alternative (metadata threading through execute.py) was skipped — execute.py's return path is None/string/dict which already constrains how data flows.
+
+**plan_mape() delegation:** When `thresholds["planner"] == "bandit"`, `plan_mape()` calls `dispatch_plan(violation)` instead of the epsilon-greedy fallback. This is minimal and doesn't change the live call chain for other planners.
+
+**Fixed alpha:** alpha=1.0 default. No decay schedule. LinUCB's theoretical regret bound holds for fixed alpha with O(√T log T) cumulative regret. With ~12 decisions per run, decay would prevent exploration before convergence. Config-driven via `thresholds["bandit_alpha"]`.
+
+**run_reset.py:** `bandit_state.json` preserved (cross-run learning is the point). `bandit_pending.json` deleted (stale pending rewards would corrupt the next session's signal).
+
+**Alternatives considered for dispatch:** (a) Modify `execute_mape()` to check planner and call `dispatch_plan()` directly — skipped because `execute_mape()` doesn't return the decision, making pending persistence harder; (b) Modify `manage.py` to call `dispatch_plan()` directly — skipped because it duplicates the violation detection that `plan_mape()` already does via `analyse_mape()`.
 
 ---
 
@@ -196,7 +219,6 @@ But it must be configurable so experiments can test with and without it.
 
 - DP1: Which datasets to use for the journal extension (not yet chosen)
 - DP2: Whether Platt scaling or NLL minimisation for temperature scaling (CV proxy calibration)
-- DP3: Whether LinUCB bandit (S7) is implemented or stubbed for the paper deadline
 - DP4: `tau_drift` values — empirically calibrated per dataset or shared defaults
 - DP10: `reg_random_switch` standalone baseline needs its own approach token (`reg_random`) for proper policy prefix routing; currently falls through to `reg_harmone` path
 - DP11: CV domain upgrade to `dispatch_plan()` + planner registry (mirrors regression architecture)

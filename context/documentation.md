@@ -1217,9 +1217,10 @@ Policies are JSON files stored in `tool/policies/`. They define what to monitor,
 
 | `tactic_id` | What happens |
 |---|---|
-| `execute_mape_plan` | `manage.py` calls `execute_mape(trigger="acp")` — epsilon-greedy model switch |
+| `execute_mape_plan` | `manage.py` calls `execute_mape(trigger="acp")` — epsilon-greedy model switch via the active planner |
 | `handle_data_drift` | `manage.py` calls `execute_drift(trigger="acp")` — VMR lookup or retrain |
-| `switch_model_r2_baseline` | `manage.py` calls `execute_mape(trigger="acp")` — same as MAPE plan (simple switch `execute_simple_switch` is currently commented out) |
+| `switch_model_r2_baseline` | `manage.py` calls `execute_mape(trigger="acp")` — alias retained for backward compat with old policy JSON files |
+| `random_switch` | `manage.py` calls `execute_simple_switch(trigger="acp")` — uniform random selection from non-current models (ablation baseline) |
 
 ---
 
