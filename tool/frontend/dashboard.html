@@ -268,6 +268,7 @@
                                 <option value="reg_greedy_switch">REG: HarmonE Greedy Switch</option>
                                 <option value="reg_violation_aware">REG: HarmonE Violation Aware</option>
                                 <option value="reg_pareto">REG: HarmonE Pareto Optimal</option>
+                                <option value="reg_bandit">REG: HarmonE LinUCB Bandit (S7)</option>
                             </optgroup>
                             <optgroup label="Regression — Baselines">
                                 <option value="reg_switch_r2">REG: Simple R² Switch</option>
@@ -526,6 +527,16 @@
                 quality_attribute: "r2_score",
                 adaptation_boundary: { condition: "LESS_THAN", threshold: 0.70 },
                 tactics: [ { tactic_id: "random_switch", priority: 1, tactic_endpoint: "http://localhost:8080/adaptor/tactic" } ],
+                associated_qas: ["r2_score", "energy", "model_used"]
+            },
+            "reg_bandit": {
+                policy_id: "reg_bandit",
+                quality_attribute: "score",
+                adaptation_boundary: { type: "STATIC_THRESHOLD", condition: "LESS_THAN", threshold: 0.78 },
+                tactics: [ { tactic_id: "execute_mape_plan", priority: 1, tactic_endpoint: "http://localhost:8080/adaptor/tactic" } ],
+                secondary_boundaries: [
+                    { quality_attribute: "kl_div", condition: "GREATER_THAN", threshold: 0.10, tactic_id: "handle_data_drift" }
+                ],
                 associated_qas: ["r2_score", "energy", "model_used"]
             },
             "reg_harmone_drift": {

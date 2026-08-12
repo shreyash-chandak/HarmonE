@@ -15,5 +15,6 @@
     "monitoring_interval_s": 40,
     "bandit_alpha": 1.0,
     "dataset_id": "",
-    "_comment_bandit": "bandit_alpha: LinUCB exploration parameter (default 1.0). dataset_id: keyed to bandit_state.json — set per dataset before running. monitoring_interval_s: used by bandit pending resolution."
+    "_comment_bandit": "bandit_alpha: LinUCB exploration parameter (default 1.0). dataset_id: keyed to bandit_state.json \u2014 set per dataset before running. monitoring_interval_s: used by bandit pending resolution.",
+    "planner": "bandit"
 }

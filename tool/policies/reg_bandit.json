@@ -1,0 +1,30 @@
+{
+  "policy_id": "reg_bandit",
+  "quality_attribute": "score",
+  "adaptation_boundary": {
+    "type": "STATIC_THRESHOLD",
+    "condition": "LESS_THAN",
+    "threshold": 0.78
+  },
+  "tactics": [
+    {
+      "tactic_id": "execute_mape_plan",
+      "priority": 1,
+      "tactic_type": "CORE",
+      "tactic_endpoint": "http://localhost:8080/adaptor/tactic"
+    }
+  ],
+  "secondary_boundaries": [
+    {
+      "quality_attribute": "kl_div",
+      "condition": "GREATER_THAN",
+      "threshold": 0.1,
+      "tactic_id": "handle_data_drift"
+    }
+  ],
+  "associated_qas": [
+    "r2_score",
+    "energy",
+    "model_used"
+  ]
+}

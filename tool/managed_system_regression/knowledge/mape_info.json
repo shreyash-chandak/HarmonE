@@ -1,5 +1,5 @@
 {
-    "last_line": 16958,
+    "last_line": 18101,
     "current_energy_threshold": 0.6,
     "linear_version": 1,
     "lstm_version": 1,
@@ -15,7 +15,7 @@
         "svm": -0.6408310026044731
     },
     "ema_energy": {
-        "lstm": 1.668036142680567e-164,
+        "lstm": 2.29253141803487e-190,
         "linear": 4.1231686041599654e-27,
         "svm": 3.450873173395103e-161
     },
