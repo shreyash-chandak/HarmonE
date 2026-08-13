@@ -34,17 +34,27 @@ A single CSV file with at minimum:
 | Column | Type | Notes |
 |--------|------|-------|
 | `timestamp` | string ISO-8601 or parseable by `pd.to_datetime` | monotonically increasing |
-| `value` | float64 | the flow/occupancy reading; no NaN |
+| `flow` | float64 | the flow reading (vehicles/5-min); no NaN |
 
-Minimum row count: 5 000 (seq_length=5, horizon=1 → min=(seq+horizon)×10=60;
-practical minimum for meaningful drift simulation is 5 000).
+The column is named `flow` (not `value`) so it matches the original training code
+in `managed_system_regression/inference.py` and `train.py`. The config key
+`"value_column": "flow"` in `configs/datasets/pems_node2.json` reflects this.
+Minimum row count: 5 000.
 
-**Preprocessing recipe:**
+**Preferred: use the preprocess script:**
+```bash
+cd tool/
+python scripts/preprocess_pems.py \
+    --input /path/to/pems_raw.csv \
+    --output data/pems_node2/pems_node2.csv
+```
+
+**Manual recipe (if needed):**
 ```python
 import pandas as pd
 df = pd.read_csv("raw_pems_stationXXX.csv", parse_dates=["Timestamp"])
-df = df.rename(columns={"Timestamp": "timestamp", "Total Flow": "value"})
-df = df[["timestamp", "value"]].dropna().sort_values("timestamp").reset_index(drop=True)
+df = df.rename(columns={"Timestamp": "timestamp", "Total Flow": "flow"})
+df = df[["timestamp", "flow"]].dropna().sort_values("timestamp").reset_index(drop=True)
 df.to_csv("data/pems_node2/pems_node2.csv", index=False)
 ```
 
@@ -60,7 +70,7 @@ No shuffling. Set `stream_delay_s: 0.0` for fast experiment mode.
 
 Key fields to fill:
 - `data_path`: relative path to the preprocessed CSV
-- `value_column`: `"value"` (or whatever column you renamed to)
+- `value_column`: `"flow"` (matches output of `preprocess_pems.py`)
 - `seq_length`: `5` (default)
 - `train_frac`: `0.8`
 

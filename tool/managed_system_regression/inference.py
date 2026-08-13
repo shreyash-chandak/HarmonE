@@ -28,7 +28,19 @@ _energy_backend = _thresholds.get("energy_meter", "auto")
 print("Loading data stream...")
 
 df = pd.read_csv("knowledge/dataset.csv")
-data = df["flow"].values
+_value_col = _thresholds.get("value_column", "flow")
+if _value_col not in df.columns:
+    if "flow" in df.columns:
+        _value_col = "flow"
+    elif "value" in df.columns:
+        _value_col = "value"
+    else:
+        raise KeyError(
+            f"Column '{_value_col}' not found in knowledge/dataset.csv. "
+            f"Available: {list(df.columns)}. "
+            "Set value_column in thresholds.json or check preprocessing."
+        )
+data = df[_value_col].values
 
 # B7 fix: load pre-fitted scaler from disk; never fit on full dataset here.
 # Run scripts/init_regression.py once before starting inference to generate scaler.pkl.

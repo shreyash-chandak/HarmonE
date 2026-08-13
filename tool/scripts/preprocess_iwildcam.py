@@ -115,13 +115,27 @@ def build_manifest(wilds_root: str, output_path: str) -> pd.DataFrame:
             f"Image ID column not found. Columns: {list(meta.columns)}"
         )
 
+    # Build reverse map for string splits (some WILDS versions export strings)
+    _STR_SPLIT_MAP = {v: v for v in SPLIT_MAP.values()}  # identity: "train" → "train"
+
     rows = []
     missing = 0
     for _, row in meta.iterrows():
         image_id = str(row[id_col])
+        # image_id in WILDS is a UUID; filename column (if present) may include .jpg
+        # strip extension so _find_image() can append it
+        if id_col in ("filename",) and image_id.endswith((".jpg", ".jpeg", ".png")):
+            image_id = image_id.rsplit(".", 1)[0]
+
         label = int(row[label_col])
-        split_int = int(row[split_col])
-        split_str = SPLIT_MAP.get(split_int, str(split_int))
+
+        raw_split = row[split_col]
+        # Handle both integer splits (WILDS ≤1.2) and string splits (WILDS ≥2.0)
+        if isinstance(raw_split, str):
+            split_str = _STR_SPLIT_MAP.get(raw_split, raw_split)
+        else:
+            split_str = SPLIT_MAP.get(int(raw_split), str(int(raw_split)))
+
         domain = str(row[domain_col])
 
         img_path = _find_image(images_root, image_id)

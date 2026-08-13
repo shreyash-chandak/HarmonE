@@ -5,7 +5,7 @@
   "status": "awaiting_data",
 
   "data_path": "data/pems_node2/pems_node2.csv",
-  "value_column": "value",
+  "value_column": "flow",
   "seq_length": 5,
   "train_frac": 0.8,
   "val_frac": 0.1,

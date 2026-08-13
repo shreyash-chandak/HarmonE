@@ -109,6 +109,23 @@ def _preprocess_nordpool(df: pd.DataFrame, area: str) -> pd.DataFrame:
     return df
 
 
+def _read_csv_auto(path: str) -> pd.DataFrame:
+    """Read CSV, auto-detecting separator and decimal character.
+
+    Nord Pool exports use semicolons and European decimal commas (e.g. "1,95").
+    ERCOT exports use commas and US decimal points.
+    Try comma first; if column detection fails, retry with semicolon + decimal=','.
+    """
+    df = pd.read_csv(path, low_memory=False)
+    cols = {c.lower() for c in df.columns}
+    known = {"hourutc", "spotpriceeur", "delivery date", "delivery hour",
+             "settlement point price"}
+    if not cols.intersection(known):
+        # No known column found with comma separator — try semicolon + European decimal
+        df = pd.read_csv(path, sep=";", decimal=",", low_memory=False)
+    return df
+
+
 def preprocess(
     input_path: str,
     output_path: str,
@@ -116,7 +133,7 @@ def preprocess(
     area: str = "DK1",
 ) -> None:
     print(f"Reading {input_path} ...")
-    df = pd.read_csv(input_path, low_memory=False)
+    df = _read_csv_auto(input_path)
     print(f"  Raw columns: {list(df.columns)}")
     print(f"  Raw rows: {len(df)}")
 
