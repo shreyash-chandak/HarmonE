@@ -47,6 +47,7 @@ OUTPUT_DEFAULT = "data/pems_node2/pems_node2.csv"
 _FLOW_CANDIDATES = [
     "Total Flow", "total_flow", "flow", "Flow",
     "total flow", "TOTAL_FLOW", "Vehicles", "volume",
+    "Flow (Veh/5 Minutes)",  # PeMS single-station download format
 ]
 
 # Candidate timestamp column names

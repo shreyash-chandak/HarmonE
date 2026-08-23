@@ -3,17 +3,17 @@ import sys
 import json
 import numpy as np
 import pandas as pd
-from scipy.stats import entropy
 from monitor import monitor_mape, monitor_drift
 
 # Allow importing from tool/core
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
 from core.scoring import update_energy_threshold
+from core.vmr import VMR
 
 # Define the base directory dynamically based on the script's location
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 KNOWLEDGE_DIR = os.path.join(BASE_DIR, "..", "knowledge")
-BASE_VERSION_DIR = os.path.join(BASE_DIR, "..", "versionedMR")
+VMR_DIR = os.path.join(BASE_DIR, "..", "knowledge", "vmr")
 
 thresholds_file = os.path.join(KNOWLEDGE_DIR, "thresholds.json")
 mape_info_file = os.path.join(KNOWLEDGE_DIR, "mape_info.json")
@@ -93,64 +93,19 @@ def analyse_mape():
     }
 
 
-def get_model_versions(model_name):
-    """Returns available versions for a given model."""
-    model_dir = os.path.join(BASE_VERSION_DIR, model_name)
-    if not os.path.exists(model_dir):
-        print("debug: Hey! this path is incorrect")
-        return []
-    return sorted([d for d in os.listdir(model_dir) if d.startswith("version_")], key=lambda x: int(x.split("_")[-1]))
+def _vmr_best_match(model_name: str, drift_values: np.ndarray):
+    """Search the VMR for the closest training distribution to the current drift data.
 
-def get_best_version(model_name):
-    """Finds the version with the lowest KL divergence from past data."""
-    versions = get_model_versions(model_name)
-    if len(versions) <= 1:
-        return None  # No previous versions exist
-
-    if not os.path.exists(drift_data_file):
-        print("⚠️ No drift.csv found. Cannot compare versions.")
-        return None
-
-    # Load current drift data
-    try:
-        drift_data = pd.read_csv(drift_data_file)["true_value"].values
-        drift_hist, _ = np.histogram(drift_data, bins=50, density=True)
-        drift_hist += 1e-10  
-    except Exception as e:
-        print(f"❌ Error reading drift.csv: {e}")
-        return None
-
-    min_kl_div = float("inf")
-    best_version = None
-
-    for version in versions:
-        version_data_path = os.path.join(BASE_VERSION_DIR, model_name, version, "data.csv")
-        if not os.path.exists(version_data_path):
-            continue
-
-        # Load versioned model's training data
-        try:
-            version_data = pd.read_csv(version_data_path)["train_data"].values
-            version_hist, _ = np.histogram(version_data, bins=50, density=True)
-            version_hist += 1e-10  # ✅ Prevent zero probabilities
-        except Exception as e:
-            print(f"❌ Error reading {version_data_path}: {e}")
-            continue
-
-        # Compute KL divergence
-        kl_div = entropy(drift_hist, version_hist)
-        kl_div = np.clip(kl_div, 0, 10) 
-        print(f"🔎 KL divergence for {version}: {kl_div:.4f}")
-
-        if kl_div < min_kl_div:
-            min_kl_div = kl_div
-            best_version = version_data_path  # Return the best version data path
-
-    # Store KL divergences for debugging
-    with open(drift_kl_file, "w") as f:
-        json.dump({"best_version": best_version, "min_kl_div": min_kl_div}, f, indent=4)
-
-    return best_version if min_kl_div < 0.75 else None  # Use version if KL is below threshold
+    Returns a VMRVersion on match, or None if the VMR is empty.
+    Uses core/vmr.py VMR.best_match() with 'closest_distribution' strategy.
+    """
+    vmr = VMR(base_dir=VMR_DIR)
+    hist, _ = np.histogram(drift_values, bins=50, density=True)
+    distribution = {"type": "histogram", "data": hist.tolist()}
+    version = vmr.best_match(model_name, distribution, strategy="closest_distribution")
+    if version:
+        print(f"🔎 VMR match for {model_name}: {version.weights_path}")
+    return version
 
 def analyse_drift():
     """Analyze drift & decide if retraining is needed or if an existing version can be used.
@@ -189,11 +144,19 @@ def analyse_drift():
         with open(current_model_file, "r") as f:
             current_model = f.read().strip()
 
-        best_version = get_best_version(current_model)
+        # Load drift data for VMR distribution matching
+        try:
+            drift_df = pd.read_csv(drift_data_file)
+            drift_values = drift_df["true_value"].values
+        except Exception as e:
+            print(f"❌ Cannot read drift.csv for VMR search: {e}")
+            return {"drift_detected": True, "action": "retrain", "version": None}
 
-        if best_version:
-            print(f"✔ Best version found with lower KL divergence: {best_version}")
-            return {"drift_detected": True, "action": "replace", "version": best_version}
+        vmr_match = _vmr_best_match(current_model, drift_values)
+
+        if vmr_match:
+            print(f"✔ VMR match found: {vmr_match.weights_path}")
+            return {"drift_detected": True, "action": "replace", "version": vmr_match.weights_path}
 
         # No suitable previous version found → Retrain needed
         return {"drift_detected": True, "action": "retrain", "version": None}

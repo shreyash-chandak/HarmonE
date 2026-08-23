@@ -49,6 +49,22 @@ SPLIT_MAP = {
     4: "ood_test",
 }
 
+# WILDS v2.0 exports short string labels. Normalize to the canonical long names
+# so the manifest is consistent regardless of which WILDS version supplied the data.
+#   "test"   → "ood_test"   (42k geographic OOD images — primary inference stream)
+#   "val"    → "ood_val"
+#   "id_test"/"id_val"/"train" pass through unchanged.
+_NORMALIZE_SPLIT = {
+    "train":   "train",
+    "val":     "ood_val",
+    "test":    "ood_test",
+    "id_val":  "id_val",
+    "id_test": "id_test",
+    # long-form names (already canonical) pass through unchanged
+    "ood_val":  "ood_val",
+    "ood_test": "ood_test",
+}
+
 
 def _find_image(images_root: Path, image_id: str) -> str | None:
     """Search for image file by id; handles flat and per-location structures."""
@@ -69,7 +85,18 @@ def _find_image(images_root: Path, image_id: str) -> str | None:
 def build_manifest(wilds_root: str, output_path: str) -> pd.DataFrame:
     wilds_root = Path(wilds_root)
     metadata_path = wilds_root / "metadata.csv"
-    images_root = wilds_root / "images"
+
+    # WILDS v2.0 iWildCam ships images under 'train/' not 'images/'
+    for _img_dir in ("images", "train"):
+        candidate = wilds_root / _img_dir
+        if candidate.exists() and candidate.is_dir():
+            images_root = candidate
+            break
+    else:
+        raise FileNotFoundError(
+            f"Image directory not found under {wilds_root}. "
+            "Expected 'images/' or 'train/' subdirectory."
+        )
 
     if not metadata_path.exists():
         raise FileNotFoundError(f"metadata.csv not found at {metadata_path}")
@@ -115,9 +142,6 @@ def build_manifest(wilds_root: str, output_path: str) -> pd.DataFrame:
             f"Image ID column not found. Columns: {list(meta.columns)}"
         )
 
-    # Build reverse map for string splits (some WILDS versions export strings)
-    _STR_SPLIT_MAP = {v: v for v in SPLIT_MAP.values()}  # identity: "train" → "train"
-
     rows = []
     missing = 0
     for _, row in meta.iterrows():
@@ -130,9 +154,10 @@ def build_manifest(wilds_root: str, output_path: str) -> pd.DataFrame:
         label = int(row[label_col])
 
         raw_split = row[split_col]
-        # Handle both integer splits (WILDS ≤1.2) and string splits (WILDS ≥2.0)
+        # Handle both integer splits (WILDS ≤1.2) and string splits (WILDS ≥2.0).
+        # Normalize v2.0 short names ("test"→"ood_test", "val"→"ood_val").
         if isinstance(raw_split, str):
-            split_str = _STR_SPLIT_MAP.get(raw_split, raw_split)
+            split_str = _NORMALIZE_SPLIT.get(raw_split, raw_split)
         else:
             split_str = SPLIT_MAP.get(int(raw_split), str(int(raw_split)))
 

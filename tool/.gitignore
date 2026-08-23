@@ -28,3 +28,8 @@ managed_system_startup.log
 # managed_system_cv: CV-specific runtime artefacts
 managed_system_cv/knowledge/inferences/
 managed_system_custom/
+
+*.pt
+*.pkl
+ubuntu_env/
+*.part

@@ -3,18 +3,15 @@
   "domain": "cv",
   "adapter": "adapters.cv_imagedir.CVImageDirAdapter",
   "status": "awaiting_data",
-
   "manifest_csv": "data/iwildcam/iwildcam_manifest.csv",
-  "data_root": "data",
+  "data_root": ".",
   "seq_length": 1,
   "train_frac": 0.7,
   "val_frac": 0.1,
   "stream_delay_s": 0.0,
-
   "task": "classification",
   "task_adapter": "adapters.tasks.classification.ClassificationAdapter",
   "num_classes": 182,
-
   "models": {
     "efficientnet_b0": {
       "weights_path": "managed_system_cv/models/efficientnet_b0_iwildcam.pt",
@@ -32,20 +29,17 @@
       "cost_class": "heavy"
     }
   },
-
   "embedding_model": "efficientnet_b0",
   "embedding_dim": 1280,
   "embedding_sample_every": 5,
   "drift_window_size": 500,
-
   "proxy": "max_softmax",
   "drift_detector": "mmd_embedding",
   "retrain_tactic": "pseudo_label",
   "pseudo_label_threshold": 0.8,
   "rollback_if_worse": true,
-
-  "min_score": 0.50,
-  "max_energy": 0.50,
+  "min_score": 0.5,
+  "max_energy": 0.5,
   "E_ref": 0.5,
   "delta": 0.05,
   "beta": 0.95,
@@ -58,8 +52,9 @@
   "switch_cooldown_s": 30,
   "planner": "harmone_original",
   "ema_head_start": 0.1,
-
-  "energy_required": ["gpu"],
-
-  "_comment": "Geographic drift showcase. embedding-based drift (MMD on EfficientNet-B0 features). See docs/datasets/iwildcam.md. Calibrate tau_drift per hardware."
+  "energy_required": [
+    "gpu"
+  ],
+  "_comment": "Geographic drift showcase. embedding-based drift (MMD on EfficientNet-B0 features). See docs/datasets/iwildcam.md. Calibrate tau_drift per hardware.",
+  "energy_meter": "nvml"
 }

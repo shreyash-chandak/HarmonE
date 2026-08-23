@@ -1,0 +1,7 @@
+{
+  "model": "ridge",
+  "timestamp": "20260823T001127_269937Z",
+  "tag": "retrain",
+  "proxy_score": -5.994197656837102,
+  "drift_score": 2.073529
+}

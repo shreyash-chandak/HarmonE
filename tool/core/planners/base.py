@@ -25,6 +25,7 @@ class PlanningContext:
     thresholds: dict                    # full thresholds.json contents
     drift_result: dict | None           # analyse_drift() return contract (B2)
     history: Any = None                 # future: telemetry accessor for bandit
+    current_step: int = 0               # stream step count at time of planning (for PRT)
 
 
 @dataclass
@@ -62,7 +63,7 @@ def _register():
     Python's import system is idempotent — re-importing an already-loaded
     module is a no-op, so this is safe to call multiple times.
     """
-    from . import naive, random_switch, greedy_switch, harmone_original, violation_aware, pareto, bandit  # noqa: F401
+    from . import naive, random_switch, greedy_switch, harmone_original, violation_aware, pareto, bandit, naive_prt, random_switch_prt  # noqa: F401
 
 
 def get_planner(name: str) -> Planner:

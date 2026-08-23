@@ -1,0 +1,49 @@
+{
+  "name": "pems",
+  "domain": "regression",
+  "adapter": "adapters.regression_csv.RegressionCSVAdapter",
+
+  "train_path": "data/pems/flow_data_train.csv",
+  "stream_path": "data/pems/flow_data_test.csv",
+  "value_column": "flow",
+  "seq_length": 5,
+  "stream_delay_s": 0.0,
+
+  "models": {
+    "lstm": {
+      "weights_path": "managed_system_regression/models/lstm_pems.pt",
+      "loader": "adapters.loaders.lstm_loader",
+      "cost_class": "heavy"
+    },
+    "ridge": {
+      "weights_path": "managed_system_regression/models/ridge_pems.pkl",
+      "loader": "adapters.loaders.sklearn_loader",
+      "cost_class": "light"
+    },
+    "svr": {
+      "weights_path": "managed_system_regression/models/svr_pems.pkl",
+      "loader": "adapters.loaders.sklearn_loader",
+      "cost_class": "medium"
+    }
+  },
+
+  "min_score": 0.78,
+  "max_energy": 0.6,
+  "E_ref": 0.7,
+  "delta": 0.1,
+  "beta": 0.95,
+  "gamma": 0.8,
+  "alpha": 0.1,
+  "E_m": 300,
+  "E_M": 12000,
+  "tau_drift": 0.5,
+  "tau_drift_source": "paper_default",
+  "drift_reference": "both",
+  "planner": "harmone_original",
+  "w_acc": 1.0,
+  "w_e": 1.0,
+  "energy_required": ["cpu"],
+  "energy_meter": "rapl",
+
+  "_comment": "Original HarmonE PeMS dataset. Data is pre-split: flow_data_train.csv (~892 observations, 10%) is the initialization portion; flow_data_test.csv (~8 036 observations, 90%) is the streaming evaluation stream. Thresholds match the published paper values. Calibrate E_M per hardware after confirming RAPL availability."
+}

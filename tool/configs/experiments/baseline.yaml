@@ -1,6 +1,6 @@
 # configs/experiments/baseline.yaml
 #
-# HarmonE baseline experiment grid: all planners × 2 seeds on pems_node1.
+# HarmonE baseline experiment grid: all planners on the original PeMS dataset.
 #
 # Run with:
 #   cd tool
@@ -12,16 +12,20 @@
 
 # Datasets to include
 datasets:
-  - pems_node1
+  - pems
 
-# Planners to compare (S1–S6; bandit excluded until implemented)
+# Planners to compare (S1–S6 + PRT baselines + bandit)
+# naive and naive_prt are run once per model via --pin-model in run_regression.sh
 planners:
   - naive
+  - naive_prt
   - random_switch
+  - random_switch_prt
   - greedy_switch
   - harmone_original
   - violation_aware
   - pareto
+  - bandit
 
 # Seeds for reproducibility
 seeds:

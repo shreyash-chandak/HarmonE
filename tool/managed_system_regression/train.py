@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import numpy as np
 import pandas as pd
@@ -13,11 +14,17 @@ from sklearn.metrics import mean_absolute_error
 from sklearn.preprocessing import MinMaxScaler
 from torch.utils.data import DataLoader, TensorDataset
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(BASE_DIR, ".."))
+from core.vmr import VMR
+
 # Ensure base directories exist
 base_dir = "versionedMR"
 os.makedirs(base_dir, exist_ok=True)
 original_model_dir = "models"
 os.makedirs(original_model_dir, exist_ok=True)
+
+VMR_DIR = os.path.join(BASE_DIR, "knowledge", "vmr")
 
 def get_next_version(model_name):
     """Finds the next version number for a given model."""
@@ -129,3 +136,17 @@ svm_model.fit(X_train, y_train)
 
 # Save SVM model with versioning and in the original directory
 save_model_and_data(svm_model, "svm", train_df, scaler)
+
+# Seed the VMR with the initial trained models (version_1 for each)
+print("\nSeeding VMR with initial model versions...")
+_vmr = VMR(base_dir=VMR_DIR)
+_train_vals = scaler.inverse_transform(train_data.reshape(-1, 1)).flatten()
+_hist, _ = np.histogram(_train_vals, bins=50, density=True)
+_dist = {"type": "histogram", "data": _hist.tolist()}
+for _name in ["lstm", "linear", "svm"]:
+    _ext = ".pth" if _name == "lstm" else ".pkl"
+    _wpath = os.path.join(original_model_dir, f"{_name}{_ext}")
+    if os.path.exists(_wpath):
+        _vmr.store(_name, _wpath, _dist, tag="initial")
+        print(f"  ✔ {_name} seeded in VMR")
+print("VMR seeding complete.")

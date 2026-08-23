@@ -1,6 +1,6 @@
 # HarmonE Journal Extension — Implementation Status
 
-Last updated: 2026-08-11 (S7 bandit implemented; 323 pass, 2 skip / 325 total)
+Last updated: 2026-08-20 (VMR + retrain fully wired into experiment harness)
 
 ## Phase Overview
 
@@ -42,7 +42,7 @@ Last updated: 2026-08-11 (S7 bandit implemented; 323 pass, 2 skip / 325 total)
 
 ### Phase 1 Exit Criteria
 
-- [x] All tests green (`pytest tool/tests/ -v`) — 323 pass, 2 skip (Flask/WSL); +30 bandit tests
+- [x] All tests green (`pytest tool/tests/ -v`) — 335 passed, 2 skipped (Flask/WSL); includes 30 bandit tests + 7 energy tests updated for new cpu_backend/gpu_backend API
 - [x] Smoke test: `reg_harmone` runs end-to-end (WSL verified 2026-07-28)
 - [x] `CHANGES_FROM_PAPER.md` covers B1–B7, A1–A4, and all subsequent phases
 - [x] `DECISIONS_PENDING.md` captures all deferred choices
@@ -57,6 +57,36 @@ python3 run_managed_system.py
 # approach.conf must read: reg_harmone
 # expect: telemetry pushed to app.py, no crashes, predictions.csv grows
 ```
+
+## VMR Wiring (2026-08-18 → 2026-08-20)
+
+### managed_system_regression (2026-08-18)
+
+Both the regression `retrain.py` and `analyse.py` were using an old ad-hoc `versionedMR/` path-scanning system. `core/vmr.py` existed as the proper VMR but was completely disconnected. Fixed:
+
+- `managed_system_regression/retrain.py`: now calls `VMR.store()` after every retrain; stores histogram distribution to `knowledge/vmr/`.
+- `managed_system_regression/mape_logic/analyse.py`: removed old `get_best_version()` + `BASE_VERSION_DIR`; replaced with `_vmr_best_match()` using `VMR.best_match(strategy="closest_distribution")`.
+- `managed_system_regression/train.py`: seeds the VMR with version_1 for each model at initial training time.
+- `core/vmr.py` uses `knowledge/vmr/` (inside `managed_system_regression/`) as the store root.
+
+**Symptom** that was observed: every VMR search returned None. Two contributing causes: (1) `core/vmr.py` was never called at all; (2) the old `get_best_version()` returned None when ≤1 version existed (requires ≥2 retrains).
+
+The CV system's VMR code in `managed_system_cv/mape_logic/analyse.py` is its own implementation (handles both luminance histograms and embedding signatures with I6 cross-type guard). It is not broken — paths resolve correctly because manage.py runs with `cwd=managed_system_cv/`.
+
+### experiments/run_experiment.py harness (2026-08-20)
+
+The experiment harness had the same family of bugs independently: `_analyse_drift` was hardcoded to return `action="retrain"` with a comment "In the harness there is no VMR"; `action="replace"` was treated identically to `action="retrain"` in the execute path; and `vmr.store()` was never called after a successful retrain. Fixed:
+
+- `_analyse_drift` now accepts `vmr`, `current_model`, and `current_distribution` (histogram of the current window); when drift fires it calls `vmr.best_match(strategy="closest_distribution")` and returns `action="replace"` + weights path if a version exists, else falls through to `action="retrain"`.
+- `kl_div` is now passed through the drift_result dict (was silently dropped, causing `mape_events.csv` to always record `null` for `kl_div`).
+- New `_do_vmr_restore(version_path, model_name, models, model_store)`: loads weights from the VMR path, updates both the predict closure and `model_store` (so a subsequent inline retrain sees the restored weights); increments `vmr_events` counter.
+- New `_archive_in_vmr(model_name, model_store, vmr, value_history, drift_result, run_path)`: after every successful inline retrain, writes weights to a temp file, calls `vmr.store()` with the current window histogram, then removes the temp file; fire-and-forget.
+- VMR now lives at `tool/knowledge/vmr/` (shared across runs, persists state like `bandit_state.json`).
+- Execute block: `action="replace"` tries `_do_vmr_restore` first; falls back to inline retrain if restore fails.
+
+**VMR population**: VMR starts empty on first run. First drift event → retrain → archive. Subsequent runs can restore from VMR whenever drift fires and the current distribution is close to an archived version.
+
+---
 
 ## Known Gaps (not blocking current work)
 
@@ -81,7 +111,7 @@ Audit performed against `context/checkpoint.md`. Checks that do not require data
 
 | Config | File | Schema gaps vs checkpoint | Data path |
 |---|---|---|---|
-| R1 PeMS node2 | `configs/datasets/pems_node2.json` | `tau_drift_source` added ✅ | `data/pems_node2/pems_node2.csv` |
+| R1 PeMS | `configs/datasets/pems.json` | Pre-split Mode B; thresholds from paper ✅ | `data/pems/flow_data_train.csv` + `flow_data_test.csv` |
 | R2 UCI Electricity | `configs/datasets/uci_electricity.json` | `tau_drift_source` added ✅ | `data/uci_electricity/uci_electricity.csv` |
 | R3 ERCOT Spot Prices | `configs/datasets/spot_prices.json` | `tau_drift_source` added ✅; confirmed ERCOT (not Nord Pool) | `data/spot_prices/spot_prices.csv` |
 | C1 BDD100K | `configs/datasets/bdd100k.json` | `image_dir` updated to `data/bdd100k/images`; `manifest_csv` set; `energy_required` fixed to `["gpu"]`; `status: awaiting_data` added ✅ | `data/bdd100k/` |
@@ -98,8 +128,9 @@ Audit performed against `context/checkpoint.md`. Checks that do not require data
 When datasets are moved to the repository machine:
 
 ```
-tool/data/pems_node2/
-  pems_node2.csv              ← preprocessed CSV (timestamp, value columns)
+tool/data/pems/
+  flow_data_train.csv         ← initial training portion (~892 rows, ~10%)
+  flow_data_test.csv          ← streaming evaluation portion (~8 036 rows, ~90%)
 
 tool/data/uci_electricity/
   uci_electricity.csv         ← preprocessed CSV (run preprocess_uci_electricity.py)
@@ -138,7 +169,7 @@ tool/data/acdc/
 | `scripts/preprocess_bdd100k.py` | ✅ CREATED | BDD100K attribute → domain mapping; drift-ordered manifest |
 | `scripts/preprocess_iwildcam.py` | ✅ CREATED | WILDS metadata.csv; location-ordered manifest; OOD split routing |
 | `scripts/preprocess_acdc.py` | ✅ CREATED | rgb_anon/gt_trainval pairing; condition-ordered manifest |
-| `scripts/preprocess_pems_node2.py` | ⬜ NOT NEEDED | PeMS node2 is same CSV format as node1 — run `init_regression.py --config pems_node2` directly after placing the CSV |
+| `scripts/preprocess_pems.py` | ⬜ NOT NEEDED | PeMS data arrives pre-split (`flow_data_train.csv` + `flow_data_test.csv`); no preprocessing step required — run `init_regression.py --config pems` directly |
 
 ### Checks that require dataset presence
 

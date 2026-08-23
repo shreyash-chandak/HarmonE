@@ -1,4 +1,5 @@
 import os
+import sys
 import pandas as pd
 import numpy as np
 import torch
@@ -10,11 +11,17 @@ from sklearn.linear_model import Ridge
 from sklearn.preprocessing import MinMaxScaler
 from torch.utils.data import DataLoader, TensorDataset
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(BASE_DIR, ".."))
+from core.vmr import VMR
+
 # Ensure directories exist
 base_dir = "versionedMR"
 os.makedirs(base_dir, exist_ok=True)
 model_dir = "models"
 os.makedirs(model_dir, exist_ok=True)
+
+VMR_DIR = os.path.join(BASE_DIR, "knowledge", "vmr")
 
 drift_file = "knowledge/drift.csv"
 model_file = "knowledge/model.csv"
@@ -149,8 +156,17 @@ def retrain():
     train_data_original = scaler.inverse_transform(data_scaled.reshape(-1, 1)).flatten()
     train_df = pd.DataFrame({"train_data": train_data_original})
 
-    # Save retrained model
+    # Save retrained model (old versionedMR path — kept for backward compat)
     save_model_and_data(model, model_name, train_df)
+
+    # Store in the Versioned Model Repository (core/vmr.py)
+    weights_ext = ".pth" if model_name == "lstm" else ".pkl"
+    weights_src = os.path.join(model_dir, f"{model_name}{weights_ext}")
+    hist, _ = np.histogram(train_data_original, bins=50, density=True)
+    distribution = {"type": "histogram", "data": hist.tolist()}
+    vmr = VMR(base_dir=VMR_DIR)
+    vmr.store(model_name, weights_src, distribution, tag="retrain")
+    print(f"✔ {model_name} archived in VMR at {VMR_DIR}")
 
     # Signal inference.py to reload the model from disk on the next cycle
     open(RELOAD_FLAG, "w").close()

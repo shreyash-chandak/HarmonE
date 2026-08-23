@@ -33,7 +33,7 @@ HarmonE-tool/
     │   ├── base.py
     │   ├── loaders.py
     │   ├── regression_csv.py
-    │   ├── cv_imagedir.py            # CVImageDirAdapter — image-dir / manifest-CSV dataset adapter
+    │   ├── cv_imagedir.py            # CVImageDirAdapter — reads `input_path` col (fallback: `image_path`); joined to data_root
     │   └── tasks/
     │       ├── __init__.py
     │       ├── base.py               # TaskAdapter ABC + _TASK_REGISTRY + get_task_adapter()
@@ -48,7 +48,7 @@ HarmonE-tool/
     │   │   ├── bdd100k.json
     │   │   ├── toy_regression.json
     │   │   ├── toy_cv.json
-    │   │   ├── pems_node2.json       # awaiting_data
+    │   │   ├── pems.json             # data ready (Mode B — pre-split train/stream CSVs)
     │   │   ├── uci_electricity.json  # awaiting_data
     │   │   ├── spot_prices.json      # awaiting_data
     │   │   ├── iwildcam.json         # awaiting_data
@@ -73,7 +73,9 @@ HarmonE-tool/
     │   ├── planners/
     │   │   ├── base.py
     │   │   ├── naive.py
+    │   │   ├── naive_prt.py              # Naive + periodic retraining every 3200 steps (paper PRT baseline)
     │   │   ├── random_switch.py
+    │   │   ├── random_switch_prt.py      # Random switch + PRT (paper PRT+switch baseline)
     │   │   ├── greedy_switch.py
     │   │   ├── harmone_original.py
     │   │   ├── violation_aware.py
@@ -108,7 +110,7 @@ HarmonE-tool/
     │
     ├── experiments/
     │   ├── metrics.py
-    │   ├── offline_eval.py
+    │   ├── offline_eval.py               # CV GT-accuracy eval (Option 2 replay); reads runs/{id}/predictions.csv + manifest label_path
     │   ├── proxy_validation.py
     │   ├── run_experiment.py
     │   ├── run_grid.py
@@ -194,7 +196,10 @@ HarmonE-tool/
     │   ├── preprocess_spot_prices.py      # R3: auto-detects ERCOT/NordPool headers
     │   ├── preprocess_bdd100k.py          # C1: attribute→domain mapping, drift-ordered manifest
     │   ├── preprocess_iwildcam.py         # C2: WILDS metadata.csv, location-ordered manifest
-    │   └── preprocess_acdc.py             # C3: rgb_anon/gt_trainval pairing, condition-ordered manifest
+    │   ├── preprocess_acdc.py             # C3: rgb_anon/gt_trainval pairing, condition-ordered manifest
+    │   ├── run_regression.sh              # Run all regression experiment grids (pems, uci_electricity, spot_prices)
+    │   ├── run_cv.sh                      # Run all CV experiment grids (bdd100k, iwildcam, acdc)
+    │   └── run_offline_eval.sh            # Offline GT-accuracy eval for completed CV runs → {run_dir}/offline_eval.json
     │
     └── tests/
         ├── test_b1_energy_threshold.py
@@ -259,8 +264,8 @@ HarmonE-tool/
 | File | Purpose |
 |---|---|
 | `base.py` | `DatasetAdapter` ABC. Defines `Sample` and `ModelSpec` dataclasses and the interface contract (`train_split()`, `val_split()`, `stream()`, `offline_labels()`, `models()`). Every dataset integration subclasses this; no dataset-specific code appears anywhere else. |
-| `loaders.py` | Model loader registry. Implements `lstm_loader`, `sklearn_loader`, and `yolo_loader` (CV stub) as `load(weights_path) → model` functions. `get_loader(dotted_path)` resolves a loader by dotted module path from config. Used by the experiment harness to load models without domain-specific code. |
-| `regression_csv.py` | Concrete `DatasetAdapter` for CSV regression datasets. Reads config keys (`data_path`, `value_column`, `seq_length`, `train_frac`), builds sliding-window sequences, streams rows in order. The only place that knows PeMS or any CSV regression dataset layout. |
+| `loaders.py` | Model loader registry. Implements `lstm_loader`, `sklearn_loader`, `yolo_loader`, `torchvision_loader` (EfficientNet-B0/ResNet-50/ResNet-101 for iWildCam — num_classes from kwargs), and `segformer_loader` (SegFormer-B0/B1/B2, processor constructed once in load, num_classes from kwargs). `get_loader(dotted_path)` resolves a loader by dotted module path from config. Heavy CV deps (torch, transformers) imported lazily inside each loader function. |
+| `regression_csv.py` | Concrete `DatasetAdapter` for CSV regression datasets. Supports two modes: Mode A (single `data_path` + `train_frac` split) and Mode B (separate `train_path` + `stream_path` files — original HarmonE pre-split format). Builds sliding-window sequences; streams the test portion in order. |
 
 ---
 
@@ -279,7 +284,7 @@ HarmonE-tool/
 | File | Purpose |
 |---|---|
 | `_template.yaml` | Annotated grid config template showing all keys (`datasets`, `planners`, `seeds`, `overrides`). |
-| `baseline.yaml` | Paper baseline grid: `pems_node1` × 6 planners (naive → pareto) × seeds [1, 2]. Overrides `energy_meter=null` and `stream_delay_s=0` for Windows-safe headless runs. |
+| `baseline.yaml` | Paper baseline grid: `pems` × planners. Overrides `energy_meter=null` and `stream_delay_s=0` for Windows-safe headless runs. Note: run scripts (`run_regression.sh`, `run_cv.sh`) now drive the grid directly with `--seed N` (default 1); the grid config `seeds` key is used only by `run_grid.py`. |
 
 ---
 
@@ -311,9 +316,9 @@ HarmonE-tool/
 | File | Purpose |
 |---|---|
 | `dataset_validator.py` | `validate(config_path) → ValidationReport`. Enforces the plug-and-play data contract: config keys present and typed, `train_frac + val_frac ≤ 1`, regression CSV has the declared column with no NaNs and enough rows, CV image directory/manifest is readable. Called at startup by `run_managed_system.py` and both init scripts. |
-| `energy.py` | **Hardware-agnostic energy measurement.** `EnergyMeter` context manager with three backends: `_PyJoulesRaplBackend` (CPU RAPL), `_PyJoulesNvmlBackend` (GPU cumulative counter), `_PollingGPUBackend` (50 ms nvidia-smi integration fallback). Module-level `_ACTIVE` flag prevents nested contexts from double-counting package-wide RAPL counters. `_probe_rapl()` / `_probe_nvml()` validate backends lazily; results cached to `.energy_backends.json`. Reports `cpu_uJ`, `gpu_uJ`, `total_uJ` in µJ; `valid` flag distinguishes real from null readings. |
+| `energy.py` | **Hardware-agnostic energy measurement.** `EnergyMeter` context manager. CPU and GPU probed independently (failure in one does not affect the other). CPU probe order: pyJoules RaplDevice → sysfs powercap → `/proc/driver/amd_energy` → null. GPU probe order (nvml backend): pyJoules NvidiaGPUDevice → pynvml direct → null. Backends: `"null"`, `"rapl"`, `"nvml"`, `"auto"`, `"polling"` (experimental 50 ms nvidia-smi). Both `"rapl"` and `"auto"` emit `RuntimeWarning` when the CPU probe is unavailable. `cpu_uJ=None` = unavailable; `cpu_uJ=0.0` = valid zero. Result dict keys: `cpu_uJ`, `gpu_uJ`, `total_uJ`, `cpu_valid`, `gpu_valid`, `total_complete`, `valid`, `cpu_backend`, `gpu_backend`. `_ACTIVE` flag prevents nesting. |
 | `scoring.py` | Shared scoring math. `update_energy_threshold()` implements Eq. 3 (adaptive threshold clamp). `update_separated_emas()` maintains per-model `ema_accuracy` and `ema_energy` signals alongside the legacy composite `ema_scores`. |
-| `vmr.py` | **Versioned Model Repository.** `VMR` class with `store(model, weights, distribution, meta)`, `best_match(model, current_dist, strategy)`, `list_versions()`, and `restore()`. Strategies: `best_score` (highest proxy_score) and `closest_distribution` (KL for histograms, Euclidean for embeddings). Replaces ad-hoc file scanning in the managed systems' `analyse.py` files. |
+| `vmr.py` | **Versioned Model Repository.** `VMR` class with `store(model, weights, distribution, meta)`, `best_match(model, current_dist, strategy)`, `list_versions()`, and `restore()`. Strategies: `best_score` (highest proxy_score) and `closest_distribution` (KL for histograms, Euclidean for embeddings). Store root: `managed_system_regression/knowledge/vmr/`. Wired: `train.py` seeds it; `retrain.py` stores after each retrain; regression `analyse.py` queries it via `best_match()`. CV domain has its own VMR implementation in `managed_system_cv/mape_logic/analyse.py`. |
 
 #### `core/drift/`
 
@@ -357,7 +362,7 @@ HarmonE-tool/
 | `metrics.py` | Post-run analysis. `compute_run_metrics(run_dir)` summarises a single run. `aggregate_grid(grid_dir)` collects all runs in a grid. `aggregate_by_planner(rows)` collapses seeds. `pareto_efficiency(rows)` marks non-dominated solutions. `wilcoxon_test()` for paper statistical claims. `to_csv()` / `to_latex()` output formatters. |
 | `offline_eval.py` | Computes true mAP@0.5 per monitoring interval for a completed CV run, aligned to `predictions.csv` boundaries, using ground-truth YOLO label files. Produces per-interval JSON results for proxy validation. |
 | `proxy_validation.py` | Spearman ρ pipeline (RQ3). Compares confidence, calibrated_confidence, and agreement proxies against true mAP@0.5 from `offline_eval.py`. Single command produces the ρ table for the paper. |
-| `run_experiment.py` | **Headless inline MAPE loop.** Runs a single (dataset × planner × seed) combination in one Python process — no Flask, no subprocesses. Streams from the adapter, calls monitor→analyse→plan→execute inline, writes per-run artifacts (`predictions.csv`, `mape_events.csv`, `run_manifest.json`). Energy backend defaults to null for Windows/CI safety. |
+| `run_experiment.py` | **Headless inline MAPE loop.** Runs a single (dataset × planner × seed) combination in one Python process — no Flask, no subprocesses. Streams from the adapter, calls monitor→analyse→plan→execute inline, writes per-run artifacts (`predictions.csv`, `mape_events.csv`, `run_manifest.json`). Energy backend defaults to null for Windows/CI safety. `--pin-model MODEL` filters `available_models` to exactly one model (used by run scripts to produce per-model naive baseline rows); `pin_model` is written to `run_manifest.json`. |
 | `run_grid.py` | **Grid driver.** Loads a YAML/JSON grid config, iterates all dataset × planner × seed combinations, calls `run_experiment` for each, resumes incomplete grids (skips dirs with `run_manifest.json`), writes `grid_manifest.json`. |
 | `run_reset.py` | **Per-run state reset.** Zeros `event_counters`, `ema_scores` → 0.5, `last_switch_ts` → 0.0, `last_line`, `recovery_cycles`. Truncates `predictions.csv` to header. Deletes `command.txt`, `drift.csv`, `drift_kl.json`. Preserves `scaler.pkl`, `reference_distribution.json`, `versionedMR/`. Must be called before every live session to prevent cross-run counter bleed. |
 
@@ -428,10 +433,10 @@ HarmonE-tool/
 |---|---|
 | `approach.conf` | Regression-specific mode selector. |
 | `inference.py` | **Regression inference loop.** Loads the active model from `knowledge/model.csv` (with module-level cache to avoid per-step reload). Applies `scaler.pkl` transform to the sliding window input. Runs LSTM/Linear/SVM prediction. Appends to `predictions.csv` (true value, predicted value, model, time, energy). Writes `model_reload.flag`-aware cache invalidation. |
-| `retrain.py` | **Regression retrain.** On drift signal: retrains all three models (LSTM 50 epochs, Ridge, SVR) on `knowledge/drift.csv` (recent anomalous data). Archives new weights to `versionedMR/<model>/version_N/`. Writes `model_reload.flag`. Saves new `scaler.pkl` fitted on the drift batch only. |
+| `retrain.py` | **Regression retrain.** On drift signal: retrains the current model on `knowledge/drift.csv`. Archives weights to both `versionedMR/<model>/version_N/` (legacy) and `core/vmr.py` VMR at `knowledge/vmr/` (tag="retrain", histogram distribution). Writes `model_reload.flag`. Saves new `scaler.pkl` fitted on drift batch only (B7 fix). |
 | `retrain_svm_only.py` | Quick standalone SVM retrain on the full `dataset.csv`. Development/debug utility when only the SVM needs refreshing without triggering the full drift retrain pipeline. |
 | *(moved)* `simulator.py` | Moved to `tool/legacy/simulator.py`. Superseded by `adapters/regression_csv.py` + `experiments/run_experiment.py`. |
-| `train.py` | **Initial training script.** Trains LSTM (50 epochs), Ridge regression, and SVR on `dataset.csv` (train split only). Writes weights to `models/` and seeds `versionedMR/` with version 1 of each model. Run once during environment setup. |
+| `train.py` | **Initial training script.** Trains LSTM (50 epochs), Ridge regression, and SVR on `dataset.csv` (train split only). Writes weights to `models/`, seeds `versionedMR/` with version 1, and seeds `knowledge/vmr/` (via `VMR.store()`, tag="initial") for `core/vmr.py`-based drift-version matching. Run once during environment setup. |
 
 #### `managed_system_regression/knowledge/` (runtime state)
 
@@ -448,7 +453,7 @@ HarmonE-tool/
 | File | Purpose |
 |---|---|
 | `monitor.py` | Reads new rows from `predictions.csv` since `last_line`. Computes R² over the window, normalises energy against `E_m`/`E_M`, runs both fixed-ref and rolling KL detectors. Returns `{"fresh": False}` when no new rows — stale telemetry path removed (L1-c fix). |
-| `analyse.py` | Evaluates monitor signals against thresholds. Selects the active KL signal based on `drift_reference` config (`"fixed"`, `"rolling"`, or `"both"`). Updates EMA via `core/scoring`. Returns `switch_needed` and `threshold_violated`. |
+| `analyse.py` | Evaluates monitor signals against thresholds. Updates EMA via `core/scoring`. Returns `switch_needed` and `threshold_violated`. `analyse_drift()` uses `VMR.best_match()` from `core/vmr.py` (strategy `"closest_distribution"`) to find the stored version whose training histogram best matches the drift data — replaces old `get_best_version()` + `versionedMR/` scanning. |
 | `plan.py` | Regression planning layer. `dispatch_plan()` routes through the planner registry for Phase-2 planners. `plan_mape()` delegates to `dispatch_plan()` when `thresholds["planner"]=="bandit"` (S7, 2026-08-11). Legacy `plan_mape()`, `plan_drift()`, `plan_random_switch()`, `plan_greedy_switch()` functions remain for backward compatibility. All paths check `switch_cooldown_s` (L5 guard). |
 | `execute.py` | Executes the regression plan: writes `model.csv`, runs `retrain.py` or VMR replace, records events, tracks `last_switch_ts`. |
 | `manage.py` | **Regression MAPE orchestrator.** Startup command.txt clear (L2-a), MAPE loop, ACP command listener thread with timestamp gating (L2-b). S7 bandit lifecycle: creates LinUCBBandit at startup when `thresholds["planner"]=="bandit"`, calls `resolve_pending()` at the top of each MAPE cycle before `execute_mape()`. |
@@ -491,6 +496,10 @@ Policy JSON files consumed by `app.py`. Each defines one `quality_attribute` pri
 | `preprocess_bdd100k.py` | **C1 preprocessing.** Reads BDD100K annotation JSONs, maps `attributes.weather` + `attributes.timeofday` to domain labels (`clear_day / overcast / foggy / dusk / night / rain / snow`). Builds drift-ordered manifest CSV sorted `clear_day → overcast → foggy → dusk → night → rain`. |
 | `preprocess_iwildcam.py` | **C2 preprocessing.** Parses WILDS v2.0 `metadata.csv`. Maps `location` column to `domain`. Outputs manifest CSV sorted by location to create geographic drift sequence. Primary stream is OOD test split (split=4). |
 | `preprocess_acdc.py` | **C3 preprocessing.** Pairs `rgb_anon/{condition}/{split}/{seq}/*.png` with `gt_trainval/gt/{condition}/{split}/{seq}/*_gt_labelTrainIds.png`. Outputs manifest sorted fog → rain → night → snow. Uses `_gt_labelTrainIds.png` (trainIds 0–18 + 255), not `_gt_labelIds.png`. |
+| `backfill_task_metrics.py` | Scans all `tool/runs/` subdirs with `predictions.csv` + `run_manifest.json`. Computes RMSE and MAE for regression runs (y_true/y_pred columns) and patches `task_metrics` into each manifest. CV runs skipped. `--dry-run` flag available. |
+| `trim_manifest.py` | Trims full CV dataset manifests to experiment-appropriate sizes while preserving drift ordering. BDD100K → ~500 imgs/domain × 6 domains. iWildCam → ~3 000, location-proportional. ACDC → no trim (already ~2 006 frames). Keeps original as `<name>_full.csv`. |
+| `run_cv.sh` | Sequential runner for all CV experiments. Accepts optional `--seed N` arg (default 1). Checks dataset + weight readiness per dataset (C1 YOLO weights present; C2/C3 need weights). Naive planner runs once per model (bdd100k: yolo_n/yolo_s/yolo_m; iwildcam: efficientnet_b0/resnet50/resnet101; acdc: segformer_b0/segformer_b1/segformer_b2) via `--pin-model`. Adaptive planners (random_switch, greedy_switch, harmone_original, violation_aware, pareto, bandit) run once each with the full model pool. Run IDs: `{dataset}_naive_{model}_s{seed}` and `{dataset}_{planner}_s{seed}`. |
+| `run_regression.sh` | Sequential runner for all regression experiments. Accepts optional `--seed N` arg (default 1). Naive planner runs once per model (lstm, ridge, svr) via `--pin-model`. Adaptive planners run once each with the full model pool. Run IDs: `{dataset}_naive_{model}_s{seed}` and `{dataset}_{planner}_s{seed}`. |
 
 ---
 
@@ -511,9 +520,10 @@ Policy JSON files consumed by `app.py`. Each defines one `quality_attribute` pri
 | `test_phase3_drift.py` | Tests all drift detectors: KL fixed-ref updates, MMD kernel, Fréchet Gaussian approximation. |
 | `test_phase3_proxies.py` | Tests all three accuracy proxies: confidence mean, calibrated scaling, agreement fallback. |
 | `test_phase3_vmr.py` | Tests `VMR.store()`, `best_match()` with both strategies, and `restore()` path invariants. |
-| `test_phase4_energy.py` | Tests `EnergyMeter`: null backend validity, backends dict structure, `cpu_valid`/`gpu_valid` flags, unit conversion consistency. |
+| `test_phase4_energy.py` | 21 tests for `EnergyMeter`: null backend validity, `cpu_backend`/`gpu_backend` string keys in result dict, `cpu_valid`/`gpu_valid` flags, `from_thresholds` factory, RAPL/auto fallback, unknown backend warning. Monkeypatches `_cpu_probe` dict (not old `_RAPL_PROBED`/`_RAPL_AVAILABLE` vars). All 21 pass. |
 | `test_phase5_harness.py` | Tests `run_experiment()` inline loop, `run_grid()` resume logic, `compute_run_metrics()`, `aggregate_by_planner()`, and model loaders. |
 | `test_live_run_fixes.py` | Tests covering the July 24 live-run bug fixes plus CP7 additions: L2 command gating, L4 None-safe boundary eval, L1-c stale monitor, L2-b/L6 run reset (incl. `last_switch_ts`), L1-a init_regression, E3 energy abstraction (no pyRAPL, nesting, null backend), L3 GPU arch guard, G4 reset preserves thresholds.json, G7 CV drift tactic dispatch. |
 | `test_plug_and_play.py` | 15 conformance tests proving config-only dataset onboarding: validator schema enforcement, NaN detection, CV image checks, init_regression end-to-end, force-overwrite behaviour. |
 | `test_api_endpoints.py` | CP7 Phase 3 tests: G9 set-planner validation (valid/invalid/bandit/bad-system), G13 CORS registration, G2 policy routing, G8 startup error surfacing, L4 None kl_div skip. Skips if Flask not installed (`pytest.importorskip`). |
 | `test_dashboard_flow.py` | CP7 Phase 3 tests: scripted dashboard flow simulation — set-planner accepted, policy registered under base policy_id, telemetry populates history, planner variants use correct policy_id, startup errors surface as HTTP 500. Skips if Flask not installed. |
+| `test_energy_backends.py` | Regression tests for energy measurement correctness: sub-ms workload returns 0 (not failure), longer workload returns positive delta, NVML path does not use polling backend, unavailable backends report `None` not `0`, CPU and GPU failures are independent. |

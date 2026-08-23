@@ -2,201 +2,225 @@
 
 Complete instructions for preprocessing all six datasets, running experiments,
 computing CV accuracy metrics, and capturing timestamped logs.
-All commands run from `tool/` unless stated otherwise.
+
+**All commands run from `tool/` unless stated otherwise.**
+**All relative paths are relative to `tool/`.**
 
 ---
 
-## Quick-reference: order of operations per dataset
+## CV target sizes
 
-| Step | Command | All datasets |
-|------|---------|-------------|
-| 0 | Activate env | `source harmone_env/bin/activate` |
-| 1 | Preprocess raw → canonical CSV / manifest | `python scripts/preprocess_<dataset>.py …` |
-| 2 | Fit scaler + KL reference (regression only) | `python scripts/init_regression.py --config <name>` |
-| 3 | Fit embedding reference (CV, embedding detectors only) | `python scripts/init_cv.py --config <name>` |
-| 4 | Validate placement & schema | `python scripts/validate_dataset.py configs/datasets/<name>.json` |
-| 5 | Train models | see per-dataset section |
-| 6 | Run experiment | `python experiments/run_experiment.py --dataset <name> …` |
-| 7 | Compute CV accuracy (CV only) | `python experiments/offline_eval.py …` |
-| 8 | Log readings | `python scripts/experiment_logger.py --knowledge … --dataset …` |
+| Dataset | Task | Target images | Eval split | Interval | # Intervals |
+|---------|------|-------------:|-----------|---------|------------|
+| BDD100K | Detection (mAP@0.5) | ~3 000 val images | `val` | 1 000 | ~3 |
+| iWildCam | Classification (top-1) | ~3 000 ood_test images | `ood_test` | 500 | ~6 |
+| ACDC | Segmentation (mIoU) | ~2 000 train+val frames | `val` | 400 | ~5 |
+| **Total** | | **~8 000** | | | |
+
+The manifests encode the experimental ordering; do not reorganize the source directories.
 
 ---
 
-## Directory layout (all paths relative to `tool/`)
+## Actual data layout (on disk right now)
 
 ```
-tool/
-├── data/
-│   ├── pems_node2/           ← R1 preprocessed CSV
-│   ├── pems_node1/           ← R1b (same format, second node)
-│   ├── uci_electricity/      ← R2 preprocessed CSV
-│   └── spot_prices/          ← R3 preprocessed CSV
-│
-├── managed_system_cv/
-│   └── data/
-│       ├── bdd100k/
-│       │   ├── images/
-│       │   │   ├── test/     ← C1 test images (already placed)
-│       │   │   ├── train/    ← C1 train images (full download)
-│       │   │   └── val/      ← C1 val images (full download)
-│       │   ├── labels/       ← C1 BDD100K JSON annotation files
-│       │   └── labels_yolo/  ← C1 converted YOLO .txt labels (generated)
-│       ├── iwildcam/
-│       │   └── images/       ← C2 flat image dir (UUID filenames)
-│       └── acdc/             ← C3 (symlink or copy; see below)
-│
-├── data/
-│   ├── bdd100k/
-│   │   └── bdd100k_manifest.csv   ← C1 generated manifest
-│   ├── iwildcam/
-│   │   └── iwildcam_manifest.csv  ← C2 generated manifest
-│   └── acdc/
-│       └── acdc_manifest.csv      ← C3 generated manifest
-│
-├── configs/datasets/         ← one .json per dataset (already exist)
-├── scripts/                  ← preprocess_*.py, init_*.py, experiment_logger.py
-├── experiments/              ← offline_eval.py, run_experiment.py, run_grid.py
-└── logs/                     ← timestamped experiment log CSVs (auto-created)
+tool/data/
+├── pems/
+│   ├── flow_data_train.csv  ← R1 initial training portion (~892 obs, 10% of total)
+│   └── flow_data_test.csv   ← R1 streaming evaluation portion (~8 036 obs, 90% of total)
+├── loadDiagrams/
+│   └── LD2011_2014.csv      ← R2 raw UCI Electricity (already downloaded)
+├── elspot/
+│   └── Elspotprices 2015- 2024.csv   ← R3 raw Nord Pool (already downloaded)
+├── bdd100k/
+│   ├── images/
+│   │   └── 100k/
+│   │       ├── train/   *.jpg   (70 000 images)
+│   │       ├── val/     *.jpg   (10 000 images — primary eval stream)
+│   │       └── test/    *.jpg   (20 000 images — no GT labels)
+│   └── labels/
+│       └── (100k/ subdirectory OR directly here — script checks both)
+│           ├── bdd100k_labels_images_train.json
+│           └── bdd100k_labels_images_val.json
+├── iwildcam/
+│   ├── train/           ← flat dir of UUID.jpg images (WILDS v2.0 ships as train/)
+│   ├── metadata.csv
+│   ├── categories.csv
+│   ├── iwildcam2021_train_annotations_final.json
+│   └── RELEASE_v2.0.txt
+└── acdc/
+    ├── rgb_anon/
+    │   ├── fog/{train,trainref,val,valref,test,testref}/{sequence}/*_rgb_anon.png
+    │   ├── rain/  (same)
+    │   ├── night/ (same)
+    │   └── snow/  (same)
+    └── gt_trainval/
+        └── gt/
+            ├── fog/{train,trainref,val,valref}/{sequence}/*_gt_labelTrainIds.png
+            ├── rain/  (same)
+            ├── night/ (same)
+            └── snow/  (same)
+```
+
+> ACDC note: the `trainref`, `valref`, `testref` splits are reference counterparts
+> of the adverse-condition frames. They are NOT additional adverse-condition images.
+> The preprocess script excludes them automatically.
+
+Preprocessed outputs and manifests land in these directories (created by the scripts):
+
+```
+tool/data/
+├── pems/
+│   ├── flow_data_train.csv     ← R1 already ready (no preprocessing needed)
+│   └── flow_data_test.csv      ← R1 already ready (no preprocessing needed)
+├── uci_electricity/
+│   └── uci_electricity.csv     ← R2 preprocessed
+├── spot_prices/
+│   └── spot_prices.csv         ← R3 preprocessed
+├── bdd100k/
+│   └── bdd100k_manifest.csv    ← C1 generated manifest (images stay at images/100k/)
+├── iwildcam/
+│   └── iwildcam_manifest.csv   ← C2 generated manifest
+└── acdc/
+    └── acdc_manifest.csv       ← C3 generated manifest
 ```
 
 ---
 
-## R1 — PeMS node2 (traffic flow regression)
+## Quick-reference: order of operations
 
-### Raw format
+| Step | Command | Notes |
+|------|---------|-------|
+| 0 | `source harmone_env/bin/activate` | activate Python env |
+| 1 | `python scripts/preprocess_<dataset>.py …` | raw → canonical CSV / manifest |
+| 2 | `python scripts/init_regression.py --config <name>` | regression only: fit scaler + KL reference |
+| 3 | `python scripts/init_cv.py --config <name>` | CV only: init MAPE-K state (+ optional embeddings) |
+| 4 | `python scripts/validate_dataset.py configs/datasets/<name>.json` | verify schema + file existence |
+| 5 | train models | see per-dataset section |
+| 6 | `python experiments/run_experiment.py --dataset <name> …` | headless run |
+| 7 | `python experiments/offline_eval.py …` | CV only: compute GT accuracy |
+| 8 | `python scripts/experiment_logger.py …` | parallel terminal: timestamped CSV log |
 
-Multi-column CSV from the PeMS district download portal. The column you need is
-`Total Flow` (vehicles per 5-minute interval). Separator may be comma or
-semicolon; the preprocess script detects it automatically.
+---
+
+## R1 — PeMS (traffic flow regression)
+
+### Data format
+
+**No preprocessing required.** The data is already in the original HarmonE format:
 
 ```
-Timestamp, Station, District, Freeway, Direction, Lane Type, Station Length,
-Samples, % Observed, Total Flow, Avg Occupancy, Avg Speed, …
+data/pems/
+├── flow_data_train.csv   ← 892 flow observations  (~10% of total, initialization portion)
+└── flow_data_test.csv    ← 8 036 flow observations (~90% of total, streaming portion)
 ```
 
-If your raw export already has only a `flow` column (e.g. the aggregated
-`flow_data_train.csv` from the original codebase), the script handles that too.
+Both files have a single column `flow` (vehicles per 5-minute interval, no timestamp).
+The 10%/90% split matches the original HarmonE experimental protocol: a small initial
+portion for training the model zoo, and the remainder as the long-running evaluation stream.
 
-### Step 1 — Preprocess
+The config (`configs/datasets/pems.json`) uses the adapter's pre-split file mode:
+`train_path` and `stream_path` point directly to these files — no `train_frac` needed.
+
+### Step 1 — Validate
 
 ```bash
-cd tool/
-python scripts/preprocess_pems.py \
-    --input /path/to/pems_raw.csv \
-    --output data/pems_node2/pems_node2.csv
+python scripts/validate_dataset.py configs/datasets/pems.json
 ```
 
-Output: `data/pems_node2/pems_node2.csv` with columns `timestamp, flow`.
-
-For the second PeMS node (pems_node1, same format):
-```bash
-python scripts/preprocess_pems.py \
-    --input /path/to/pems_node1_raw.csv \
-    --output data/pems_node1/pems_node1.csv
-```
-
-Override the detected column if yours is named differently:
-```bash
-python scripts/preprocess_pems.py \
-    --input /path/to/pems_raw.csv \
-    --output data/pems_node2/pems_node2.csv \
-    --flow-col "Total Flow"      # explicit, or "flow", "volume", etc.
-```
+Expected: `PASS`.
 
 ### Step 2 — Init (scaler + KL reference)
 
 ```bash
-python scripts/init_regression.py --config pems_node2
-# Also for node1:
-python scripts/init_regression.py --config pems_node1
+python scripts/init_regression.py --config pems
 ```
 
 Writes to `managed_system_regression/knowledge/`:
-- `scaler.pkl` — MinMaxScaler fitted on training split only (B7 fix)
-- `reference_distribution.json` — 50-bin histogram for KL drift detection (B3 fix)
+- `scaler.pkl` — MinMaxScaler fitted on `flow_data_train.csv` only
+- `reference_distribution.json` — 50-bin histogram for KL drift detection
 
-### Step 3 — Validate
+### Step 3 — Run headless experiment
 
-```bash
-python scripts/validate_dataset.py configs/datasets/pems_node2.json
-```
-
-Expected: `PASS`. Status field in the config will be updated automatically.
-
-### Step 4 — Train models
-
-```bash
-cd managed_system_regression/
-python train.py
-# Outputs: models/lstm.pth, models/linear.pkl, models/svm.pkl
-cd ..
-```
-
-> The trained models are for the live managed system. The headless experiment
-> harness (`run_experiment.py`) trains its own models per run.
-
-### Step 5 — Run headless experiment
+The harness trains models inline on first run (when weight files are absent):
 
 ```bash
 python experiments/run_experiment.py \
-    --dataset pems_node2 \
+    --dataset pems \
     --planner harmone_original \
-    --seed 42
+    --seed 1
+
+# Full paper grid:
+python experiments/run_grid.py configs/experiments/baseline.yaml
 ```
 
-For all 7 planners × 5 seeds (paper grid):
+To force retraining (e.g. after changing train_path data):
 ```bash
-python experiments/run_grid.py configs/experiments/baseline.yaml
-# Edit baseline.yaml first: datasets: [pems_node2], seeds: [1,2,3,4,5]
+rm managed_system_regression/models/lstm_pems.pt
+rm managed_system_regression/models/ridge_pems.pkl
+rm managed_system_regression/models/svr_pems.pkl
+```
+
+### Step 4 — Train models (live managed system only)
+
+```bash
+cat data/pems/flow_data_train.csv <(tail -n +2 data/pems/flow_data_test.csv) \
+    > managed_system_regression/knowledge/dataset.csv
+# (or copy just flow_data_train.csv if you only want the init portion for train.py)
+cd managed_system_regression/
+python train.py
+cd ..
 ```
 
 ### Live managed system (dashboard mode)
 
 ```bash
-# Place preprocessed CSV as dataset.csv for the live inference engine:
-cp data/pems_node2/pems_node2.csv managed_system_regression/knowledge/dataset.csv
-
-# Start ACP + inference + dashboard (three terminals):
-python app.py                                           # terminal 1 — port 5000
-python run_managed_system.py                            # terminal 2 — port 8080
-python -m http.server 8000 --directory frontend/       # terminal 3 — port 8000
+# terminal 1
+python app.py
+# terminal 2
+python run_managed_system.py
+# terminal 3
+python -m http.server 8000 --directory frontend/
 ```
 
-Open http://localhost:8000/dashboard.html → HarmonE (Regression) → choose planner.
+Open http://localhost:8000/dashboard.html → Regression → choose planner.
+
+> **value_column note**: PeMS uses column name `flow`.
+> `knowledge/thresholds.json` must have `"value_column": "flow"` (the default).
+> When switching to UCI or spot_prices (which use `"value"`), update `thresholds.json`.
 
 ---
 
 ## R2 — UCI Electricity Load Diagrams
 
-### Raw format
-
-`LD2011_2014.txt` — semicolon-delimited, European decimal commas, 370 anonymous
-meter columns (`MT_001` … `MT_370`). ~1.4 million rows at 15-minute intervals.
+### Raw file (already downloaded)
 
 ```
-"Datetime";"MT_001";"MT_002";…;"MT_370"
-"2011-01-01 00:15:00";"0,000";"0,000";…;"0,000"
+data/loadDiagrams/LD2011_2014.csv
 ```
+
+Semicolon-delimited, European decimal commas, 370 meter columns (`MT_001`–`MT_370`),
+~1.4 million rows at 15-minute intervals.
 
 ### Step 1 — Preprocess
 
 ```bash
 python scripts/preprocess_uci_electricity.py \
-    --input /path/to/LD2011_2014.txt \
+    --input  data/loadDiagrams/LD2011_2014.csv \
     --output data/uci_electricity/uci_electricity.csv
 ```
 
 Output: `timestamp, value` (kW per 15-minute interval, meter MT_168 by default).
 
-If MT_168 has a long leading-zero prefix (≥ 6 months of zeros before first
-non-zero reading), switch to the fallback meter:
+If MT_168 has a leading-zero gap ≥ 6 months before first non-zero reading:
 ```bash
 python scripts/preprocess_uci_electricity.py \
-    --input /path/to/LD2011_2014.txt \
+    --input  data/loadDiagrams/LD2011_2014.csv \
     --output data/uci_electricity/uci_electricity.csv \
     --meter MT_321
 ```
-Document which meter was chosen — it affects the VMR reuse showcase (R2's
+
+Document which meter was chosen — it matters for the VMR reuse showcase (R2's
 seasonal periodicity is the key drift signal).
 
 ### Step 2 — Init
@@ -211,11 +235,9 @@ python scripts/init_regression.py --config uci_electricity
 python scripts/validate_dataset.py configs/datasets/uci_electricity.json
 ```
 
-### Step 4 — Train & run
+### Step 4 — Run
 
 ```bash
-cd managed_system_regression/ && python train.py && cd ..
-
 python experiments/run_experiment.py \
     --dataset uci_electricity \
     --planner harmone_original \
@@ -226,45 +248,33 @@ python experiments/run_experiment.py \
 
 ```bash
 cp data/uci_electricity/uci_electricity.csv managed_system_regression/knowledge/dataset.csv
-# Update knowledge/thresholds.json: set "value_column": "value"
+# Also update knowledge/thresholds.json: "value_column": "value"
 ```
-
-> When switching between PeMS (flow) and UCI/spot_prices (value) in the live
-> system, update `"value_column"` in `knowledge/thresholds.json` to match the
-> column name in `dataset.csv`. The headless harness reads `value_column` from
-> the dataset config file automatically.
 
 ---
 
 ## R3 — Spot Prices (Nord Pool)
 
-### Raw format
-
-Nord Pool semicolon-delimited CSV with European decimal commas. Multiple
-bidding areas per row.
+### Raw file (already downloaded)
 
 ```
-HourUTC;HourDK;PriceArea;SpotPriceDKK;SpotPriceEUR
-2024-02-22 22:00;2024-02-22 23:00;DK1;14,540000;1,950000
-2024-02-22 22:00;2024-02-22 23:00;DK2;14,540000;1,950000
-2024-02-22 22:00;2024-02-22 23:00;SE3;14,540000;1,950000
+data/elspot/Elspotprices 2015- 2024.csv
 ```
 
-> **Bug fixed:** the original `preprocess_spot_prices.py` read with default
-> comma separator, failing to detect Nord Pool's semicolons. The script now
-> auto-detects the separator and handles European decimal commas.
+Note: filename contains spaces — quote it in shell. Semicolon-delimited, European decimal commas,
+multiple bidding areas per row (DK1, DK2, SE3, NO2, …).
 
 ### Step 1 — Preprocess
 
 ```bash
 python scripts/preprocess_spot_prices.py \
-    --input /path/to/nordpool_data.csv \
+    --input  "data/elspot/Elspotprices 2015- 2024.csv" \
     --output data/spot_prices/spot_prices.csv \
     --area DK1
 ```
 
-`--area` accepts any bidding zone present in your file (DK1, DK2, SE3, NO2,
-etc.). The script prints available zones if the specified one is not found.
+`--area` can be any bidding zone in the file. The script prints available zones if
+the specified one is not found.
 Output: `timestamp, value` (EUR/MWh, hourly).
 
 ### Step 2 — Init
@@ -273,10 +283,8 @@ Output: `timestamp, value` (EUR/MWh, hourly).
 python scripts/init_regression.py --config spot_prices
 ```
 
-The `train_frac: 0.60` in the config puts 2019–2020 in training and 2021+ in
-the test/inference window. This is intentional — Winter Storm Uri (~2021-02-13
-for ERCOT) and the Nord Pool energy crisis (2021–2022) are the structural-break
-events being tested.
+`train_frac: 0.60` puts the 2019–2020 period in training; 2021+ is the test/inference
+window containing the Nord Pool energy crisis — the structural-break stress test.
 
 ### Step 3 — Validate & run
 
@@ -289,82 +297,89 @@ python experiments/run_experiment.py \
     --seed 42
 ```
 
-> **Expected behaviour:** HarmonE will fail to adapt on R3. The structural
-> break is permanent — VMR reuse cannot help because no historical model matches
-> the post-break distribution. This is the designed stress test (RQ6). Record
-> it as a partial failure, not a bug.
+> **Expected**: HarmonE will partially fail here. The post-crisis price regime is
+> permanently different; no historical model in VMR matches the new distribution.
+> This is the designed stress test (RQ6). Record it as a partial failure, not a bug.
 
 ---
 
 ## C1 — BDD100K (object detection)
 
-### Raw format
+### Target: ~3 000 val images → ~3 × 1000-image eval intervals
 
-Full BDD100K dataset download. Required structure:
+### Raw files (already downloaded)
 
 ```
-bdd100k/
-├── images/
-│   └── 100k/
-│       ├── train/   *.jpg   (70 000 images)
-│       ├── val/     *.jpg   (10 000 images)
-│       └── test/    *.jpg   (20 000 images — no GT labels)
+data/bdd100k/
+├── images/100k/
+│   ├── train/   *.jpg   (70 000 images)
+│   ├── val/     *.jpg   (10 000 images — primary eval stream)
+│   └── test/    *.jpg   (20 000 images — no GT labels)
 └── labels/
-    ├── bdd100k_labels_images_train.json
-    └── bdd100k_labels_images_val.json
+    └── 100k/
+        ├── train/   {stem}.json   (70 000 per-image annotation files)
+        ├── val/     {stem}.json   (10 000 per-image annotation files)
+        └── test/    {stem}.json   (20 000 per-image annotation files)
 ```
 
-The test images you already have at
-`managed_system_cv/data/bdd100k/images/test/` are correctly placed. The
-preprocess script reads them from there via the manifest.
+Each per-image JSON contains `"name"` (stem without .jpg), `"attributes"` (weather + timeofday),
+and `"frames"` (bounding box annotations). The script reads `labels/100k/{split}/{stem}.json`.
 
-### Step 1 — Preprocess (build drift-ordered manifest + YOLO labels)
+Use the **val split** for the primary evaluated stream — test images have no GT labels.
+Do NOT reorganize images into condition subdirectories. The manifest (not the
+filesystem) encodes the domain drift order.
+
+**No data movement needed — run from `tool/` with `--bdd-root data/bdd100k`.**
+
+### Step 1 — Preprocess (build manifest)
 
 ```bash
+cd tool/
+
+# Val + test only (fast — skips 70k train JSONs, ~2 min instead of ~8 min):
+# Recommended since only val is used in experiments.
 python scripts/preprocess_bdd100k.py \
-    --bdd-root /path/to/bdd100k/ \
-    --output data/bdd100k/bdd100k_manifest.csv \
-    --yolo-labels-dir managed_system_cv/data/bdd100k/labels_yolo/
-```
-
-This does two things:
-1. Reads annotation JSONs to determine `weather` + `timeofday` for each image
-2. Assigns domain labels and sorts into drift order:
-   `clear_day → overcast → foggy → dusk → night → rain`
-3. Converts BDD100K bounding-box JSON annotations to per-image YOLO `.txt`
-   files in `--yolo-labels-dir` (needed for `offline_eval.py`)
-
-Output: `data/bdd100k/bdd100k_manifest.csv` with columns:
-`sample_id, input_path, label_path, domain, split`
-
-> The test split has no GT labels in BDD100K. For ground-truth evaluation
-> (`offline_eval.py`), use the `val` split — it has 10 000 labelled images
-> covering all domains.
-
-If you only need the manifest (no YOLO conversion yet):
-```bash
-python scripts/preprocess_bdd100k.py \
-    --bdd-root /path/to/bdd100k/ \
-    --output data/bdd100k/bdd100k_manifest.csv \
+    --bdd-root data/bdd100k \
+    --output   data/bdd100k/bdd100k_manifest.csv \
+    --splits val test \
     --no-yolo
+
+# All splits (train + val + test, ~8 min — needed if you want train rows in the manifest):
+python scripts/preprocess_bdd100k.py \
+    --bdd-root data/bdd100k \
+    --output   data/bdd100k/bdd100k_manifest.csv \
+    --no-yolo
+
+# With YOLO label conversion (required for offline_eval.py mAP@0.5):
+python scripts/preprocess_bdd100k.py \
+    --bdd-root        data/bdd100k \
+    --output          data/bdd100k/bdd100k_manifest.csv \
+    --splits val \
+    --yolo-labels-dir data/bdd100k/labels_yolo/
+```
+
+Manifest columns: `sample_id, input_path, label_path, domain, split`
+
+Domain drift order: `clear_day → overcast → foggy → dusk → night → rain`
+
+Check domain distribution in the val split:
+```bash
+python -c "
+import pandas as pd
+m = pd.read_csv('data/bdd100k/bdd100k_manifest.csv')
+print(m[m.split=='val'].groupby('domain').size())
+print('Total val:', len(m[m.split=='val']))
+"
 ```
 
 ### Step 2 — Init CV artifacts
 
 ```bash
-python scripts/init_cv.py --config bdd100k
-```
-
-Writes to `managed_system_cv/knowledge/`:
-- `model.csv` — default active model (`yolo_n`)
-- `mape_info.json` — initial MAPE-K state
-- `versionedMR/` — copies of base model weights for VMR reuse
-- `reference_embeddings.npz` — fixed-reference embeddings for MMD/Fréchet
-  drift detection (only if `drift_detector` is embedding-based)
-
-For the default `luminance_kl` detector, use:
-```bash
+# Default luminance_kl drift detector (no GPU needed for init):
 python scripts/init_cv.py --config bdd100k --skip-embeddings
+
+# Embedding-based drift (MMD/Fréchet) — needs GPU and model weights:
+python scripts/init_cv.py --config bdd100k
 ```
 
 ### Step 3 — Validate
@@ -384,18 +399,16 @@ python experiments/run_experiment.py \
 
 ### Step 5 — CV accuracy (mAP@0.5)
 
-After a run completes (or while it runs):
-
 ```bash
 python experiments/offline_eval.py \
-    --run-dir managed_system_cv/knowledge \
-    --labels-dir managed_system_cv/data/bdd100k/labels_yolo/val \
-    --images-dir managed_system_cv/data/bdd100k/images/val \
-    --interval 1000 \
-    --output results/bdd100k_eval.json
+    --run-dir    managed_system_cv/knowledge \
+    --labels-dir data/bdd100k/labels_yolo/val \
+    --images-dir data/bdd100k/images/100k/val \
+    --interval   1000 \
+    --output     results/bdd100k_eval.json
 ```
 
-Output JSON structure:
+Output JSON:
 ```json
 {
   "interval_results": [
@@ -403,17 +416,16 @@ Output JSON structure:
      "model": "yolo_n", "timestamp_start": 1234, "timestamp_end": 1235}
   ],
   "overall_map50": 0.44,
-  "n_intervals": 5
+  "n_intervals": 3
 }
 ```
 
-The evaluation runs Ultralytics `val()` per monitoring interval, so it requires
-GPU access. Add `--smoke` for a 3-interval sanity check on CPU.
+Uses Ultralytics `val()` per interval — requires GPU. Add `--smoke` for a
+3-interval CPU sanity check.
 
 ### Live managed system
 
 ```bash
-# Same three-terminal setup; choose CV HarmonE in dashboard
 python app.py
 python run_managed_system.py
 python -m http.server 8000 --directory frontend/
@@ -425,65 +437,60 @@ In dashboard: HarmonE (CV) → choose planner → Start.
 
 ## C2 — iWildCam (classification)
 
-### Raw format
+### Target: ~3 000 ood_test images → ~6 × 500-image eval intervals
 
-WILDS v2.0 download with:
+### Raw files (already downloaded)
 
 ```
-iwildcam_v2.0/
-├── metadata.csv     (one row per image; split, location_remapped, y, image_id, filename, …)
-├── categories.csv   (y → species name mapping)
-└── images/
-    ├── 97f407ac-21bc-11ea-a13a-137349068a90.jpg
-    ├── 954d7740-21bc-11ea-a13a-137349068a90.jpg
-    └── …            (flat directory, UUID filenames)
+data/iwildcam/
+├── train/           ← flat directory of UUID.jpg images (WILDS v2.0 layout)
+├── metadata.csv     ← one row per image: image_id, y, split, location_remapped, …
+├── categories.csv   ← class_id → species name
+├── iwildcam2021_train_annotations_final.json   ← NOT used by preprocess script
+└── RELEASE_v2.0.txt
 ```
 
-Your metadata excerpt uses string splits (`id_test`, `train`, etc.) from WILDS
-≥2.0. Older versions used integer splits (0=train, 1=id_val, etc.).
+**WILDS v2.0 puts images in `train/` not `images/`** — the preprocess script handles both.
+`metadata.csv` is the source of truth. The annotation JSON is not used.
 
-> **Bug fixed:** the original `preprocess_iwildcam.py` called `int(row["split"])`
-> which crashed on WILDS ≥2.0 string splits. Both formats are now handled.
+**No data movement needed — run from `tool/` with `--wilds-root data/iwildcam`.**
 
-### Step 1 — Preprocess
+### Step 1 — Preprocess (build manifest)
 
 ```bash
+cd tool/
+
 python scripts/preprocess_iwildcam.py \
-    --wilds-root /path/to/iwildcam_v2.0/ \
-    --output data/iwildcam/iwildcam_manifest.csv
+    --wilds-root data/iwildcam \
+    --output     data/iwildcam/iwildcam_manifest.csv
 ```
 
-Output: `data/iwildcam/iwildcam_manifest.csv` with columns:
-`sample_id, input_path, label, domain, split`
+Manifest columns: `sample_id, input_path, label, domain, split`
 
-The script:
-- Uses `location_remapped` as the domain column (geographic drift axis)
-- Sorts by location to create a controlled drift sequence
-- The OOD test split (`id_test` / split=3 in older format) is the primary
-  inference stream — unseen camera trap locations → geographic domain shift
+The script uses `location_remapped` as the domain column (geographic drift axis).
+Samples are sorted by location — **do not globally shuffle** the OOD test stream.
+The drift represents camera-location transitions, so location-to-location ordering
+matters. Within a location, order is less critical.
 
-Print a split summary to verify:
+Verify:
 ```bash
 python -c "
 import pandas as pd
 m = pd.read_csv('data/iwildcam/iwildcam_manifest.csv')
 print(m.groupby('split').size())
-print(f\"OOD test: {len(m[m.split=='id_test'])} images across "
-      f\"{m[m.split=='id_test']['domain'].nunique()} locations\")
+ood = m[m.split == 'ood_test']
+print('OOD test:', len(ood), 'images across', ood['domain'].nunique(), 'locations')
 "
 ```
 
 ### Step 2 — Init CV artifacts
 
 ```bash
+# Fast init without embeddings:
 python scripts/init_cv.py --config iwildcam --skip-embeddings
-# Add --force to overwrite existing artifacts
-```
 
-For embedding drift (MMD/Fréchet) — needed for RQ2:
-```bash
+# With embedding reference (MMD drift detector — needs GPU):
 python scripts/init_cv.py --config iwildcam
-# Extracts reference embeddings from training split (requires model weights)
 ```
 
 ### Step 3 — Validate
@@ -503,87 +510,99 @@ python experiments/run_experiment.py \
 
 ### Step 5 — CV accuracy (top-1 classification)
 
-iWildCam ground truth is the `label` column in the manifest (species class
-index, 0-indexed). The framework logs `proxy_score` (confidence-based) to
-`predictions.csv` during inference. True top-1 accuracy requires offline eval:
-
 ```bash
 python experiments/offline_eval.py \
-    --run-dir managed_system_cv/knowledge \
+    --run-dir  managed_system_cv/knowledge \
     --manifest data/iwildcam/iwildcam_manifest.csv \
-    --split id_test \
+    --split    ood_test \
     --interval 500 \
-    --output results/iwildcam_eval.json
+    --output   results/iwildcam_eval.json
 ```
-
-The classification adapter's `offline_accuracy()` method computes top-1 against
-the `label` column for each monitoring interval.
 
 ---
 
 ## C3 — ACDC (semantic segmentation)
 
-### Raw format
+### Target: ~2 000 frames → ~5 × 400-image eval intervals (~500 per condition)
 
-ACDC dataset download. Required structure:
+### Raw files (already downloaded)
 
 ```
-acdc/
+data/acdc/
 ├── rgb_anon/
 │   ├── fog/
 │   │   ├── train/{sequence}/*_rgb_anon.png
 │   │   ├── val/{sequence}/*_rgb_anon.png
-│   │   ├── test/{sequence}/*_rgb_anon.png
-│   │   ├── trainref/{sequence}/*_rgb_anon.png   ← ignored by preprocess
-│   │   ├── valref/{sequence}/*_rgb_anon.png     ← ignored
-│   │   └── testref/{sequence}/*_rgb_anon.png    ← ignored
+│   │   ├── test/{sequence}/*_rgb_anon.png      ← excluded (no GT)
+│   │   ├── trainref/{sequence}/*_rgb_anon.png  ← excluded (reference counterpart)
+│   │   ├── valref/{sequence}/*_rgb_anon.png    ← excluded
+│   │   └── testref/{sequence}/*_rgb_anon.png   ← excluded
 │   ├── rain/  (same structure)
 │   ├── night/ (same structure)
 │   └── snow/  (same structure)
 └── gt_trainval/
     └── gt/
-        ├── fog/
-        │   ├── train/{sequence}/*_gt_labelTrainIds.png
-        │   ├── val/{sequence}/*_gt_labelTrainIds.png
-        │   ├── trainref/{sequence}/…
-        │   └── valref/{sequence}/…
-        ├── rain/  (same structure)
-        ├── night/ (same structure)
-        └── snow/  (same structure)
+        ├── fog/{train,val,trainref,valref}/{sequence}/*_gt_labelTrainIds.png
+        ├── rain/  (same)
+        ├── night/ (same)
+        └── snow/  (same)
 ```
 
-Your download has GT for `train`, `val`, `trainref`, `valref` — the script uses
-`train` and `val` only; `trainref`/`valref`/`testref` are automatically skipped.
+**Critical**: ACDC's train/val split does NOT divide a GoPro recording temporally.
+A single GoPro (e.g. `GOPR0475`) can have frames split across BOTH `train/` and
+`val/` directories. The preprocess script reconstructs each GoPro's natural frame
+order by merging train+val and sorting by frame number encoded in the filename.
 
-**Critical:** use `_gt_labelTrainIds.png` files, NOT `_gt_labelIds.png`.
-Cityscapes trainId encoding: 0–18 valid classes, 255 = `ignore_index`.
+Key rules:
+- Use `_gt_labelTrainIds.png` — **NOT** `_gt_labelIds.png`
+- Only train + val are processed (no GT for test; ref splits excluded)
+- The `split` column in the manifest records each frame's original directory
+  (train or val) so the correct GT label path can be resolved
+- Primary ordering is: condition → sequence → frame_number
 
-### Step 1 — Preprocess
+**No data movement needed — run from `tool/` with `--acdc-root data/acdc`.**
+
+### Step 1 — Preprocess (build manifest with sequence reconstruction)
 
 ```bash
+cd tool/
+
 python scripts/preprocess_acdc.py \
-    --acdc-root /path/to/acdc/ \
-    --output data/acdc/acdc_manifest.csv
+    --acdc-root data/acdc \
+    --output    data/acdc/acdc_manifest.csv
 ```
 
-The preprocess script:
-- Pairs each RGB image with its `_gt_labelTrainIds.png` mask
-- Assigns domain from directory name (`fog`, `rain`, `night`, `snow`)
-- Orders drift stream: `fog → rain → night → snow` (no "clear" condition in ACDC)
+Manifest columns: `sample_id, input_path, label_path, domain, sequence, frame_number, split`
 
-Output: `data/acdc/acdc_manifest.csv` with columns:
-`sample_id, input_path, label_path, domain, split`
+Drift stream order: `fog → rain → night → snow`
 
-Verify label pairing:
+Within each condition, frames are ordered by `sequence` (GoPro name) then
+`frame_number` — this is the natural GoPro recording order.
+
+Verify sequence reconstruction:
 ```bash
 python -c "
 import pandas as pd
 from pathlib import Path
 m = pd.read_csv('data/acdc/acdc_manifest.csv')
+print('=== Count by domain/split ===')
+print(m.groupby(['domain', 'split']).size())
+print()
+print('=== Sequences per condition ===')
+print(m.groupby('domain')['sequence'].nunique())
+print()
 missing = m[~m.label_path.apply(lambda p: Path(p).exists())]
 print(f'Missing labels: {len(missing)} / {len(m)}')
-print(m.groupby([\"split\",\"domain\"]).size())
 "
+```
+
+Example of correct sequence reconstruction (frames from different splits merged):
+```
+domain=fog, sequence=GOPR0475:
+  GOPR0475_frame_000001_rgb_anon.png  (split=train)
+  GOPR0475_frame_000002_rgb_anon.png  (split=val)
+  GOPR0475_frame_000003_rgb_anon.png  (split=train)
+  ...
 ```
 
 ### Step 2 — Init CV artifacts
@@ -609,69 +628,65 @@ python experiments/run_experiment.py \
 
 ### Step 5 — CV accuracy (mIoU)
 
-GT is the `label_path` column (`_gt_labelTrainIds.png` masks, Cityscapes trainIds,
-`ignore_index=255`).
+GT masks are the `label_path` column (`_gt_labelTrainIds.png`, Cityscapes trainIds,
+`ignore_index=255`). The `offline_eval.py --split val` flag selects only frames
+whose original split was `val` (these have GT labels; train frames also have GT
+but `val` is the standard held-out evaluation partition).
 
 ```bash
 python experiments/offline_eval.py \
-    --run-dir managed_system_cv/knowledge \
+    --run-dir  managed_system_cv/knowledge \
     --manifest data/acdc/acdc_manifest.csv \
-    --split val \
+    --split    val \
     --interval 400 \
-    --output results/acdc_eval.json
+    --output   results/acdc_eval.json
 ```
 
-The segmentation adapter's `offline_accuracy()` computes per-class IoU using
-`ignore_index=255`, then macro-averages over the 19 Cityscapes classes.
+Segmentation adapter computes per-class IoU ignoring `ignore_index=255`, then
+macro-averages over the 19 Cityscapes classes.
 
 ---
 
 ## CV accuracy metrics — summary
 
-| Dataset | Task | Metric | GT source | Script |
-|---------|------|--------|-----------|--------|
-| BDD100K | Detection | mAP@0.5 | YOLO `.txt` label files from preprocess | `offline_eval.py --labels-dir` |
-| iWildCam | Classification | Top-1 accuracy | `label` column in manifest | `offline_eval.py --manifest` |
-| ACDC | Segmentation | mIoU (19 classes, ignore=255) | `_gt_labelTrainIds.png` in manifest | `offline_eval.py --manifest` |
+| Dataset | Task | Metric | GT source | Key arg |
+|---------|------|--------|-----------|---------|
+| BDD100K | Detection | mAP@0.5 | YOLO `.txt` files from preprocess | `--labels-dir data/bdd100k/labels_yolo/val` |
+| iWildCam | Classification | Top-1 accuracy | `label` column in manifest | `--manifest data/iwildcam/iwildcam_manifest.csv` |
+| ACDC | Segmentation | mIoU (19 classes, ignore=255) | `_gt_labelTrainIds.png` in manifest | `--manifest data/acdc/acdc_manifest.csv` |
 
-All three share the same `offline_eval.py` entry point. The script auto-detects
-task type from the dataset config (`"task": "detection"` / `"classification"` /
-`"segmentation"`).
+All three use the same `offline_eval.py` entry point. It auto-detects the task from the
+dataset config (`"task": "detection"` / `"classification"` / `"segmentation"`).
 
-For proxy validation (RQ3 — how well does the runtime proxy track GT accuracy):
+For proxy validation (RQ3 — does the runtime proxy track GT accuracy):
 
 ```bash
 python experiments/proxy_validation.py \
     --eval-results results/bdd100k_eval.json \
-    --run-dir managed_system_cv/knowledge \
-    --output results/bdd100k_proxy_validation.json
+    --run-dir      managed_system_cv/knowledge \
+    --output       results/bdd100k_proxy_validation.json
 ```
-
-Reports Spearman ρ between proxy score and ground-truth accuracy per monitoring
-interval. Run once per proxy choice (`confidence`, `calibrated_confidence`,
-`agreement`) to pick the best proxy for the paper.
 
 ---
 
 ## Experiment logger (timestamped readings)
 
-The logger polls the `knowledge/` directory and appends one CSV row per tick
-to `logs/<dataset>_<YYYY-MM-DD_HH-MM-SS>.csv`. Run it in a separate terminal
-alongside the managed system or headless experiment.
+Polls the `knowledge/` directory and appends one CSV row per tick to
+`logs/<dataset>_<YYYY-MM-DD_HH-MM-SS>.csv`. Run in a separate terminal alongside
+the managed system or headless experiment.
 
 ### Regression
 
 ```bash
-# From tool/
 python scripts/experiment_logger.py \
     --knowledge managed_system_regression/knowledge \
-    --dataset pems_node2 \
-    --domain regression \
-    --interval 30 \
-    --log-dir logs/
+    --dataset   pems_node2 \
+    --domain    regression \
+    --interval  30 \
+    --log-dir   logs/
 ```
 
-Captured columns per tick (every 30 s by default):
+Captured columns per tick:
 
 | Column | Description |
 |--------|-------------|
@@ -679,11 +694,11 @@ Captured columns per tick (every 30 s by default):
 | `unix_ts` | Unix epoch (for alignment with predictions.csv) |
 | `current_model` | Active model name (lstm / linear / svm) |
 | `last_mape_line` | Row index in predictions.csv at snapshot time |
-| `current_energy_threshold` | Dynamic τ_E value (Eq. 3) |
+| `current_energy_threshold` | Dynamic τ_E value |
 | `ema_score_lstm/linear/svm` | Per-model EMA composite score |
 | `ema_acc_lstm/linear/svm` | Per-model EMA accuracy |
 | `ema_energy_lstm/linear/svm` | Per-model EMA energy |
-| `event_model_switches` | Cumulative model switch count |
+| `event_model_switches` | Cumulative switch count |
 | `event_retrains` | Cumulative retrain count |
 | `event_vmr` | Cumulative VMR reuse count |
 | `event_noops` | Cumulative noop count |
@@ -691,8 +706,8 @@ Captured columns per tick (every 30 s by default):
 | `recent_r2_mean` | Mean R² over last 200 predictions |
 | `recent_rmse` | RMSE over last 200 predictions |
 | `recent_energy_mean_uJ` | Mean energy/prediction over last 200 rows |
-| `drift_kl_primary` | Current KL divergence (fixed-reference detector) |
-| `drift_kl_rolling` | Current KL divergence (rolling detector) |
+| `drift_kl_primary` | KL divergence (fixed-reference detector) |
+| `drift_kl_rolling` | KL divergence (rolling detector) |
 | `drift_threshold` | Configured τ_drift |
 | `planner` | Active planner name |
 | `dataset_id` | Bandit dataset ID (if planner=bandit) |
@@ -702,13 +717,13 @@ Captured columns per tick (every 30 s by default):
 ```bash
 python scripts/experiment_logger.py \
     --knowledge managed_system_cv/knowledge \
-    --dataset bdd100k \
-    --domain cv \
-    --interval 30 \
-    --log-dir logs/
+    --dataset   bdd100k \
+    --domain    cv \
+    --interval  30 \
+    --log-dir   logs/
 ```
 
-CV-specific columns (replaces per-model columns above):
+CV-specific columns (per-model fields are JSON dicts instead):
 
 | Column | Description |
 |--------|-------------|
@@ -719,16 +734,12 @@ CV-specific columns (replaces per-model columns above):
 | `drift_detector` | Active drift detector name |
 | `proxy` | Active proxy name |
 
-### Stopping
+### Stopping & merging
 
-`Ctrl-C` closes the file cleanly. The log is also flushed every tick so a hard
-kill (e.g. machine shutdown) loses at most one row.
-
-### Merging logs after a run
+`Ctrl-C` flushes the file cleanly. To merge logs from multiple runs:
 
 ```python
 import pandas as pd, glob
-
 logs = pd.concat(
     [pd.read_csv(f) for f in sorted(glob.glob("logs/pems_node2_*.csv"))],
     ignore_index=True,
@@ -740,71 +751,175 @@ logs.to_csv("logs/pems_node2_merged.csv", index=False)
 
 ## Common pitfalls
 
-### `Column 'flow' not found` in inference.py
-The live inference engine reads `value_column` from `knowledge/thresholds.json`
-(default: `"flow"`). If you switch to UCI electricity or spot_prices (which
-output a `value` column), add `"value_column": "value"` to
-`managed_system_regression/knowledge/thresholds.json`.
+### `Column 'flow' not found` in live inference.py
+Switch between datasets by updating `"value_column"` in
+`managed_system_regression/knowledge/thresholds.json`:
+- PeMS → `"flow"` (the default)
+- UCI electricity / spot_prices → `"value"`
 
-### Nord Pool CSV not parsed correctly
-If `preprocess_spot_prices.py` prints `Raw rows: 1` or column names contain
-semicolons, the auto-detection failed. Force the separator:
+The headless harness reads `value_column` from the dataset config file automatically;
+only the live system needs the manual update.
+
+### Spot prices: shell quoting for filename with spaces
 ```bash
-# The script already handles this via _read_csv_auto, but if it still fails:
-# Manually check the separator with:
-head -2 /path/to/nordpool_data.csv | cat -A
+# Quote the path — the filename is "Elspotprices 2015- 2024.csv" with a space:
+python scripts/preprocess_spot_prices.py \
+    --input "data/elspot/Elspotprices 2015- 2024.csv" \
+    --output data/spot_prices/spot_prices.csv \
+    --area DK1
 ```
 
-### iWildCam split detection fails (`ValueError: invalid literal for int()`)
-This happens with old versions of the script on WILDS ≥2.0 data. Pull the
-latest `preprocess_iwildcam.py` — the fix handles both integer and string splits.
+### BDD100K: all images get domain `overcast` (annotation fallback)
+The script falls back to `overcast` when no annotation JSON is found. If this
+happens for every image, the JSON files weren't discovered. The expected layout is
+**one JSON per image** in `labels/100k/{split}/`:
+```bash
+ls data/bdd100k/labels/100k/val/    # should list 10 000 *.json files
+ls data/bdd100k/labels/100k/train/  # should list 70 000 *.json files
+```
+The script also falls back to the older bundle format (`labels/bdd100k_labels_images_val.json`).
+If neither is found, verify your BDD100K download includes per-image JSON labels.
 
-### BDD100K manifest: all images assigned `overcast` domain
-This means the annotation JSONs were not found. Verify:
-- `--bdd-root` points to the directory that contains both `images/` AND `labels/`
-- `labels/bdd100k_labels_images_train.json` exists under `<bdd-root>/labels/`
+### iWildCam: `Image directory not found` error
+The script tries `images/` then `train/` under `--wilds-root`. If neither exists:
+```bash
+ls data/iwildcam/    # find the actual image folder name
+```
+If it's named something else (e.g. `photos/`), create a symlink:
+```bash
+ln -s photos data/iwildcam/images
+```
 
-### `YOLO weights not found` on first CV run
-Ultralytics downloads weights to `~/.cache/ultralytics/` on first use (requires
-internet). Pre-download on a connected machine and copy the cache directory:
+### ACDC: `WARNING: N label files not found`
+Check these three things:
+1. GT path must be `gt_trainval/gt/` (there IS a `gt/` subdirectory inside `gt_trainval/`)
+2. Label files must end with `_gt_labelTrainIds.png` (not `_gt_labelIds.png`)
+3. Sequence folder names must match between `rgb_anon/` and `gt_trainval/gt/`
+
+### ACDC: manifest `split` column looks wrong / mixed
+This is expected and correct. The `split` column records each frame's original
+directory (train or val), NOT the experiment split. A single GoPro sequence will
+have frames from both `train` and `val` interleaved in frame-number order. That is
+the intended output of the sequence-reconstruction logic.
+
+### YOLO weights not available offline
+Ultralytics downloads weights to `~/.cache/ultralytics/` on first use (needs internet).
+Pre-download on a connected machine:
 ```bash
 python -c "from ultralytics import YOLO; YOLO('yolov8n.pt'); YOLO('yolov8s.pt'); YOLO('yolov8m.pt')"
 ```
+Then copy `~/.cache/ultralytics/` to the experiment machine.
 
-### ACDC label mismatch warnings (`WARNING: N label files not found`)
-Check that:
-1. GT directory is `gt_trainval/gt/` (not `gt_trainval/` directly)
-2. Label files end with `_gt_labelTrainIds.png` (not `_gt_labelIds.png`)
-3. Sequence subdirectory names match between `rgb_anon/` and `gt_trainval/gt/`
-
-### Energy reads as 0 / null on baremetal
-Run the energy probe first:
+### Energy reads as 0 / null
 ```bash
 python scripts/probe_energy.py
 sudo bash scripts/setup_energy_permissions.sh
 python scripts/probe_energy.py   # re-check
 ```
-If readings are still 0, set `"energy_meter": "null"` in the dataset config and
-note this in the paper's threats section. AMD Zen 2+ exposes RAPL via the same
-sysfs path as Intel — the setup script handles both.
+If still 0 (no RAPL support), set `"energy_meter": "null"` in the dataset config.
+Note this in the paper's threats-to-validity section.
 
 ---
 
-## Full run sequence for a new dataset (checklist)
+## Full run checklist (new dataset or fresh machine)
 
-```
-[ ] Download raw data to a scratch location outside the repo
-[ ] python scripts/preprocess_<dataset>.py --input … --output …
-[ ] python scripts/validate_dataset.py configs/datasets/<name>.json
-[ ] # regression only:
-[ ]   python scripts/init_regression.py --config <name>
-[ ]   cd managed_system_regression/ && python train.py && cd ..
-[ ] # cv only:
-[ ]   python scripts/init_cv.py --config <name> [--skip-embeddings]
-[ ] python experiments/run_experiment.py --dataset <name> --planner harmone_original --seed 42 --verbose
-[ ] # (in parallel terminal) python scripts/experiment_logger.py --knowledge … --dataset … --domain …
-[ ] # cv only, after run:
-[ ]   python experiments/offline_eval.py --run-dir … --output results/<name>_eval.json
-[ ] python experiments/run_grid.py configs/experiments/baseline.yaml   # full 7-planner × 5-seed grid
-[ ] python experiments/metrics.py aggregate --grid-dir runs/baseline --out runs/baseline/metrics.csv
+```bash
+cd tool/
+source harmone_env/bin/activate
+
+# ── Preprocess ──────────────────────────────────────────────────────────────
+# R1: PeMS data already at data/pems/ (flow_data_train.csv + flow_data_test.csv)
+# No preprocessing step needed — files are already in the required format.
+
+# R2: raw file already at data/loadDiagrams/LD2011_2014.csv
+python scripts/preprocess_uci_electricity.py \
+    --input  data/loadDiagrams/LD2011_2014.csv \
+    --output data/uci_electricity/uci_electricity.csv
+
+# R3: raw file already at data/elspot/ — note space in filename, must quote
+python scripts/preprocess_spot_prices.py \
+    --input  "data/elspot/Elspotprices 2015- 2024.csv" \
+    --output data/spot_prices/spot_prices.csv \
+    --area   DK1
+
+# C1: data already at data/bdd100k/
+# Use --splits val to skip 70k train JSONs (~2 min vs ~8 min); only val is used in experiments.
+python scripts/preprocess_bdd100k.py \
+    --bdd-root data/bdd100k \
+    --output   data/bdd100k/bdd100k_manifest.csv \
+    --splits val \
+    --no-yolo
+
+# ── Trim manifests to experiment-appropriate size ─────────────────────────────
+# BDD100K: keep ~3 000 val images (500/domain × 6 domains)
+python scripts/trim_manifest.py \
+    --dataset  bdd100k \
+    --manifest data/bdd100k/bdd100k_manifest.csv \
+    --target   3000
+
+# iWildCam: keep ~3 000 ood_test images distributed across locations
+python scripts/trim_manifest.py \
+    --dataset  iwildcam \
+    --manifest data/iwildcam/iwildcam_manifest.csv \
+    --target   3000
+# ACDC: no trim needed (~2 006 frames total)
+
+# C2: data already at data/iwildcam/
+python scripts/preprocess_iwildcam.py \
+    --wilds-root data/iwildcam \
+    --output     data/iwildcam/iwildcam_manifest.csv
+
+# C3: data already at data/acdc/
+python scripts/preprocess_acdc.py \
+    --acdc-root data/acdc \
+    --output    data/acdc/acdc_manifest.csv
+
+# ── Validate all ─────────────────────────────────────────────────────────────
+for cfg in pems uci_electricity spot_prices bdd100k iwildcam acdc; do
+    python scripts/validate_dataset.py configs/datasets/${cfg}.json
+done
+
+# ── Init regression ───────────────────────────────────────────────────────────
+python scripts/init_regression.py --config pems
+python scripts/init_regression.py --config uci_electricity
+python scripts/init_regression.py --config spot_prices
+
+# ── Init CV (no embeddings for speed; run without --skip-embeddings later) ───
+python scripts/init_cv.py --config bdd100k  --skip-embeddings
+python scripts/init_cv.py --config iwildcam --skip-embeddings
+python scripts/init_cv.py --config acdc     --skip-embeddings
+
+# ── Smoke tests ───────────────────────────────────────────────────────────────
+python experiments/run_experiment.py --dataset pems --planner harmone_original --seed 42 --verbose
+python experiments/run_experiment.py --dataset bdd100k    --planner harmone_original --seed 42 --verbose
+
+# ── Full paper grid ───────────────────────────────────────────────────────────
+python experiments/run_grid.py configs/experiments/baseline.yaml
+
+# ── CV ground-truth accuracy (after runs complete) ────────────────────────────
+python experiments/offline_eval.py \
+    --run-dir    managed_system_cv/knowledge \
+    --labels-dir data/bdd100k/labels_yolo/val \
+    --images-dir data/bdd100k/images/100k/val \
+    --interval   1000 \
+    --output     results/bdd100k_eval.json
+
+python experiments/offline_eval.py \
+    --run-dir  managed_system_cv/knowledge \
+    --manifest data/iwildcam/iwildcam_manifest.csv \
+    --split    ood_test \
+    --interval 500 \
+    --output   results/iwildcam_eval.json
+
+python experiments/offline_eval.py \
+    --run-dir  managed_system_cv/knowledge \
+    --manifest data/acdc/acdc_manifest.csv \
+    --split    val \
+    --interval 400 \
+    --output   results/acdc_eval.json
+
+# ── Aggregate metrics ─────────────────────────────────────────────────────────
+python experiments/metrics.py aggregate \
+    --grid-dir runs/baseline \
+    --out      runs/baseline/metrics.csv
 ```

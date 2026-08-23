@@ -3,14 +3,12 @@
   "domain": "regression",
   "adapter": "adapters.regression_csv.RegressionCSVAdapter",
   "status": "awaiting_data",
-
   "data_path": "data/uci_electricity/uci_electricity.csv",
   "value_column": "value",
   "seq_length": 96,
-  "train_frac": 0.8,
+  "train_frac": 0.1,
   "val_frac": 0.05,
   "stream_delay_s": 0.0,
-
   "models": {
     "lstm": {
       "weights_path": "managed_system_regression/models/lstm_uci_electricity.pt",
@@ -28,22 +26,22 @@
       "cost_class": "medium"
     }
   },
-
-  "min_score": 0.50,
-  "max_energy": 0.50,
+  "min_score": 0.5,
+  "max_energy": 0.5,
   "E_ref": 0.5,
   "delta": 0.05,
   "beta": 0.95,
   "gamma": 0.8,
   "alpha": 0.1,
-  "E_m": 0,
-  "E_M": 5000000,
+  "E_m": 300,
+  "E_M": 21000,
   "tau_drift": 0.05,
   "tau_drift_source": "default_pending_calibration",
   "drift_reference": "both",
-
   "planner": "harmone_original",
-  "energy_required": ["cpu"],
-
-  "_comment": "Client MT_168. Seasonal VMR-reuse showcase. See docs/datasets/uci_electricity.md for DST dedup and preprocessing details."
+  "energy_required": [
+    "cpu"
+  ],
+  "_comment": "Client MT_168. Seasonal VMR-reuse showcase. See docs/datasets/uci_electricity.md for DST dedup and preprocessing details.",
+  "energy_meter": "rapl"
 }

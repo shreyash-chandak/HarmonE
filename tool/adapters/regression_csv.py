@@ -1,17 +1,28 @@
 """
 adapters/regression_csv.py — Generic sliding-window CSV regression adapter.
 
-Configured entirely by configs/datasets/<name>.json. Points at the bundled
-PeMS dataset via configs/datasets/pems_node1.json with no hardcoded paths.
+Configured entirely by configs/datasets/<name>.json.
 
 Config schema (all keys read from the dataset config JSON):
-  data_path         : path to the CSV file (absolute or relative to config)
-  value_column      : name of the target column (e.g. "flow")
-  seq_length        : number of timesteps per input window (e.g. 5)
-  train_frac        : fraction of rows used for training (e.g. 0.8)
-  stream_delay_s    : seconds to sleep between yields (e.g. 0.15, for real-time sim)
-  models            : dict of model specs (name → {weights_path, loader, cost_class})
-  induced_drift     : optional; {type, start_frac, end_frac, scale, shift}
+
+  Two mutually exclusive data-source modes:
+
+  Mode A — single file with internal split (default):
+    data_path         : path to the CSV file (absolute or relative to tool/)
+    train_frac        : fraction of rows used for training (default 0.8)
+    val_frac          : optional held-out slice between train and stream (default 0.0)
+
+  Mode B — pre-split files (original HarmonE format):
+    train_path        : CSV containing the initial training portion only
+    stream_path       : CSV containing the streaming/evaluation portion only
+    (train_frac and val_frac are ignored in Mode B)
+
+  Shared keys:
+    value_column      : name of the target column (e.g. "flow")
+    seq_length        : number of timesteps per input window (e.g. 5)
+    stream_delay_s    : seconds to sleep between yields (default 0.0)
+    models            : dict of model specs (name → {weights_path, loader, cost_class})
+    induced_drift     : optional; {type, start_frac, end_frac, scale, shift}
 """
 
 from __future__ import annotations
@@ -35,17 +46,30 @@ class RegressionCSVAdapter(DatasetAdapter):
     def __init__(self, config: dict, config_dir: str = ".") -> None:
         self._config = config
         self._config_dir = config_dir
+        col = config["value_column"]
 
-        data_path = config["data_path"]
-        if not os.path.isabs(data_path):
-            data_path = os.path.join(config_dir, data_path)
-
-        df = pd.read_csv(data_path)
-        self._values = df[config["value_column"]].values.astype(float)
+        if "train_path" in config and "stream_path" in config:
+            # Mode B — pre-split files (original HarmonE format)
+            train_path = config["train_path"]
+            stream_path = config["stream_path"]
+            if not os.path.isabs(train_path):
+                train_path = os.path.join(config_dir, train_path)
+            if not os.path.isabs(stream_path):
+                stream_path = os.path.join(config_dir, stream_path)
+            _train = pd.read_csv(train_path)[col].values.astype(float)
+            _stream = pd.read_csv(stream_path)[col].values.astype(float)
+            self._values = np.concatenate([_train, _stream])
+            self._train_end = len(_train)
+        else:
+            # Mode A — single file with train_frac split
+            data_path = config["data_path"]
+            if not os.path.isabs(data_path):
+                data_path = os.path.join(config_dir, data_path)
+            self._values = pd.read_csv(data_path)[col].values.astype(float)
+            train_frac = float(config.get("train_frac", 0.8))
+            self._train_end = int(len(self._values) * train_frac)
 
         self._seq_length = int(config.get("seq_length", 5))
-        train_frac = float(config.get("train_frac", 0.8))
-        self._train_end = int(len(self._values) * train_frac)
         self._stream_delay = float(config.get("stream_delay_s", 0.0))
         self._induced_drift_cfg = config.get("induced_drift", None)
         self._model_specs = {

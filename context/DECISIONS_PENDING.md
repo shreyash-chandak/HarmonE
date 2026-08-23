@@ -93,7 +93,7 @@ Key decisions:
 - **CV domain**: bandit NOT wired in CV domain (DP11 still pending).
 - **Dashboard**: "LinUCB Bandit (S7)" added as sixth option; CV_UNIMPLEMENTED_PLANNERS.
 - **API**: `/api/set-planner` now accepts "bandit" (previously HTTP 400).
-- **Tests**: 30 new tests in `tests/test_bandit_planner.py`; total suite 323 pass.
+- **Tests**: 30 new tests in `tests/test_bandit_planner.py`; total suite 335 passed, 2 skipped.
 
 ---
 

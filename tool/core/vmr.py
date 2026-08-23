@@ -208,11 +208,12 @@ class VMR:
     @staticmethod
     def _kl_divergence(p: list[float], q: list[float], eps: float = 1e-9) -> float:
         """KL(p||q) with epsilon smoothing."""
+        import math
         total = 0.0
         for pi, qi in zip(p, q):
             pi = max(pi, eps)
             qi = max(qi, eps)
-            total += pi * (pi / qi)  # unnormalized; caller normalises p,q
+            total += pi * math.log(pi / qi)
         return total
 
     def _closest_histogram(

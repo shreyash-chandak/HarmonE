@@ -35,6 +35,7 @@ env/
 .env
 harmone_env/
 tool/harmone_env/
+tool/ubuntu_env/
 **/harmone_env/
 
 # ── OS artefacts ──────────────────────────────────────────────────────────────

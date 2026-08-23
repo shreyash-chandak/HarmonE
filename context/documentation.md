@@ -99,13 +99,29 @@ preset keys for both regression and CV variants.
 
 ### 11.6 Energy Metering — pyJoules Migration
 
-The original tool used pyRAPL. The v2 implementation uses pyJoules with three backends:
-- `_PyJoulesRaplBackend`: Intel RAPL (Linux only; requires `/sys/class/powercap/intel-rapl/` read access)
-- `_PyJoulesNvmlBackend`: NVIDIA GPU via NVML
-- `_PollingGPUBackend`: polling fallback for GPUs without NVML support
-- `_NullBackend`: silent fallback when no probes are available (always used on Windows and WSL)
+The original tool used pyRAPL. The v2 implementation uses a hardware-agnostic `EnergyMeter` context manager in `core/energy.py`. CPU and GPU are probed and managed independently — a failure in one does NOT affect the other.
 
-All nine call sites in the codebase use the unified `core/energy.EnergyMeter` context manager. Energy results include `cpu_valid` and `gpu_valid` flags indicating whether the readings are real (backend available) or zero (null backend).
+**CPU probe order (per process, cached after first call):**
+1. pyJoules `RaplDevice` (correct 0.5.1 API)
+2. Direct sysfs powercap read (`/sys/class/powercap/intel-rapl/`)
+3. `/proc/driver/amd_energy` (AMD kernel module)
+4. Null (unavailable)
+
+**GPU probe order (backend `"nvml"` only):**
+1. pyJoules `NvidiaGPUDevice` (cumulative mJ counter via NVML)
+2. pynvml direct (same NVML API without pyJoules wrapper)
+3. Null
+
+**Backends (set via `thresholds.json["energy_meter"]`):**
+- `"null"` — NullMeter; always returns `None`. Default on Windows/WSL.
+- `"rapl"` — CPU RAPL only; no GPU. Emits `RuntimeWarning` if CPU probe unavailable.
+- `"nvml"` — CPU RAPL + GPU NVML cumulative counter.
+- `"auto"` — tries RAPL for CPU; falls back to null with a `RuntimeWarning`.
+- `"polling"` — EXPERIMENTAL: CPU RAPL + GPU via 50 ms nvidia-smi polling (RTX 5060 Blackwell fallback).
+
+**Result dict keys** (from `meter.result`): `cpu_uJ`, `gpu_uJ`, `total_uJ`, `cpu_valid`, `gpu_valid`, `total_complete`, `valid`, `cpu_backend`, `gpu_backend`. (Old `backends` list key was removed in the energy.py rewrite.)
+
+**Units:** all attributes use microjoules (µJ). `cpu_uJ = None` means unavailable (not zero). `cpu_uJ = 0.0` is a valid zero measurement. All nine call sites use `EnergyMeter` as a context manager.
 
 For full details of all changes from the original paper design, see `CHANGES_FROM_PAPER.md`.
 
@@ -783,19 +799,17 @@ Recovery mode: if `energy` threshold is violated, sets `recovery_cycles = 3` in 
 
 **`analyse_drift() → dict | None`**
 
-Calls `monitor_drift()`. If `kl_div > 0.5`:
+Calls `monitor_drift()`. If `kl_div > tau_drift` (from `thresholds.json`):
 - Saves last 1200 rows of `predictions.csv` to `knowledge/drift.csv`.
 - Reads current model from `model.csv`.
-- Calls `get_best_version(model_name)` to find a previous version with lower KL divergence.
+- Calls `_vmr_best_match(model_name, drift_values)` → uses `core/vmr.py` `VMR.best_match()` with `strategy="closest_distribution"` to find the stored version whose training histogram is closest to the current drift histogram.
 
-**`get_best_version(model_name) → str | None`**
-
-Scans `versionedMR/<model_name>/version_N/data.csv`. For each version:
-- Loads the `train_data` column.
-- Computes KL divergence between the version's training distribution and `drift.csv`.
-- Returns the path with minimum KL, only if that minimum is below 0.75.
-
-**Returns:** `{"drift_detected": bool, "best_version": str | None}`
+**Returns (B2 fix):**
+```json
+{"drift_detected": false, "action": null, "version": null}
+{"drift_detected": true, "action": "replace", "version": "<weights_path>"}
+{"drift_detected": true, "action": "retrain", "version": null}
+```
 
 #### `mape_logic/plan.py`
 
@@ -1121,30 +1135,33 @@ kl = kl_divergence(cur_dist, ref_dist)
 
 ### 9.7 Versioned Model Repository (VMR)
 
-When a retrain completes, model weights and the training data distribution are archived:
+When a retrain completes, model weights and the training data distribution are archived.
 
-**Regression VMR layout:**
+**Regression VMR** — backed by `core/vmr.py` (`VMR` class), stored in `managed_system_regression/knowledge/vmr/`:
 ```
-versionedMR/
+knowledge/vmr/
 └── lstm/
-    ├── version_1/
-    │   ├── lstm.pth        # trained weights
-    │   └── data.csv        # column: train_data (original scale values)
-    └── version_2/
-        ├── lstm.pth
-        └── data.csv
+    └── <timestamp>_retrain/
+        ├── weights.pth         # trained weights
+        ├── distribution.json   # {"type": "histogram", "data": [50 floats]}
+        └── meta.json           # model, timestamp, tag, proxy_score, drift_score
 ```
+`train.py` seeds version_1 (`tag="initial"`) for all three models at setup time.
+`retrain.py` calls `VMR.store()` after each retrain (`tag="retrain"`).
+`analyse_drift()` calls `VMR.best_match(model, distribution, strategy="closest_distribution")` — picks the stored version whose training histogram is closest (by KL distance) to the current drift data histogram. No threshold gate: the closest version is always returned if one exists; `None` only if the VMR is empty.
 
-**CV VMR layout:**
+**CV VMR** — separate implementation in `managed_system_cv/mape_logic/analyse.py` and `managed_system_cv/retrain.py`, stored in `managed_system_cv/versionedMR/`:
 ```
 versionedMR/
 ├── yolo_s_v1.pt            # initial version of yolo_s weights
-├── yolo_s_v1_hist.json     # {"average_histogram": [...64 floats...]}
+├── yolo_s_v1_hist.json     # {"average_histogram": [...64 floats...]} (luminance config)
+├── yolo_s_v1_emb_sig.json  # {"type": "embedding", "mean": [...], "cov_diag": [...]}  (embedding config)
 ├── yolo_s_v2.pt            # retrained version
 └── yolo_s_v2_hist.json
 ```
+Version search dispatches on `drift_detector`: luminance config → KL distance between histograms; embedding config → Fréchet distance between Gaussian approximations. Cross-type mismatches raise `ValueError` (I6). `init_cv.py` seeds v1 for each model.
 
-When drift is detected, the VMR is searched for the version whose training distribution most closely matches the current drift distribution (minimum KL divergence). If a suitable version is found (KL below threshold), it is copied to `models/` without retraining. This **Versioned Model Replacement (VMR)** path is cheaper than retraining.
+When drift is detected, the VMR is searched for the version whose training distribution most closely matches the current drift signal. If a suitable version is found (distance below `tau_drift`), it is copied to `models/` without retraining. This **Versioned Model Replacement (VMR)** path is cheaper than retraining.
 
 ### 9.8 Two-Tier Boundary Evaluation
 

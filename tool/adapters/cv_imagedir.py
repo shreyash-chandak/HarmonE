@@ -124,11 +124,12 @@ def _load_manifest(
     with open(manifest_path, newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            rel_image = row.get("image_path", "")
-            img_abs = str(data_root / rel_image) if rel_image else ""
-            image_paths.append(img_abs)
+            # preprocess scripts write "input_path"; fall back to legacy "image_path"
+            img = row.get("input_path", row.get("image_path", ""))
+            # pathlib: absolute img overrides data_root, relative is joined
+            image_paths.append(str(Path(data_root) / img) if img else "")
 
-            rel_label = row.get("label_path", "")
-            label_paths.append(str(data_root / rel_label) if rel_label else None)
+            label = row.get("label_path", "")
+            label_paths.append(str(Path(data_root) / label) if label else None)
 
     return image_paths, label_paths

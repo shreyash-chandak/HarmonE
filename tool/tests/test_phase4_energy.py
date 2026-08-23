@@ -57,14 +57,14 @@ class TestNullMeter:
         with _null_meter() as m:
             pass
         r = m.result
-        required = {"cpu_uJ", "gpu_uJ", "total_uJ", "valid", "backends"}
+        required = {"cpu_uJ", "gpu_uJ", "total_uJ", "valid", "cpu_backend", "gpu_backend"}
         assert required.issubset(r.keys()), f"Missing keys: {required - r.keys()}"
         assert r["cpu_uJ"] is None
         assert r["gpu_uJ"] is None
         assert r["total_uJ"] is None
         assert r["valid"] is False
-        assert isinstance(r["backends"], list)
-        assert len(r["backends"]) == 0
+        assert isinstance(r["cpu_backend"], str)
+        assert isinstance(r["gpu_backend"], str)
 
     def test_null_backend_no_crash_on_double_enter(self):
         m = EnergyMeter("t", backend="null")
@@ -146,9 +146,9 @@ class TestFromThresholds:
 class TestRaplFallback:
     def test_rapl_unavailable_does_not_crash(self, monkeypatch):
         """Simulate unavailable RAPL; backend should degrade to null."""
-        # Force probe to re-run and report unavailable
-        monkeypatch.setattr(energy_mod, "_RAPL_PROBED", False)
-        monkeypatch.setattr(energy_mod, "_RAPL_AVAILABLE", False)
+        # Inject a cached probe result that reports unavailable
+        _unavailable = {"kind": "null", "available": False, "msg": "CPU energy backend: unavailable"}
+        monkeypatch.setattr(energy_mod, "_cpu_probe", _unavailable)
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
@@ -159,8 +159,8 @@ class TestRaplFallback:
         assert m.valid is False
 
     def test_auto_rapl_unavailable_falls_back_to_null(self, monkeypatch):
-        monkeypatch.setattr(energy_mod, "_RAPL_PROBED", False)
-        monkeypatch.setattr(energy_mod, "_RAPL_AVAILABLE", False)
+        _unavailable = {"kind": "null", "available": False, "msg": "CPU energy backend: unavailable"}
+        monkeypatch.setattr(energy_mod, "_cpu_probe", _unavailable)
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
@@ -170,8 +170,8 @@ class TestRaplFallback:
         assert m.total_uJ is None
 
     def test_rapl_unavailable_emits_warning(self, monkeypatch):
-        monkeypatch.setattr(energy_mod, "_RAPL_PROBED", False)
-        monkeypatch.setattr(energy_mod, "_RAPL_AVAILABLE", False)
+        _unavailable = {"kind": "null", "available": False, "msg": "CPU energy backend: unavailable"}
+        monkeypatch.setattr(energy_mod, "_cpu_probe", _unavailable)
 
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
@@ -203,7 +203,8 @@ class TestUnknownBackend:
         r = m.result
         assert "total_uJ" in r
         assert "valid" in r
-        assert "backends" in r
+        assert "cpu_backend" in r
+        assert "gpu_backend" in r
 
 
 # ── GPU field absent for CPU-only config ─────────────────────────────────────
@@ -213,11 +214,11 @@ class TestGpuFieldAbsent:
         with EnergyMeter("t", backend="null") as m:
             pass
         assert m.gpu_uJ is None
-        assert "nvml" not in m.result["backends"]
+        assert m.result["gpu_backend"] == "null"
 
     def test_rapl_backend_gpu_is_none(self, monkeypatch):
-        monkeypatch.setattr(energy_mod, "_RAPL_PROBED", False)
-        monkeypatch.setattr(energy_mod, "_RAPL_AVAILABLE", False)
+        _unavailable = {"kind": "null", "available": False, "msg": "CPU energy backend: unavailable"}
+        monkeypatch.setattr(energy_mod, "_cpu_probe", _unavailable)
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")

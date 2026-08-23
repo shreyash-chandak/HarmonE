@@ -273,10 +273,10 @@ with the `EnergyMeter` context manager backed by pyJoules.
 - `"auto"` (default): tries `_probe_rapl()`; falls back to `_NullBackend` with
   a warning. Does not probe GPU automatically (use `"nvml"` explicitly).
 
-**Backend probes** (`_probe_rapl`, `_probe_nvml`):
-- Called lazily on first EnergyMeter construction; results cached in module-level
-  `_RAPL_PROBED` / `_RAPL_AVAILABLE` and `_NVML_PROBED` / `_NVML_AVAILABLE`.
-- Results also written to `knowledge/.energy_backends.json` for run manifest.
+**Backend probes** (`_probe_cpu`, `_probe_gpu`):
+- CPU and GPU are probed independently; results cached in module-level
+  `_cpu_probe: dict | None` and `_gpu_probe: dict | None` (each has `kind`, `available`, `msg`).
+- A failure in the CPU probe does not prevent a GPU probe, and vice versa.
 - GPU polling fallback (`_PollingGPUBackend`): spawns a daemon thread that reads
   `nvidia-smi --query-gpu=power.draw` at 50 ms intervals; integrates to µJ on stop.
 
@@ -284,9 +284,9 @@ with the `EnergyMeter` context manager backed by pyJoules.
 contexts from double-counting RAPL package-level counters.
 
 **Result dict keys** (from `meter.result`):
-`cpu_uJ`, `gpu_uJ`, `total_uJ`, `cpu_valid`, `gpu_valid`, `valid`, `backends`.
+`cpu_uJ`, `gpu_uJ`, `total_uJ`, `cpu_valid`, `gpu_valid`, `total_complete`, `valid`, `cpu_backend`, `gpu_backend`.
 - `valid` is True iff at least one component produced a non-None reading.
-- `backends` is a list of active backend names (e.g. `["rapl", "nvml_polling"]`).
+- `cpu_backend` / `gpu_backend` are strings (e.g. `"pyjoules_rapl"`, `"null"`). The old `backends` list key is removed.
 
 **Call sites (all 9 usages across both domains):**
 - `managed_system_regression/inference.py` — inference loop
@@ -328,10 +328,31 @@ Key design decisions:
 - Scaler fitted on `adapter.train_split()` and persisted to run_dir/scaler.pkl.
 - Reference distribution for KL drift detection written to run_dir/reference_distribution.json
   at setup time (not shared across runs; each run gets an independent reference).
-- Retrain/replace decisions are logged as `retrain_skipped` events rather than
-  executing full retraining — the harness measures planners, not retrain tactics.
+- Retrain and VMR are fully wired (see fix note below); the harness measures both
+  planner decisions and the adaptation outcomes.
 - Artifacts per run: `predictions.csv`, `mape_events.csv`, `mape_info.json`,
   `thresholds.json`, `run_manifest.json`, `scaler.pkl`, `reference_distribution.json`.
+
+### Harness VMR/Retrain Bugs (fixed 2026-08-20)
+
+Three bugs in `run_experiment.py` made drift-triggered retrain and VMR restore non-functional:
+
+**H1 — `_analyse_drift` hardcoded `action="retrain"`**
+The function always returned `{"drift_detected": True, "action": "retrain"}`, making the `action="replace"` path in every planner unreachable. The comment read "In the harness there is no VMR." Additionally, `kl_div` was silently dropped from the return dict, causing `mape_events.csv` to always record `null` for the KL field.
+
+**H2 — execute path treated `replace` and `retrain` identically**
+Both routed to `_do_inline_retrain`. `decision.version_path` was never read. No VMR weights were ever loaded.
+
+**H3 — `vmr.store()` was never called**
+The VMR infrastructure (`core/vmr.py`) was present but never called from `run_experiment.py`. The VMR was always empty, so even if H1 and H2 were fixed, `vmr.best_match()` would always return None.
+
+**Fixes:**
+- `_analyse_drift` now builds the current histogram window and queries `vmr.best_match(strategy="closest_distribution")` on drift; returns `action="replace"` with weights path when found.
+- New `_do_vmr_restore()`: loads model from VMR path, updates predict closure and `model_store`; increments `vmr_events`.
+- New `_archive_in_vmr()`: saves retrained weights to `tool/knowledge/vmr/` via `vmr.store()` after every successful inline retrain.
+- `kl_div` is now included in all `drift_result` dicts.
+
+**Effect on manifests:** `event_counters.vmr_events` will now increment when drift fires and a suitable archived version exists. `event_counters.retrains` will continue incrementing on inline retrains. Runs on datasets shorter than the 1200-step drift warmup (pems node1/node2, all CV datasets) are unaffected — drift cannot fire before the window fills.
 
 **Contract changes relative to live managed system:**
 - `monitor_interval=50` (vs ~7 MAPE cycles in 1200-prediction live system) —
@@ -357,9 +378,7 @@ CSV and LaTeX output.
 
 ### Baseline Grid Config (`configs/experiments/baseline.yaml`)
 
-`pems_node1` × [naive, random_switch, greedy_switch, harmone_original, violation_aware, pareto]
-× seeds [1, 2]. `monitor_interval=50`, `cooldown_minutes=0`,
-`energy_meter="null"` override (Windows-safe).
+`pems_node2` (active; pems_node1 data not yet downloaded) × [naive (×3 models via --pin-model), random_switch, greedy_switch, harmone_original, violation_aware, pareto, bandit]. `monitor_interval=50`, `energy_meter="null"` override (Windows-safe). Run scripts (`run_regression.sh`, `run_cv.sh`) default to seed=1; `--seed N` override available.
 
 **Effect on paper numbers:** None — the harness is additive. The paper's numbers
 came from the live managed system; the harness produces independently comparable

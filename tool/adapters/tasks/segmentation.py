@@ -16,6 +16,9 @@ import numpy as np
 from .base import TaskAdapter, register_task
 
 
+from adapters.loaders import _SEGFORMER_ARCH  # hardcoded arch dicts, zero HF calls
+
+
 @register_task("segmentation")
 class SegmentationAdapter(TaskAdapter):
     """SegFormer/DeepLab-family semantic segmentation adapter.
@@ -41,19 +44,59 @@ class SegmentationAdapter(TaskAdapter):
         self._embedding_dim: int | None = config.get("embedding_dim")
 
     def load_model(self, model_name: str, weights_path: str) -> "_LoadedSegformer":
-        """Load SegFormer model + processor (processor built once, not per-frame)."""
+        """Load SegFormer model + processor (processor built once, not per-frame).
+
+        Accepts two forms of weights_path:
+          - A raw .pt/.pth state-dict file: loads the HuggingFace backbone by
+            inferring the variant (b0/b1/b2) from model_name, then applies the
+            state dict.  This matches the layout in configs/datasets/acdc.json.
+          - A HuggingFace model directory: passed directly to from_pretrained().
+        """
+        import torch
+        from pathlib import Path
         from transformers import SegformerForSemanticSegmentation, SegformerImageProcessor
 
-        processor = SegformerImageProcessor.from_pretrained(
-            weights_path if weights_path else self._hf_model,
-            local_files_only=bool(weights_path),
-        )
-        model = SegformerForSemanticSegmentation.from_pretrained(
-            weights_path if weights_path else self._hf_model,
-            local_files_only=bool(weights_path),
-            ignore_mismatched_sizes=True,
-            num_labels=self._num_classes,
-        )
+        wp = Path(weights_path) if weights_path else None
+        is_pt_file = wp is not None and wp.suffix.lower() in (".pt", ".pth") and wp.is_file()
+
+        if is_pt_file:
+            # Infer backbone variant from model_name (segformer_b0 / _b1 / _b2)
+            name_lower = model_name.lower()
+            if "b2" in name_lower:
+                hf_id = "nvidia/mit-b2"
+            elif "b1" in name_lower:
+                hf_id = "nvidia/mit-b1"
+            else:
+                hf_id = "nvidia/mit-b0"
+
+            # Build config and processor from hardcoded arch dicts — no HF network calls.
+            from transformers import SegformerConfig
+            cfg = SegformerConfig(**_SEGFORMER_ARCH[hf_id], num_labels=self._num_classes)
+            processor = SegformerImageProcessor(
+                do_resize=True,
+                size={"height": 512, "width": 512},
+                do_normalize=True,
+                image_mean=[0.485, 0.456, 0.406],
+                image_std=[0.229, 0.224, 0.225],
+                do_rescale=True,
+                rescale_factor=1.0 / 255,
+            )
+            model = SegformerForSemanticSegmentation(cfg)
+            state = torch.load(str(wp), map_location="cpu", weights_only=False)
+            model.load_state_dict(state, strict=False)
+        else:
+            # HuggingFace model directory (or empty → default)
+            hf_path = weights_path if weights_path else self._hf_model
+            processor = SegformerImageProcessor.from_pretrained(
+                hf_path, local_files_only=bool(weights_path),
+            )
+            model = SegformerForSemanticSegmentation.from_pretrained(
+                hf_path,
+                local_files_only=bool(weights_path),
+                ignore_mismatched_sizes=True,
+                num_labels=self._num_classes,
+            )
+
         model.eval()
 
         # Register hook on encoder last hidden state
@@ -112,23 +155,33 @@ class SegmentationAdapter(TaskAdapter):
     def offline_accuracy(self, result: Any, label_path: str) -> float:
         """mIoU vs a ground-truth mask PNG.
 
-        Logits are bilinearly upsampled to the mask's H×W before argmax.
+        result can be:
+          - (logits_tensor, orig_size)  — live inference output
+          - np.ndarray uint8 (H, W)     — saved prediction mask from predictions/
         ignore_index pixels are excluded from IoU computation.
         """
-        import torch
-        import torch.nn.functional as F
         from PIL import Image
 
-        logits, _ = result
         mask_img = Image.open(label_path)
         gt = np.array(mask_img, dtype=np.int64)
         h, w = gt.shape[:2]
 
-        # Upsample logits to mask resolution
-        logits_up = F.interpolate(
-            logits.float(), size=(h, w), mode="bilinear", align_corners=False
-        )
-        pred = logits_up.argmax(dim=1).squeeze(0).cpu().numpy().astype(np.int64)
+        if isinstance(result, np.ndarray):
+            # Saved prediction mask — resize to GT resolution with nearest-neighbour
+            pred_raw = result.astype(np.int64)
+            if pred_raw.shape != (h, w):
+                pred_img = Image.fromarray(result.astype(np.uint8), mode="L")
+                pred_img = pred_img.resize((w, h), resample=Image.NEAREST)
+                pred_raw = np.array(pred_img, dtype=np.int64)
+            pred = pred_raw
+        else:
+            import torch
+            import torch.nn.functional as F
+            logits, _ = result
+            logits_up = F.interpolate(
+                logits.float(), size=(h, w), mode="bilinear", align_corners=False
+            )
+            pred = logits_up.argmax(dim=1).squeeze(0).cpu().numpy().astype(np.int64)
 
         # Compute per-class IoU ignoring ignore_index
         iou_list = []

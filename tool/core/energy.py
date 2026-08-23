@@ -1,30 +1,41 @@
 """core/energy.py — Hardware-agnostic energy measurement abstraction.
 
-E3 fix: migrated from pyRAPL/pynvml to pyJoules (unified CPU RAPL + GPU NVML
-under one library) with a power-polling fallback for GPUs that lack cumulative
-energy counters (e.g. RTX 5060 Laptop).
+CPU and GPU are probed and managed independently.  A failure in one does NOT
+affect the other.  The key architectural invariant:
 
-Usage (context manager, preferred):
-    with EnergyMeter("label", backend="auto") as meter:
-        do_work()
-    uJ = meter.total_uJ   # float or None; None if backend unavailable
+    cpu_uJ = None  →  CPU measurement unavailable (backend failed / no perms)
+    cpu_uJ = 0.0   →  valid measurement; hardware counter did not advance
+    cpu_uJ > 0.0   →  valid measurement with non-zero energy
 
-Construct from thresholds dict:
-    meter = EnergyMeter.from_thresholds("label", thresholds)
+Same invariant applies to gpu_uJ.  Never silently treat an unavailable backend
+as "zero energy".
 
-Backends (set via thresholds.json["energy_meter"]):
-    "null"  — NullMeter; always returns None. Default on dev/Windows.
-    "rapl"  — CPU RAPL via pyJoules (Linux, requires powercap permissions).
-    "nvml"  — GPU via pyJoules NVML + CPU RAPL (Linux+CUDA).
-    "auto"  — tries RAPL first; falls back to null with a logged warning.
+Backend configuration (set via thresholds.json["energy_meter"]):
+    "null"     — NullMeter; always returns None.
+    "rapl"     — CPU via Intel RAPL (pyJoules or sysfs fallback); no GPU.
+    "nvml"     — CPU via RAPL + GPU via NVML cumulative-energy counter.
+    "auto"     — tries RAPL for CPU; no GPU; falls back to null with a warning.
+    "polling"  — EXPERIMENTAL: CPU via RAPL + GPU via 50 ms nvidia-smi polling.
+                 Only use when NVML cumulative counter is unavailable.
 
-Canonical unit: microjoules (µJ) internally and in all public attributes.
-Nesting: forbidden. A second EnergyMeter constructed while one is active raises
-         RuntimeError (RAPL package counters are shared; nesting double-counts).
+CPU probe order:
+    1. pyJoules RaplDevice (correct 0.5.1 API: Device, not Domain, passed to EnergyMeter)
+    2. Direct sysfs powercap read (no pyJoules required)
+    3. /proc/driver/amd_energy (AMD kernel module)
+    4. Null (CPU measurement unavailable)
 
-E1 / AMD note: The Ryzen AI 7 350 exposes an Intel-compatible RAPL interface.
-    pyJoules reads from /sys/class/powercap/intel-rapl/. Probe at first use;
-    if readings are zero, falls back to null and logs a warning.
+GPU probe order (backend "nvml" only):
+    1. pyJoules NvidiaGPUDevice (nvidia_device module, cumulative mJ counter)
+    2. pynvml direct (same NVML API, no pyJoules wrapper)
+    3. Null (GPU measurement unavailable)
+
+Units: all public attributes use microjoules (µJ).
+    pyJoules RAPL:  reads energy_uj sysfs → already µJ.
+    pyJoules GPU:   nvmlDeviceGetTotalEnergyConsumption returns mJ → ×1000 → µJ.
+    pynvml direct:  same NVML function → mJ → ×1000 → µJ.
+
+Nesting: forbidden.  A second EnergyMeter constructed while one is active
+raises RuntimeError (RAPL package counters are shared).
 """
 
 from __future__ import annotations
@@ -37,86 +48,260 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# ── Module-level state ────────────────────────────────────────────────────────
+# ── Module-level probe cache (each probed once per process) ───────────────────
 
-_RAPL_PROBED: bool = False
-_RAPL_AVAILABLE: bool = False
-_NVML_PROBED: bool = False
-_NVML_AVAILABLE: bool = False  # True = pyJoules NvidiaGPUDomain works + non-zero
-_ACTIVE: bool = False           # re-entrancy guard
+_cpu_probe: dict | None = None   # set by _probe_cpu(); {kind, available, msg}
+_gpu_probe: dict | None = None   # set by _probe_gpu(); {kind, available, msg}
+_ACTIVE: bool = False            # re-entrancy guard
+
+# ── sysfs helpers ─────────────────────────────────────────────────────────────
+
+_RAPL_SYSFS_CANDIDATES = [
+    "/sys/class/powercap/intel-rapl/intel-rapl:0/energy_uj",
+    "/sys/class/powercap/intel-rapl:0/energy_uj",
+    "/sys/class/powercap/intel-rapl/intel-rapl:1/energy_uj",
+    "/sys/class/powercap/intel-rapl:1/energy_uj",
+]
 
 
-def _probe_rapl() -> bool:
-    """Return True if pyJoules RAPL backend produces non-zero readings."""
-    global _RAPL_PROBED, _RAPL_AVAILABLE
-    if _RAPL_PROBED:
-        return _RAPL_AVAILABLE
-    _RAPL_PROBED = True
+def _read_rapl_sysfs_uj() -> float | None:
+    import math
+    from pathlib import Path as _P
+    for p in _RAPL_SYSFS_CANDIDATES:
+        try:
+            val = float(_P(p).read_text().strip())
+            if not math.isnan(val):
+                return val
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def _rapl_sysfs_path() -> str | None:
+    from pathlib import Path as _P
+    for p in _RAPL_SYSFS_CANDIDATES:
+        if _P(p).exists():
+            try:
+                _P(p).read_text()
+                return p
+            except OSError:
+                continue
+    return None
+
+
+# ── CPU probe ─────────────────────────────────────────────────────────────────
+
+def _probe_cpu() -> dict:
+    """Probe CPU RAPL backends once; cache result.
+
+    Returns {kind: str, available: bool, msg: str}.
+    """
+    global _cpu_probe
+    if _cpu_probe is not None:
+        return _cpu_probe
+
+    import math
+    from pathlib import Path as _P
+
+    def _workload():
+        acc = 0.0
+        for i in range(100_000):
+            acc += math.sqrt(float(i) + 1.0)
+
+    # ── Path 1: pyJoules RaplDevice (correct 0.5.1 API) ──────────────────────
+    # The API takes Device objects, not Domain objects.
+    # EnergyMeter(devices=[RaplDevice()]) — NOT EnergyMeter([RaplPackageDomain(0)])
     try:
+        from pyJoules.device.rapl_device import RaplDevice, RaplPackageDomain
         from pyJoules.energy_meter import EnergyMeter as _PyEM
-        from pyJoules.device.rapl_device import RaplPackageDomain
-        meter = _PyEM([RaplPackageDomain(0)])
-        meter.start(tag="probe")
-        # Small CPU workload to ensure non-zero energy
-        import math
-        for _ in range(50_000):
-            math.sqrt(2.0)
-        meter.stop()
-        trace = meter.get_trace()
-        for sample in trace:
-            if sample.energy and any(v > 0 for v in sample.energy.values()):
-                _RAPL_AVAILABLE = True
-                logger.info("pyJoules RAPL probe: non-zero reading — RAPL available.")
-                return True
-        logger.warning(
-            "pyJoules RAPL probe: all readings are zero. "
-            "RAPL may not be accessible (run scripts/setup_energy_permissions.sh). "
-            "CPU energy will be reported as None."
-        )
+        domains = RaplDevice.available_package_domains()
+        if domains:
+            device = RaplDevice()
+            device.configure(domains=domains)
+            meter = _PyEM(devices=[device])
+            meter.start(tag="probe")
+            _workload()
+            meter.stop()
+            trace = meter.get_trace()
+            for sample in trace:
+                if sample.energy and any(v > 0 for v in sample.energy.values()):
+                    _cpu_probe = {"kind": "pyjoules_rapl", "available": True,
+                                  "msg": "CPU energy backend: pyJoules RAPL"}
+                    logger.info("CPU energy backend: pyJoules RAPL (RaplDevice)")
+                    return _cpu_probe
+            # Domains exist but all readings were zero → sysfs is readable but
+            # workload window too short; still consider pyJoules available.
+            _cpu_probe = {"kind": "pyjoules_rapl", "available": True,
+                          "msg": "CPU energy backend: pyJoules RAPL (zero probe — counter may need time)"}
+            logger.info("CPU energy backend: pyJoules RAPL (probe read zero; counter resolution low)")
+            return _cpu_probe
+    except PermissionError:
+        logger.debug("CPU probe path 1 (pyJoules RAPL): permission denied on energy_uj — trying sysfs fallback")
     except Exception as exc:
-        logger.warning(f"pyJoules RAPL probe failed: {exc}. CPU energy unavailable.")
-    _RAPL_AVAILABLE = False
-    return False
+        logger.debug("CPU probe path 1 (pyJoules RAPL): %s — trying sysfs fallback", exc)
 
-
-def _probe_nvml() -> bool:
-    """Return True if pyJoules NvidiaGPUDomain produces non-zero readings."""
-    global _NVML_PROBED, _NVML_AVAILABLE
-    if _NVML_PROBED:
-        return _NVML_AVAILABLE
-    _NVML_PROBED = True
+    # ── Path 2: direct sysfs powercap ────────────────────────────────────────
     try:
+        before = _read_rapl_sysfs_uj()
+        if before is not None:
+            _workload()
+            after = _read_rapl_sysfs_uj()
+            if after is not None:
+                delta = after - before
+                if delta < 0:
+                    sysfs_p = _rapl_sysfs_path()
+                    if sysfs_p:
+                        max_p = _P(sysfs_p).parent / "max_energy_range_uj"
+                        if max_p.exists():
+                            delta += float(max_p.read_text().strip())
+                _cpu_probe = {"kind": "sysfs_direct", "available": True,
+                              "msg": "CPU energy backend: sysfs RAPL fallback"}
+                logger.info("CPU energy backend: sysfs RAPL fallback (pyJoules unavailable or denied)")
+                return _cpu_probe
+    except Exception as exc:
+        logger.debug("CPU probe path 2 (sysfs direct): %s", exc)
+
+    # ── Path 3: /proc/driver/amd_energy ──────────────────────────────────────
+    try:
+        proc_path = _P("/proc/driver/amd_energy")
+        if proc_path.exists():
+            def _read_amd() -> float | None:
+                lines = proc_path.read_text().splitlines()
+                total = 0.0
+                found = False
+                for line in lines:
+                    if "socket" in line.lower() or "package" in line.lower():
+                        for part in line.split():
+                            try:
+                                total += float(part)
+                                found = True
+                                break
+                            except ValueError:
+                                continue
+                return total if found else None
+            before = _read_amd()
+            if before is not None:
+                _workload()
+                after = _read_amd()
+                if after is not None and (after - before) > 0:
+                    _cpu_probe = {"kind": "amd_proc", "available": True,
+                                  "msg": "CPU energy backend: AMD /proc energy"}
+                    logger.info("CPU energy backend: /proc/driver/amd_energy (AMD kernel module)")
+                    return _cpu_probe
+    except Exception as exc:
+        logger.debug("CPU probe path 3 (/proc/driver/amd_energy): %s", exc)
+
+    logger.warning(
+        "CPU energy measurement unavailable. "
+        "Run: sudo bash scripts/setup_energy_permissions.sh  (once per boot)"
+    )
+    _cpu_probe = {"kind": "null", "available": False, "msg": "CPU energy backend: unavailable"}
+    return _cpu_probe
+
+
+# ── GPU probe ─────────────────────────────────────────────────────────────────
+
+def _probe_gpu() -> dict:
+    """Probe GPU NVML backends once; cache result.
+
+    Returns {kind: str, available: bool, msg: str, gpu_name: str | None}.
+    """
+    global _gpu_probe
+    if _gpu_probe is not None:
+        return _gpu_probe
+
+    # ── Path 1: pyJoules NvidiaGPUDevice ─────────────────────────────────────
+    # Module is nvidia_device, NOT nvidia_gpu.
+    # pyJoules GPU values are in mJ (from nvmlDeviceGetTotalEnergyConsumption).
+    try:
+        import warnings as _w
+        with _w.catch_warnings():
+            _w.simplefilter("ignore", FutureWarning)  # suppress pynvml deprecation noise
+            from pyJoules.device.nvidia_device import NvidiaGPUDevice, NvidiaGPUDomain
+        import pynvml as _nvml
+        _nvml.nvmlInit()
+        n_gpus = _nvml.nvmlDeviceGetCount()
+        if n_gpus == 0:
+            raise RuntimeError("No NVIDIA GPUs detected by NVML")
+        handle = _nvml.nvmlDeviceGetHandleByIndex(0)
+        gpu_name = _nvml.nvmlDeviceGetName(handle)
+        # Verify cumulative energy counter works
+        e_before = _nvml.nvmlDeviceGetTotalEnergyConsumption(handle)
+        time.sleep(0.1)
+        e_after = _nvml.nvmlDeviceGetTotalEnergyConsumption(handle)
+        if e_after < e_before:
+            raise RuntimeError("NVML energy counter went backwards (driver reset?)")
+        # Now verify pyJoules wrapper produces the same reading
+        domains = NvidiaGPUDevice.available_domains()
+        device = NvidiaGPUDevice()
+        device.configure(domains=domains)
         from pyJoules.energy_meter import EnergyMeter as _PyEM
-        from pyJoules.device.nvidia_gpu import NvidiaGPUDomain
-        meter = _PyEM([NvidiaGPUDomain(0)])
+        meter = _PyEM(devices=[device])
         meter.start(tag="probe")
         time.sleep(0.1)
         meter.stop()
         trace = meter.get_trace()
-        for sample in trace:
-            if sample.energy and any(v > 0 for v in sample.energy.values()):
-                _NVML_AVAILABLE = True
-                logger.info("pyJoules NVML probe: non-zero reading — NVML available.")
-                return True
-        logger.warning(
-            "pyJoules NVML probe: readings are zero. "
-            "Falling back to 50ms power.draw polling (nvidia-smi)."
+        pyj_ok = any(
+            v >= 0 for s in trace for v in s.energy.values()
         )
+        if pyj_ok:
+            _gpu_probe = {
+                "kind": "pyjoules_nvml", "available": True,
+                "gpu_name": gpu_name,
+                "msg": f"GPU energy backend: pyJoules NVML ({gpu_name})",
+            }
+            logger.info("GPU energy backend: pyJoules NVML  GPU=%s", gpu_name)
+            return _gpu_probe
+    except ImportError as exc:
+        logger.debug("GPU probe path 1 (pyJoules nvidia_device): import failed: %s — trying pynvml direct", exc)
     except Exception as exc:
-        logger.warning(f"pyJoules NVML probe failed: {exc}. Falling back to polling.")
-    _NVML_AVAILABLE = False
-    return False
+        logger.debug("GPU probe path 1 (pyJoules nvidia_device): %s — trying pynvml direct", exc)
+
+    # ── Path 2: pynvml direct (no pyJoules wrapper) ───────────────────────────
+    try:
+        import pynvml as _nvml
+        _nvml.nvmlInit()
+        n_gpus = _nvml.nvmlDeviceGetCount()
+        if n_gpus == 0:
+            raise RuntimeError("No NVIDIA GPUs detected by NVML")
+        handle = _nvml.nvmlDeviceGetHandleByIndex(0)
+        gpu_name = _nvml.nvmlDeviceGetName(handle)
+        e_before = _nvml.nvmlDeviceGetTotalEnergyConsumption(handle)
+        time.sleep(0.1)
+        e_after = _nvml.nvmlDeviceGetTotalEnergyConsumption(handle)
+        if e_after < e_before:
+            raise RuntimeError("NVML energy counter went backwards")
+        _gpu_probe = {
+            "kind": "pynvml_direct", "available": True,
+            "gpu_name": gpu_name,
+            "msg": f"GPU energy backend: pynvml direct ({gpu_name})",
+        }
+        logger.info("GPU energy backend: pynvml direct  GPU=%s  (pyJoules nvidia_device unavailable)", gpu_name)
+        return _gpu_probe
+    except ImportError:
+        logger.debug("GPU probe path 2 (pynvml direct): pynvml not installed")
+    except Exception as exc:
+        logger.debug("GPU probe path 2 (pynvml direct): %s", exc)
+
+    logger.warning(
+        "GPU energy measurement unavailable. "
+        "Check: pip install pyJoules[nvidia]  and that the NVIDIA driver/NVML is accessible."
+    )
+    _gpu_probe = {"kind": "null", "available": False, "gpu_name": None,
+                  "msg": "GPU energy backend: unavailable"}
+    return _gpu_probe
 
 
 def get_backend_status() -> dict[str, Any]:
-    """Probe both backends (lazy) and return their status for logging."""
-    rapl_ok = _probe_rapl()
-    nvml_ok = _probe_nvml()
+    """Probe both backends lazily and return status dict for logging."""
+    cpu = _probe_cpu()
+    gpu = _probe_gpu()
     return {
-        "rapl_available": rapl_ok,
-        "nvml_available": nvml_ok,
-        "cpu_backend": "rapl" if rapl_ok else "none",
-        "gpu_backend": "nvml" if nvml_ok else "power_polling",
+        "cpu_available": cpu["available"],
+        "cpu_kind": cpu["kind"],
+        "gpu_available": gpu["available"],
+        "gpu_kind": gpu["kind"],
+        "gpu_name": gpu.get("gpu_name"),
     }
 
 
@@ -133,22 +318,23 @@ class _NullBackend:
 
 
 class _PyJoulesRaplBackend:
-    """CPU energy via pyJoules RaplPackageDomain.
-
-    Creates a fresh EnergyMeter per measurement to avoid trace accumulation.
-    Raises ImportError / RuntimeError on construction if unavailable.
-    """
-
-    name = "rapl"
+    """CPU energy via pyJoules RaplDevice (correct 0.5.1 API)."""
+    name = "pyjoules_rapl"
 
     def __init__(self) -> None:
-        from pyJoules.device.rapl_device import RaplPackageDomain  # import-test
-        self._RaplPackageDomain = RaplPackageDomain
+        import warnings as _w
+        from pyJoules.device.rapl_device import RaplDevice
+        from pyJoules.energy_meter import EnergyMeter as _PyEM
+        domains = RaplDevice.available_package_domains()
+        if not domains:
+            raise RuntimeError("No RAPL package domains available")
+        self._device = RaplDevice()
+        self._device.configure(domains=domains)
+        self._PyEM = _PyEM
         self._meter: Any = None
 
     def start(self) -> None:
-        from pyJoules.energy_meter import EnergyMeter as _PyEM
-        self._meter = _PyEM([self._RaplPackageDomain(0)])
+        self._meter = self._PyEM(devices=[self._device])
         self._meter.start(tag="measure")
 
     def stop(self) -> float | None:
@@ -159,30 +345,118 @@ class _PyJoulesRaplBackend:
             for sample in self._meter.get_trace():
                 if sample.energy:
                     total = sum(sample.energy.values())
-                    if total > 0:
-                        return float(total)  # µJ (pyJoules RAPL reports µJ natively)
+                    # RAPL values are µJ; total may be 0 (valid, counter resolution)
+                    return float(total) if total >= 0 else None
         except Exception as exc:
-            logger.debug(f"RAPL stop error: {exc}")
+            logger.debug("pyJoules RAPL stop error: %s", exc)
         return None
+
+
+class _SysfsRaplBackend:
+    """CPU energy via direct sysfs powercap read — no pyJoules required."""
+    name = "sysfs_direct"
+
+    def __init__(self) -> None:
+        from pathlib import Path as _P
+        self._path: str | None = _rapl_sysfs_path()
+        if self._path is None:
+            raise RuntimeError("No readable sysfs powercap energy_uj path found.")
+        self._max_path: str | None = None
+        max_p = _P(self._path).parent / "max_energy_range_uj"
+        if max_p.exists():
+            self._max_path = str(max_p)
+        self._before: float | None = None
+
+    def start(self) -> None:
+        try:
+            self._before = _read_rapl_sysfs_uj()
+        except Exception:
+            self._before = None
+
+    def stop(self) -> float | None:
+        try:
+            after = _read_rapl_sysfs_uj()
+            if after is None or self._before is None:
+                return None
+            delta = after - self._before
+            if delta < 0 and self._max_path:
+                from pathlib import Path as _P
+                delta += float(_P(self._max_path).read_text().strip())
+            return float(delta) if delta >= 0 else None
+        except Exception as exc:
+            logger.debug("SysfsRaplBackend stop error: %s", exc)
+            return None
+
+
+class _AmdProcRaplBackend:
+    """CPU energy via /proc/driver/amd_energy (AMD kernel module, kernel ≥5.8)."""
+    name = "amd_proc"
+    _PROC_PATH = "/proc/driver/amd_energy"
+
+    def __init__(self) -> None:
+        from pathlib import Path as _P
+        self._path = _P(self._PROC_PATH)
+        if not self._path.exists():
+            raise RuntimeError(f"{self._PROC_PATH} not found — amd_energy module not loaded.")
+        self._before: float | None = None
+
+    def _read(self) -> float | None:
+        lines = self._path.read_text().splitlines()
+        total = 0.0
+        found = False
+        for line in lines:
+            if "socket" in line.lower() or "package" in line.lower():
+                for part in line.split():
+                    try:
+                        total += float(part)
+                        found = True
+                        break
+                    except ValueError:
+                        continue
+        return total if found else None
+
+    def start(self) -> None:
+        try:
+            self._before = self._read()
+        except Exception:
+            self._before = None
+
+    def stop(self) -> float | None:
+        try:
+            after = self._read()
+            if after is None or self._before is None:
+                return None
+            delta = after - self._before
+            return float(delta) if delta >= 0 else None
+        except Exception as exc:
+            logger.debug("AmdProcRaplBackend stop error: %s", exc)
+            return None
 
 
 class _PyJoulesNvmlBackend:
-    """GPU energy via pyJoules NvidiaGPUDomain.
+    """GPU energy via pyJoules NvidiaGPUDevice.
 
-    nvmlDeviceGetTotalEnergyConsumption returns mJ; pyJoules normalises to µJ.
-    Raises ImportError / RuntimeError on construction if unavailable.
+    nvmlDeviceGetTotalEnergyConsumption returns mJ; converted here to µJ (×1000).
+    A negative delta (driver counter reset) is treated as an invalid measurement.
     """
-
-    name = "nvml"
+    name = "pyjoules_nvml"
 
     def __init__(self) -> None:
-        from pyJoules.device.nvidia_gpu import NvidiaGPUDomain  # import-test
-        self._NvidiaGPUDomain = NvidiaGPUDomain
+        import warnings as _w
+        with _w.catch_warnings():
+            _w.simplefilter("ignore", FutureWarning)
+            from pyJoules.device.nvidia_device import NvidiaGPUDevice
+        from pyJoules.energy_meter import EnergyMeter as _PyEM
+        domains = NvidiaGPUDevice.available_domains()
+        if not domains:
+            raise RuntimeError("No NVIDIA GPU domains available")
+        self._device = NvidiaGPUDevice()
+        self._device.configure(domains=domains)
+        self._PyEM = _PyEM
         self._meter: Any = None
 
     def start(self) -> None:
-        from pyJoules.energy_meter import EnergyMeter as _PyEM
-        self._meter = _PyEM([self._NvidiaGPUDomain(0)])
+        self._meter = self._PyEM(devices=[self._device])
         self._meter.start(tag="measure")
 
     def stop(self) -> float | None:
@@ -192,27 +466,64 @@ class _PyJoulesNvmlBackend:
         try:
             for sample in self._meter.get_trace():
                 if sample.energy:
-                    total = sum(sample.energy.values())
-                    if total > 0:
-                        return float(total)  # µJ
+                    total_mJ = sum(sample.energy.values())
+                    if total_mJ < 0:
+                        # Counter reset or driver anomaly — treat as invalid
+                        logger.debug("pyJoules NVML: negative energy delta (%.0f mJ) — skipping", total_mJ)
+                        return None
+                    return float(total_mJ) * 1000.0  # mJ → µJ
         except Exception as exc:
-            logger.debug(f"NVML stop error: {exc}")
+            logger.debug("pyJoules NVML stop error: %s", exc)
         return None
 
 
-class _PollingGPUBackend:
-    """Fallback GPU energy via nvidia-smi power.draw integration at 50ms.
+class _DirectNvmlBackend:
+    """GPU energy via pynvml directly (no pyJoules wrapper).
 
-    Used when pyJoules NVML returns zero (e.g. RTX 5060 Laptop with
-    cumulative-energy counter not exposed through current driver).
-
-    Accuracy: ±(poll_interval/2 × mean_power) per measurement window,
-    converging to < 2% relative error over a full run.
+    Used when pyJoules nvidia_device is unavailable but pynvml is installed.
+    Same unit semantics: nvmlDeviceGetTotalEnergyConsumption → mJ → µJ.
     """
+    name = "pynvml_direct"
 
+    def __init__(self, gpu_index: int = 0) -> None:
+        import pynvml as _nvml
+        _nvml.nvmlInit()
+        self._handle = _nvml.nvmlDeviceGetHandleByIndex(gpu_index)
+        self._nvml = _nvml
+        self._before_mJ: int | None = None
+
+    def start(self) -> None:
+        try:
+            self._before_mJ = self._nvml.nvmlDeviceGetTotalEnergyConsumption(self._handle)
+        except Exception:
+            self._before_mJ = None
+
+    def stop(self) -> float | None:
+        try:
+            after_mJ = self._nvml.nvmlDeviceGetTotalEnergyConsumption(self._handle)
+            if self._before_mJ is None:
+                return None
+            delta_mJ = after_mJ - self._before_mJ
+            if delta_mJ < 0:
+                logger.debug("pynvml direct: negative energy delta (%.0f mJ) — skipping", delta_mJ)
+                return None
+            return float(delta_mJ) * 1000.0  # mJ → µJ
+        except Exception as exc:
+            logger.debug("pynvml direct stop error: %s", exc)
+            return None
+
+
+class _PollingGPUBackend:
+    """EXPERIMENTAL GPU fallback: 50 ms nvidia-smi power.draw integration.
+
+    Only used when backend="polling" is explicitly configured.
+    NOT an implicit fallback for "nvml" — configure explicitly if needed.
+
+    Accuracy is limited by poll interval and window duration.
+    A short inference window may produce 0 samples and return None.
+    """
     name = "nvml_polling"
     _POLL_INTERVAL_S: float = 0.05
-    _SAMPLE_COUNT: int = 0  # tracks samples for validity
 
     def __init__(self, gpu_index: int = 0) -> None:
         self.gpu_index = gpu_index
@@ -220,11 +531,9 @@ class _PollingGPUBackend:
         self._running: bool = False
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
-        self._sample_count: int = 0
 
     def start(self) -> None:
         self._readings_w = []
-        self._sample_count = 0
         self._running = True
         self._thread = threading.Thread(target=self._poll, daemon=True)
         self._thread.start()
@@ -235,16 +544,25 @@ class _PollingGPUBackend:
             "nvidia-smi", f"--id={self.gpu_index}",
             "--query-gpu=power.draw", "--format=csv,noheader,nounits",
         ]
+        _logged = False
         while self._running:
             try:
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=0.5)
                 val = result.stdout.strip()
-                if val and val.lower() not in ("[n/a]", ""):
-                    watts = float(val)
+                if val and val.lower() not in ("[n/a]", "n/a", ""):
                     with self._lock:
-                        self._readings_w.append(watts)
-            except Exception:
-                pass
+                        self._readings_w.append(float(val))
+                elif not _logged and val.lower() in ("[n/a]", "n/a"):
+                    logger.debug("PollingGPUBackend: nvidia-smi power.draw returned N/A")
+                    _logged = True
+            except FileNotFoundError:
+                if not _logged:
+                    logger.debug("PollingGPUBackend: nvidia-smi not found")
+                    _logged = True
+            except Exception as exc:
+                if not _logged:
+                    logger.debug("PollingGPUBackend: nvidia-smi error: %s", exc)
+                    _logged = True
             time.sleep(self._POLL_INTERVAL_S)
 
     def stop(self) -> float | None:
@@ -253,13 +571,47 @@ class _PollingGPUBackend:
             self._thread.join(timeout=2.0)
         with self._lock:
             n = len(self._readings_w)
-            self._sample_count = n
             if n == 0:
-                logger.debug("PollingGPUBackend: 0 samples — window too short for energy estimate.")
+                logger.debug("PollingGPUBackend: 0 samples — window too short for energy estimate")
                 return None
-            # E = sum(P_i) × Δt, in joules → convert to µJ
             energy_J = sum(self._readings_w) * self._POLL_INTERVAL_S
-            return float(energy_J * 1e6)
+            return float(energy_J * 1e6)  # J → µJ
+
+
+# ── Backend factory helpers ────────────────────────────────────────────────────
+
+def _make_cpu_backend() -> Any:
+    """Create the best available CPU backend based on probe result."""
+    probe = _probe_cpu()
+    kind = probe["kind"]
+    if not probe["available"]:
+        return _NullBackend()
+    try:
+        if kind == "pyjoules_rapl":
+            return _PyJoulesRaplBackend()
+        if kind == "sysfs_direct":
+            return _SysfsRaplBackend()
+        if kind == "amd_proc":
+            return _AmdProcRaplBackend()
+    except Exception as exc:
+        logger.debug("Could not construct %s backend: %s — using null", kind, exc)
+    return _NullBackend()
+
+
+def _make_gpu_backend() -> Any:
+    """Create the best available GPU backend based on probe result."""
+    probe = _probe_gpu()
+    kind = probe["kind"]
+    if not probe["available"]:
+        return _NullBackend()
+    try:
+        if kind == "pyjoules_nvml":
+            return _PyJoulesNvmlBackend()
+        if kind == "pynvml_direct":
+            return _DirectNvmlBackend()
+    except Exception as exc:
+        logger.debug("Could not construct %s backend: %s — using null", kind, exc)
+    return _NullBackend()
 
 
 # ── EnergyMeter ───────────────────────────────────────────────────────────────
@@ -268,82 +620,87 @@ class EnergyMeter:
     """Context manager for CPU (RAPL) and/or GPU (NVML) energy measurement.
 
     Args:
-        label:    Measurement label (used for logging).
-        backend:  "null" | "rapl" | "nvml" | "auto" (default).
+        label:    Measurement label (used for logging/provenance).
+        backend:  "null" | "rapl" | "nvml" | "auto" | "polling" (see module docstring).
 
     Attributes after __exit__:
-        cpu_uJ    — CPU energy in µJ, or None if unavailable.
-        gpu_uJ    — GPU energy in µJ, or None if unavailable.
-        total_uJ  — sum of available components, or None if none available.
-        valid     — True if at least one backend produced a reading.
-        result    — full dict with all above plus metadata.
+        cpu_uJ    — CPU energy in µJ; None if CPU measurement unavailable.
+        gpu_uJ    — GPU energy in µJ; None if GPU measurement unavailable or not requested.
+        total_uJ  — sum of available components; None if nothing measured.
+        cpu_valid — True if CPU backend ran and produced a reading (even if 0).
+        gpu_valid — True if GPU backend ran and produced a reading (even if 0).
+        total_complete — True if every requested component produced a valid reading.
+        valid     — True if total_uJ is not None (at least one component measured).
+
+    Unit invariant:
+        None  ≠  0.0
+        None  → measurement unavailable (backend missing, permissions denied, etc.)
+        0.0   → valid measurement; hardware counter did not advance in this interval
     """
 
     def __init__(self, label: str, backend: str = "auto") -> None:
         self._label = label
         self._backend_key = backend
-        self._cpu_backend: _NullBackend | _PyJoulesRaplBackend | None = None
-        self._gpu_backend: _PyJoulesNvmlBackend | _PollingGPUBackend | None = None
+        self._cpu_backend: Any = _NullBackend()
+        self._gpu_backend: Any = _NullBackend()
+        self._cpu_requested: bool = False
+        self._gpu_requested: bool = False
         self._cpu_uJ: float | None = None
         self._gpu_uJ: float | None = None
         self._setup(backend)
 
     def _setup(self, backend: str) -> None:
         if backend == "null":
-            self._cpu_backend = _NullBackend()
+            pass  # both remain NullBackend
 
         elif backend == "rapl":
-            try:
-                _probe_rapl()
-                if _RAPL_AVAILABLE:
-                    self._cpu_backend = _PyJoulesRaplBackend()
-                else:
-                    warnings.warn(
-                        f"EnergyMeter '{self._label}': RAPL probe returned zero — using null. "
-                        "Run scripts/setup_energy_permissions.sh and check AMD RAPL support.",
-                        RuntimeWarning, stacklevel=3,
-                    )
-                    self._cpu_backend = _NullBackend()
-            except Exception as exc:
+            self._cpu_requested = True
+            _probe_cpu()
+            self._cpu_backend = _make_cpu_backend()
+            if _cpu_probe and not _cpu_probe["available"]:
                 warnings.warn(
-                    f"EnergyMeter '{self._label}': RAPL unavailable ({exc}) — using null.",
+                    f"EnergyMeter '{self._label}': RAPL unavailable — energy not measured. "
+                    "Run scripts/setup_energy_permissions.sh first.",
                     RuntimeWarning, stacklevel=3,
                 )
-                self._cpu_backend = _NullBackend()
 
         elif backend == "nvml":
-            # CPU RAPL
-            _probe_rapl()
-            self._cpu_backend = _PyJoulesRaplBackend() if _RAPL_AVAILABLE else _NullBackend()
-            # GPU
-            _probe_nvml()
-            if _NVML_AVAILABLE:
-                self._gpu_backend = _PyJoulesNvmlBackend()
-            else:
-                self._gpu_backend = _PollingGPUBackend()
-                logger.info(
-                    f"EnergyMeter '{self._label}': NVML not available — "
-                    "using 50ms power.draw polling for GPU energy."
-                )
+            # CPU and GPU initialized independently — one failure does not affect the other
+            self._cpu_requested = True
+            self._gpu_requested = True
+            _probe_cpu()
+            self._cpu_backend = _make_cpu_backend()
+            _probe_gpu()
+            self._gpu_backend = _make_gpu_backend()
 
         elif backend == "auto":
-            _probe_rapl()
-            if _RAPL_AVAILABLE:
-                self._cpu_backend = _PyJoulesRaplBackend()
+            self._cpu_requested = True
+            _probe_cpu()
+            if _cpu_probe and _cpu_probe["available"]:
+                self._cpu_backend = _make_cpu_backend()
             else:
                 warnings.warn(
                     f"EnergyMeter '{self._label}': RAPL unavailable — energy not measured. "
                     "Run scripts/setup_energy_permissions.sh first.",
                     RuntimeWarning, stacklevel=3,
                 )
-                self._cpu_backend = _NullBackend()
+
+        elif backend == "polling":
+            # Explicit opt-in for 50 ms nvidia-smi polling
+            self._cpu_requested = True
+            self._gpu_requested = True
+            _probe_cpu()
+            self._cpu_backend = _make_cpu_backend()
+            self._gpu_backend = _PollingGPUBackend()
+            logger.info(
+                "EnergyMeter '%s': using experimental 50 ms nvidia-smi polling for GPU.", self._label
+            )
 
         else:
             warnings.warn(
                 f"EnergyMeter '{self._label}': unknown backend '{backend}' — using null.",
                 RuntimeWarning, stacklevel=3,
             )
-            self._cpu_backend = _NullBackend()
 
     # ── context manager ───────────────────────────────────────────────────────
 
@@ -355,18 +712,14 @@ class EnergyMeter:
                 "nested contexts double-count). Measure at ONE level only."
             )
         _ACTIVE = True
-        if self._cpu_backend is not None:
-            self._cpu_backend.start()
-        if self._gpu_backend is not None:
-            self._gpu_backend.start()
+        self._cpu_backend.start()
+        self._gpu_backend.start()
         return self
 
     def __exit__(self, *_: Any) -> None:
         global _ACTIVE
-        if self._cpu_backend is not None:
-            self._cpu_uJ = self._cpu_backend.stop()
-        if self._gpu_backend is not None:
-            self._gpu_uJ = self._gpu_backend.stop()
+        self._cpu_uJ = self._cpu_backend.stop()
+        self._gpu_uJ = self._gpu_backend.stop()
         _ACTIVE = False
 
     # ── results ───────────────────────────────────────────────────────────────
@@ -380,9 +733,26 @@ class EnergyMeter:
         return self._gpu_uJ
 
     @property
+    def cpu_valid(self) -> bool:
+        return self._cpu_uJ is not None
+
+    @property
+    def gpu_valid(self) -> bool:
+        return self._gpu_uJ is not None
+
+    @property
     def total_uJ(self) -> float | None:
         parts = [x for x in (self._cpu_uJ, self._gpu_uJ) if x is not None]
         return float(sum(parts)) if parts else None
+
+    @property
+    def total_complete(self) -> bool:
+        """True only if every requested component produced a valid reading."""
+        if self._cpu_requested and not self.cpu_valid:
+            return False
+        if self._gpu_requested and not self.gpu_valid:
+            return False
+        return True
 
     @property
     def valid(self) -> bool:
@@ -390,30 +760,21 @@ class EnergyMeter:
 
     @property
     def result(self) -> dict:
-        backends: list[str] = []
-        if isinstance(self._cpu_backend, _PyJoulesRaplBackend):
-            backends.append("rapl")
-        if isinstance(self._gpu_backend, _PyJoulesNvmlBackend):
-            backends.append("nvml")
-        elif isinstance(self._gpu_backend, _PollingGPUBackend):
-            backends.append("nvml_polling")
         return {
             "cpu_uJ": self._cpu_uJ,
             "gpu_uJ": self._gpu_uJ,
             "total_uJ": self.total_uJ,
-            "cpu_valid": self._cpu_uJ is not None,
-            "gpu_valid": self._gpu_uJ is not None,
+            "cpu_valid": self.cpu_valid,
+            "gpu_valid": self.gpu_valid,
+            "total_complete": self.total_complete,
             "valid": self.valid,
-            "backends": backends,
+            "cpu_backend": self._cpu_backend.name,
+            "gpu_backend": self._gpu_backend.name,
         }
 
     # ── factory ───────────────────────────────────────────────────────────────
 
     @classmethod
     def from_thresholds(cls, label: str, thresholds: dict) -> "EnergyMeter":
-        """Construct from a loaded thresholds.json dict.
-
-        Reads thresholds["energy_meter"]; defaults to "auto" if absent.
-        """
         backend = thresholds.get("energy_meter", "auto")
         return cls(label, backend=backend)
