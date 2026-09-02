@@ -13,23 +13,37 @@
     "lstm": {
       "weights_path": "managed_system_regression/models/lstm_pems.pt",
       "loader": "adapters.loaders.lstm_loader",
-      "cost_class": "heavy"
+      "cost_class": "heavy",
+      "hyperparams": {
+        "train":   {"epochs": 50, "lr": 0.001, "batch_size": 16},
+        "retrain": {}
+      }
     },
     "ridge": {
       "weights_path": "managed_system_regression/models/ridge_pems.pkl",
       "loader": "adapters.loaders.sklearn_loader",
-      "cost_class": "light"
+      "cost_class": "light",
+      "hyperparams": {
+        "train":   {"alpha": 1000},
+        "retrain": {"alpha": 750}
+      }
     },
     "svr": {
       "weights_path": "managed_system_regression/models/svr_pems.pkl",
       "loader": "adapters.loaders.sklearn_loader",
-      "cost_class": "medium"
+      "cost_class": "medium",
+      "hyperparams": {
+        "train":   {"kernel": "linear", "C": 0.05, "tol": 0.16},
+        "retrain": {}
+      }
     }
   },
 
   "min_score": 0.78,
+  "min_accuracy": 0.78,
   "max_energy": 0.6,
   "E_ref": 0.7,
+  "energy_reference": 0.7,
   "delta": 0.1,
   "beta": 0.95,
   "gamma": 0.8,
