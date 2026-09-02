@@ -1,7 +1,0 @@
-{
-  "model": "lstm",
-  "timestamp": "20260822T235931_138071Z",
-  "tag": "retrain",
-  "proxy_score": 0.8313626113541185,
-  "drift_score": 0.228317
-}
