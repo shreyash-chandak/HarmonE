@@ -23,8 +23,11 @@ from core.planners.pareto import ParetoPlanner, build_pareto_front, chebyshev_di
 
 BASE_THRESHOLDS = {
     "min_score": 0.7,
+    "min_accuracy": 0.0,           # S5: explicit; suppresses _get_min_accuracy warning
+    "pareto_accuracy_reference": 0.7,  # S6: reference point for augmented distance
     "max_energy": 0.6,
     "E_ref": 0.5,
+    "energy_reference": 0.5,       # Phase 3 key; S6 reads this before E_ref
     "alpha": 0.0,   # disable exploration for deterministic tests
     "w_acc": 1.0,
     "w_e": 1.0,
@@ -172,22 +175,45 @@ class TestViolationAwarePlanner:
         assert ViolationAwarePlanner().plan(NO_VIOLATION).action == "noop"
 
     def test_energy_violation_picks_lowest_energy_accurate_model(self):
-        # current=lstm (high energy 0.7); energy violation
-        # accurate alts (≥min_score=0.7): lstm(0.85)✓, svm(0.55)✗, linear(0.4)✗
-        # wait — we exclude current. Accurate alts from {linear(0.4), svm(0.55)}: none meet 0.7
-        # → fall back to all alternatives; min energy: linear(0.2) < svm(0.4)
+        # Phase 2.1: uses min_accuracy=0.0 (all models qualify).
+        # current=lstm (energy=0.7), energy violation.
+        # All three meet min_accuracy=0.0. Min energy = linear(0.2).
+        # linear ≠ current(lstm); hysteresis margin=0.02: 0.2+0.02=0.22 < 0.7 → switch.
         d = ViolationAwarePlanner().plan(ENERGY_VIOLATION)
         assert d.action == "switch"
-        assert d.model == "linear"  # lowest energy among alternatives
-
-    def test_score_violation_picks_highest_acc_within_budget(self):
-        # current=svm, score violation
-        # budget=0.6: lstm(0.7)>budget, linear(0.2)≤budget, (svm excluded)
-        # → candidates within budget: linear only → pick linear
-        d = ViolationAwarePlanner().plan(SCORE_VIOLATION)
-        assert d.action == "switch"
-        # linear is only alt within energy budget 0.6 (lstm=0.7 exceeds)
         assert d.model == "linear"
+
+    def test_energy_violation_returns_noop_when_current_is_best(self):
+        # Fix 2.3: current=linear (energy=0.2) is already lowest-energy → noop.
+        ctx = PlanningContext(
+            violation="energy", ema_scores=EMA_SCORES, ema_accuracy=EMA_ACCURACY,
+            ema_energy=EMA_ENERGY, current_model="linear", available_models=MODELS,
+            thresholds=BASE_THRESHOLDS, drift_result=None,
+        )
+        d = ViolationAwarePlanner().plan(ctx)
+        assert d.action == "noop"
+        assert "already" in d.reason
+
+    def test_score_violation_returns_noop_when_current_is_best_within_budget(self):
+        # Fix 2.3: current=svm (acc=0.55, eng=0.4). Budget=0.6.
+        # Within budget (≤0.6): linear(0.2)✓, svm(0.4)✓. lstm(0.7) excluded.
+        # Best acc within budget: svm(0.55) > linear(0.4) → chosen=svm=current → noop.
+        d = ViolationAwarePlanner().plan(SCORE_VIOLATION)
+        assert d.action == "noop"
+        assert "already" in d.reason
+
+    def test_score_violation_switches_when_better_alt_exists(self):
+        # current=linear (acc=0.4, eng=0.2), score violation.
+        # Within budget (≤0.6): linear(0.2)✓, svm(0.4)✓. lstm(0.7) excluded.
+        # Best acc: svm(0.55) > linear(0.4). svm≠current; hysteresis: 0.55-0.4=0.15 > 0.02 → switch.
+        ctx = PlanningContext(
+            violation="score", ema_scores=EMA_SCORES, ema_accuracy=EMA_ACCURACY,
+            ema_energy=EMA_ENERGY, current_model="linear", available_models=MODELS,
+            thresholds=BASE_THRESHOLDS, drift_result=None,
+        )
+        d = ViolationAwarePlanner().plan(ctx)
+        assert d.action == "switch"
+        assert d.model == "svm"
 
     def test_drift_replace(self):
         d = ViolationAwarePlanner().plan(DRIFT_REPLACE)

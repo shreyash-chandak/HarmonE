@@ -26,6 +26,10 @@ class PlanningContext:
     drift_result: dict | None           # analyse_drift() return contract (B2)
     history: Any = None                 # future: telemetry accessor for bandit
     current_step: int = 0               # stream step count at time of planning (for PRT)
+    # Phase 9 additions (all with defaults for backward compatibility)
+    current_energy_threshold: float = 0.6  # live adaptive threshold (Phase 1.2)
+    last_observed_step: dict = field(default_factory=dict)  # step each model was last active (Phase 1.4)
+    staleness_window: int = 500        # steps after which an EMA is stale (Phase 1.4)
 
 
 @dataclass
