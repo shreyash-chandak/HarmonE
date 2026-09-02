@@ -1,0 +1,63 @@
+{
+  "name": "pems_driftinduced",
+  "domain": "regression",
+  "adapter": "adapters.regression_csv.RegressionCSVAdapter",
+
+  "train_path": "data/pems/flow_data_train.csv",
+  "stream_path": "data/pems/flow_data_test_driftInduced.csv",
+  "value_column": "flow",
+  "seq_length": 5,
+  "stream_delay_s": 0.0,
+
+  "models": {
+    "lstm": {
+      "weights_path": "managed_system_regression/models/lstm_pems.pt",
+      "loader": "adapters.loaders.lstm_loader",
+      "cost_class": "heavy",
+      "hyperparams": {
+        "train":   {"epochs": 50, "lr": 0.001, "batch_size": 16},
+        "retrain": {}
+      }
+    },
+    "ridge": {
+      "weights_path": "managed_system_regression/models/ridge_pems.pkl",
+      "loader": "adapters.loaders.sklearn_loader",
+      "cost_class": "light",
+      "hyperparams": {
+        "train":   {"alpha": 1000},
+        "retrain": {"alpha": 750}
+      }
+    },
+    "svr": {
+      "weights_path": "managed_system_regression/models/svr_pems.pkl",
+      "loader": "adapters.loaders.sklearn_loader",
+      "cost_class": "medium",
+      "hyperparams": {
+        "train":   {"kernel": "linear", "C": 0.05, "tol": 0.16},
+        "retrain": {}
+      }
+    }
+  },
+
+  "min_score": 0.78,
+  "min_accuracy": 0.78,
+  "max_energy": 0.6,
+  "E_ref": 0.7,
+  "energy_reference": 0.7,
+  "delta": 0.1,
+  "beta": 0.95,
+  "gamma": 0.8,
+  "alpha": 0.1,
+  "E_m": 300,
+  "E_M": 12000,
+  "tau_drift": 0.5,
+  "tau_drift_source": "paper_default",
+  "drift_reference": "both",
+  "planner": "harmone_original",
+  "w_acc": 1.0,
+  "w_e": 1.0,
+  "energy_required": ["cpu"],
+  "energy_meter": "rapl",
+
+  "_comment": "Drift-induced sibling of pems.json, added 2026-08-30 per HarmonE.pdf §4.2-4.3: training stays on the unaltered flow_data_train.csv (train_path, identical to pems.json); ONLY stream_path differs, pointing at the drift-injected copy produced by managed_system_regression/utility/drift/induce.py (--dataset pems). weights_path entries are intentionally IDENTICAL to pems.json's so a model trained once (on the unaltered set, by whichever run executes first) is reused here rather than retrained — pems.json itself is left untouched and still points at the clean flow_data_test.csv, e.g. for experiments/calibrate_drift_threshold.py, which needs a genuinely undrifted val_split() to compute a meaningful null-distribution threshold. Run induce.py to generate flow_data_test_driftInduced.csv before using this config — nothing creates it automatically."
+}

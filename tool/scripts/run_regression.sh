@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # run_regression.sh — Run all HarmonE regression experiments sequentially.
 #
-# Datasets : pems, uci_electricity, spot_prices
+# Datasets : pems_driftinduced, uci_electricity_driftinduced, spot_prices_driftinduced
 # Planners : naive (×3 models), naive_prt (×3 models), random_switch,
 #            random_switch_prt, greedy_switch, harmone_original,
 #            violation_aware, pareto, bandit
@@ -9,6 +9,24 @@
 # Naive and naive_prt baselines are run once per model (lstm, ridge, svr)
 # so each model's fixed-model baseline is recorded separately.
 # All other planners run once as a multi-model pool.
+#
+# Drift induction (HarmonE.pdf §4.2-4.3): models are always TRAINED on the
+# unaltered dataset — the *_driftinduced configs' train_path/data_path
+# training-portion rows are byte-identical to the clean configs' (pems.json,
+# uci_electricity.json, spot_prices.json), and weights_path is shared between
+# the clean and drift-induced config for each dataset, so whichever run
+# happens to execute first trains once and every other run just loads the
+# saved weights. ALL streaming (naive included, matching the paper's own
+# Table 2 methodology, which evaluates every baseline against the same
+# drift-induced test set) reads from the drift-injected stream file instead
+# — see managed_system_regression/utility/drift/induce.py and the
+# *_driftinduced.json configs' own _comment fields for the full mechanism.
+#
+# Prerequisite: the three *_driftInduced.csv files must already exist (this
+# script does not generate them). Build them first, e.g.:
+#   python managed_system_regression/utility/drift/induce.py --dataset pems \
+#       --region START END SCALE SHIFT [--region START END SCALE SHIFT ...]
+#   (repeat for uci_electricity, spot_prices)
 #
 # Per-run artifacts (predictions.csv, mape_events.csv, mape_info.json,
 # thresholds.json, run_manifest.json) are written to:
@@ -42,9 +60,16 @@ TOOL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 LOG_DIR="$TOOL_DIR/runs/logs"
 mkdir -p "$LOG_DIR"
 
-DATASETS=(pems uci_electricity spot_prices)
+DATASETS=(pems_driftinduced uci_electricity_driftinduced spot_prices_driftinduced)
 ADAPTIVE_PLANNERS=(random_switch random_switch_prt greedy_switch harmone_original violation_aware pareto bandit)
 REGRESSION_MODELS=(lstm ridge svr)
+
+# Prerequisite: the drift-induced CSVs referenced by each *_driftinduced.json
+# config must already exist — nothing in this script generates them.
+declare -A DRIFT_CSV
+DRIFT_CSV["pems_driftinduced"]="$TOOL_DIR/data/pems/flow_data_test_driftInduced.csv"
+DRIFT_CSV["uci_electricity_driftinduced"]="$TOOL_DIR/data/uci_electricity/uci_electricity_driftInduced.csv"
+DRIFT_CSV["spot_prices_driftinduced"]="$TOOL_DIR/data/spot_prices/spot_prices_driftInduced.csv"
 
 MASTER_LOG="$LOG_DIR/master_regression.log"
 FAILED_LOG="$LOG_DIR/failed_regression.log"
@@ -86,6 +111,19 @@ log "=== Regression grid START ==="
 log "TOOL_DIR : $TOOL_DIR"
 log "Datasets : ${DATASETS[*]}"
 log "Seed     : $SEED"
+
+MISSING=0
+for dataset in "${DATASETS[@]}"; do
+    csv="${DRIFT_CSV[$dataset]}"
+    if [ ! -f "$csv" ]; then
+        log "MISSING | $dataset  (expected $csv — run induce.py first, see this script's header)"
+        MISSING=$((MISSING + 1))
+    fi
+done
+if [ "$MISSING" -gt 0 ]; then
+    log "=== Regression grid ABORTED | $MISSING drift-induced CSV(s) not found ==="
+    exit 1
+fi
 
 for dataset in "${DATASETS[@]}"; do
 

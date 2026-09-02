@@ -1,0 +1,63 @@
+{
+  "name": "spot_prices_driftinduced",
+  "domain": "regression",
+  "adapter": "adapters.regression_csv.RegressionCSVAdapter",
+  "status": "awaiting_data",
+  "data_path": "data/spot_prices/spot_prices_driftInduced.csv",
+  "value_column": "value",
+  "seq_length": 24,
+  "train_frac": 0.6,
+  "val_frac": 0.15,
+  "stream_delay_s": 0.0,
+  "models": {
+    "lstm": {
+      "weights_path": "managed_system_regression/models/lstm_spot_prices.pt",
+      "loader": "adapters.loaders.lstm_loader",
+      "cost_class": "medium",
+      "hyperparams": {
+        "train":   {"epochs": 75, "lr": 0.0005, "batch_size": 16},
+        "retrain": {}
+      }
+    },
+    "ridge": {
+      "weights_path": "managed_system_regression/models/ridge_spot_prices.pkl",
+      "loader": "adapters.loaders.sklearn_loader",
+      "cost_class": "light",
+      "hyperparams": {
+        "train":   {"alpha": 5},
+        "retrain": {"alpha": 1}
+      }
+    },
+    "svr": {
+      "weights_path": "managed_system_regression/models/svr_spot_prices.pkl",
+      "loader": "adapters.loaders.sklearn_loader",
+      "cost_class": "medium",
+      "hyperparams": {
+        "train":   {"kernel": "linear", "C": 5.0, "tol": 0.0005, "epsilon": 0.005},
+        "retrain": {}
+      }
+    }
+  },
+  "min_score": 0.5,
+  "min_accuracy": 0.5,
+  "max_energy": 0.5,
+  "E_ref": 0.5,
+  "energy_reference": 0.5,
+  "w_acc": 1.0,
+  "w_e": 1.0,
+  "delta": 0.05,
+  "beta": 0.95,
+  "gamma": 0.8,
+  "alpha": 0.1,
+  "E_m": 300,
+  "E_M": 13000,
+  "tau_drift": 0.50,
+  "tau_drift_source": "calibrated_p99_1200w",
+  "drift_reference": "both",
+  "planner": "harmone_original",
+  "energy_required": [
+    "cpu"
+  ],
+  "_comment": "Drift-induced sibling of spot_prices.json, added 2026-08-30 per HarmonE.pdf §4.2-4.3. This dataset is Mode A (one CSV, split by train_frac at read time) so data_path points at the FULL drift-injected file produced by managed_system_regression/utility/drift/induce.py (--dataset spot_prices) — its training-portion rows are byte-identical copies of the original, so train_split() is unaffected; only stream() sees the induced drift. weights_path entries are intentionally IDENTICAL to spot_prices.json's so training happens once and is reused here. spot_prices.json itself is untouched, still pointing at the clean CSV — needed e.g. by experiments/calibrate_drift_threshold.py for a genuinely undrifted null distribution. Run induce.py to generate spot_prices_driftInduced.csv before using this config — nothing creates it automatically. ERCOT day-ahead prices 2019-2022; structural break already present at ~2021-02-13 (Winter Storm Uri) even before any induced drift — see docs/datasets/spot_prices.md.",
+  "energy_meter": "rapl"
+}
