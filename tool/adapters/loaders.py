@@ -157,11 +157,21 @@ def torchvision_loader(weights_path: str, **kwargs) -> Callable[[Any], float]:
 # Hardcoded SegFormer MiT backbone architectures — avoids any HuggingFace network calls.
 # Values match the official nvidia/mit-b{0,1,2} config.json files exactly.
 _SEGFORMER_ARCH: dict[str, dict] = {
+    # decoder_hidden_size is explicit on every entry (not left to SegformerConfig's
+    # default of 256) — B2 and up use 768, not 256, per the official Nvidia MiT
+    # configs. Leaving it implicit silently worked for b0/b1 (both happen to use
+    # the default) and produced a decode_head shape mismatch for b2 that made
+    # segformer_b2 fail to load at all (RuntimeError: size mismatch for
+    # decode_head.linear_projections.*/linear_fuse/batch_norm/classifier —
+    # checkpoint has 768-wide tensors, the constructed config built 256-wide
+    # ones) — confirmed 2026-08-30 against the actual segformer_b2_acdc.pt
+    # checkpoint's tensor shapes.
     "nvidia/mit-b0": dict(
         num_encoder_blocks=4,
         depths=[2, 2, 2, 2],
         sequence_reduction_ratios=[8, 4, 2, 1],
         hidden_sizes=[32, 64, 160, 256],
+        decoder_hidden_size=256,
         patch_sizes=[7, 3, 3, 3],
         strides=[4, 2, 2, 2],
         num_attention_heads=[1, 2, 5, 8],
@@ -172,6 +182,7 @@ _SEGFORMER_ARCH: dict[str, dict] = {
         depths=[2, 2, 2, 2],
         sequence_reduction_ratios=[8, 4, 2, 1],
         hidden_sizes=[64, 128, 320, 512],
+        decoder_hidden_size=256,
         patch_sizes=[7, 3, 3, 3],
         strides=[4, 2, 2, 2],
         num_attention_heads=[1, 2, 5, 8],
@@ -182,6 +193,7 @@ _SEGFORMER_ARCH: dict[str, dict] = {
         depths=[3, 4, 6, 3],
         sequence_reduction_ratios=[8, 4, 2, 1],
         hidden_sizes=[64, 128, 320, 512],
+        decoder_hidden_size=768,
         patch_sizes=[7, 3, 3, 3],
         strides=[4, 2, 2, 2],
         num_attention_heads=[1, 2, 5, 8],

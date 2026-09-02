@@ -61,7 +61,15 @@ def validate_proxies(
     Returns:
         Dict with per-proxy Spearman ρ and supporting data.
     """
-    from experiments.offline_eval import evaluate_run, _compute_map50_for_interval, _model_at_row, _load_model_log, _find_weights
+    # NOTE (2026-08-30 offline_eval audit): this import previously also pulled
+    # _compute_map50_for_interval/_model_at_row/_load_model_log/_find_weights,
+    # none of which have existed in experiments/offline_eval.py for some time
+    # — the whole import raised ImportError before this fix. The evaluate_run()
+    # call below also predates offline_eval.py's current (dataset-config-driven)
+    # signature — this function is broken beyond just the import; tracked as
+    # DECISIONS_PENDING.md DP23 rather than fixed here (out of scope for the
+    # offline_eval split this comment accompanies).
+    from experiments.offline_eval import evaluate_run
 
     # Step 1: compute true mAP@0.5 per interval
     print("[PROXY-VAL] Computing offline mAP@0.5 per interval...")

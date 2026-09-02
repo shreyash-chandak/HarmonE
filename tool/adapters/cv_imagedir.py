@@ -53,7 +53,7 @@ class CVImageDirAdapter(DatasetAdapter):
             return path
 
         if manifest_csv:
-            self._image_paths, self._label_paths = _load_manifest(
+            self._image_paths, self._label_paths, self._inline_labels = _load_manifest(
                 _resolve(manifest_csv), _resolve(data_root)
             )
         elif image_dir:
@@ -64,9 +64,11 @@ class CVImageDirAdapter(DatasetAdapter):
                 if p.suffix.lower() in extensions
             )
             self._label_paths = [None] * len(self._image_paths)
+            self._inline_labels = [None] * len(self._image_paths)
         else:
             self._image_paths = []
             self._label_paths = []
+            self._inline_labels = []
 
         n = len(self._image_paths)
         train_frac = float(config.get("train_frac", 0.8))
@@ -97,6 +99,22 @@ class CVImageDirAdapter(DatasetAdapter):
     def val_split(self) -> list[str]:
         return self._image_paths[self._train_end : self._val_end]
 
+    def train_labels(self) -> tuple[list[str | None], list[int | None]]:
+        """Ground truth for the train-split portion: (label_paths, inline_labels).
+
+        Unlike stream()/offline_labels(), this IS meant to be read at training
+        time — I4 (label-free) is a property of the runtime streaming phase,
+        not the initial supervised bootstrap. label_paths holds a GT file per
+        image (segmentation mask, detection annotation) where the manifest
+        has a "label_path" column; inline_labels holds an int class index
+        where the manifest has a "label" column (classification). Exactly one
+        of the two is populated per dataset, matching each task's schema.
+        """
+        return (
+            self._label_paths[: self._train_end],
+            self._inline_labels[: self._train_end],
+        )
+
     def stream(self) -> Iterator[Sample]:
         for idx, path in enumerate(self._image_paths[self._val_end :]):
             yield Sample(index=idx, inputs=path, ground_truth=None)
@@ -116,10 +134,18 @@ class CVImageDirAdapter(DatasetAdapter):
 
 def _load_manifest(
     manifest_path: Path, data_root: Path
-) -> tuple[list[str], list[str | None]]:
-    """Parse a manifest CSV and return (image_paths, label_paths)."""
+) -> tuple[list[str], list[str | None], list[int | None]]:
+    """Parse a manifest CSV and return (image_paths, label_paths, inline_labels).
+
+    label_paths is populated from a "label_path" column (segmentation mask /
+    detection annotation file). inline_labels is populated from a "label"
+    column (classification GT class index, e.g. iWildCam/ImageNet manifests)
+    — mirrors experiments/offline_eval.py's _build_stream_index, which reads
+    the same two columns for the same reason.
+    """
     image_paths: list[str] = []
     label_paths: list[str | None] = []
+    inline_labels: list[int | None] = []
 
     with open(manifest_path, newline="") as f:
         reader = csv.DictReader(f)
@@ -132,4 +158,10 @@ def _load_manifest(
             label = row.get("label_path", "")
             label_paths.append(str(Path(data_root) / label) if label else None)
 
-    return image_paths, label_paths
+            raw_label = row.get("label", "")
+            try:
+                inline_labels.append(int(raw_label))
+            except (ValueError, TypeError):
+                inline_labels.append(None)
+
+    return image_paths, label_paths, inline_labels

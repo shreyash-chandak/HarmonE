@@ -16,6 +16,7 @@ The validator reports SKIPPED (not FAIL) when a path is absent and status is set
 | [bdd100k.md](bdd100k.md) | cv/detection | BDD100K images unzipped |
 | [iwildcam.md](iwildcam.md) | cv/classification | iWildCam manifest generated |
 | [acdc.md](acdc.md) | cv/segmentation | ACDC images + masks unzipped |
+| [imagenet.md](imagenet.md) | cv/classification | ImageNet manifest generated (trial C4, see DP18) |
 
 ## Cross-reference
 

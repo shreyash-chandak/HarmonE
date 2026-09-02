@@ -194,15 +194,18 @@ def _train_regression_models(
         os.makedirs(os.path.dirname(wp), exist_ok=True)
 
         if "lstm" in name:
-            n_epochs = 50
+            hp = spec.get("hyperparams", {}).get("train", {})
+            n_epochs = int(hp.get("epochs", 50))
+            lr = float(hp.get("lr", 0.001))
+            batch_size = int(hp.get("batch_size", 16))
             logger.info("Training LSTM for '%s' — %d epochs, %d sequences ...",
                         name, n_epochs, len(X))
             X_t = torch.tensor(X, dtype=torch.float32).unsqueeze(-1)
             y_t = torch.tensor(y, dtype=torch.float32).unsqueeze(-1)
             model = LSTMModel()
-            opt = optim.Adam(model.parameters(), lr=0.001)
+            opt = optim.Adam(model.parameters(), lr=lr)
             loss_fn = nn.MSELoss()
-            loader = DataLoader(TensorDataset(X_t, y_t), batch_size=16, shuffle=True)
+            loader = DataLoader(TensorDataset(X_t, y_t), batch_size=batch_size, shuffle=True)
             for epoch in range(n_epochs):
                 epoch_loss = 0.0
                 for xb, yb in loader:
@@ -218,17 +221,44 @@ def _train_regression_models(
             logger.info("  Saved LSTM → %s", wp)
 
         elif "ridge" in name or "linear" in name:
-            logger.info("Training Ridge for '%s' ...", name)
-            m = Ridge(alpha=256)
+            hp = spec.get("hyperparams", {}).get("train", {})
+            alpha = float(hp.get("alpha", 256))
+            logger.info("Training Ridge for '%s' (alpha=%.0f) ...", name, alpha)
+            m = Ridge(alpha=alpha)
             m.fit(X, y)
             with open(wp, "wb") as f:
                 pickle.dump(m, f)
             logger.info("  Saved Ridge → %s", wp)
 
         elif "svr" in name or "svm" in name:
-            logger.info("Training SVR for '%s' ...", name)
-            m = SVR(kernel="linear", C=0.08, tol=0.16)
-            m.fit(X, y)
+            hp = spec.get("hyperparams", {}).get("train", {})
+            kernel = hp.get("kernel", "linear")
+            C = float(hp.get("C", 0.08))
+            tol = float(hp.get("tol", 0.16))
+            epsilon = float(hp.get("epsilon", 0.1))  # sklearn default; datasets whose
+            # stream extrapolates outside the scaled [0,1] training range (drift-induced
+            # regression configs) need this much tighter — see DECISIONS_PENDING.md DP27.
+            max_train_samples = int(hp.get("max_train_samples", 8000))
+            # SVR's QP solver scales super-linearly with sample count — fitting on the
+            # full sequence set (uci_electricity ~14k, spot_prices ~130k) took 4+ minutes
+            # and 10+ minutes respectively during verification, impractical for something
+            # that can also run inline during a drift-triggered retrain event. Subsampling
+            # is empirically safe here (confirmed against the real drift-induced stream,
+            # DP27): a linear-kernel SVR needs far fewer points than a complex RBF one to
+            # find a good hyperplane, and R² on an 8000-point subsample matched the full
+            # fit within noise for both datasets.
+            X_fit, y_fit = X, y
+            if len(X) > max_train_samples:
+                idx = np.random.RandomState(0).choice(len(X), max_train_samples, replace=False)
+                X_fit, y_fit = X[idx], y[idx]
+            logger.info(
+                "Training SVR for '%s' (kernel=%s, C=%.3f, tol=%.4f, epsilon=%.4f, "
+                "n=%d%s) ...",
+                name, kernel, C, tol, epsilon, len(X_fit),
+                f" subsampled from {len(X)}" if len(X_fit) < len(X) else "",
+            )
+            m = SVR(kernel=kernel, C=C, tol=tol, epsilon=epsilon)
+            m.fit(X_fit, y_fit)
             with open(wp, "wb") as f:
                 pickle.dump(m, f)
             logger.info("  Saved SVR → %s", wp)
@@ -377,12 +407,17 @@ def _initial_mape_info(models: dict[str, Any]) -> dict:
         "ema_scores": {m: 0.5 for m in models},
         "ema_accuracy": {m: 0.5 for m in models},
         "ema_energy": {m: 0.5 for m in models},
+        # Phase 1.4: step each model was last active (for staleness detection)
+        "last_observed_step": {},
+        # Phase 1: violation-aware noop counter and switch tracking
+        "steps_since_last_switch": 0,
         "event_counters": {
             "model_switches": 0,
             "retrains": 0,
             "retrain_skipped": 0,
             "vmr_events": 0,
             "noops": 0,
+            "noop_on_violation": 0,
             "mape_k_energy_uJ": 0.0,
         },
     }
@@ -521,6 +556,10 @@ def _plan(
         thresholds=thresholds,
         drift_result=drift_result if drift_result["drift_detected"] else None,
         current_step=current_step,
+        # Phase 1 plumbing: live adaptive threshold and staleness tracking
+        current_energy_threshold=float(mape_info.get("current_energy_threshold", 0.6)),
+        last_observed_step=dict(mape_info.get("last_observed_step", {})),
+        staleness_window=int(thresholds.get("staleness_window", 500)),
     )
     return planner.plan(ctx)
 
@@ -542,6 +581,7 @@ def _load_model_store(dataset_config: dict) -> dict:
         if not os.path.exists(wp):
             store[name] = None
             continue
+        retrain_params = spec.get("hyperparams", {}).get("retrain", {})
         try:
             if "lstm" in name:
                 from adapters.loaders import LSTMModel
@@ -549,15 +589,585 @@ def _load_model_store(dataset_config: dict) -> dict:
                 m = LSTMModel()
                 m.load_state_dict(torch.load(wp, map_location="cpu", weights_only=False))
                 m.eval()
-                store[name] = {"type": "lstm", "model": m}
+                store[name] = {"type": "lstm", "model": m, "retrain_params": retrain_params}
             else:
                 with open(wp, "rb") as f:
                     m = pickle.load(f)
-                store[name] = {"type": "sklearn", "model": m}
+                store[name] = {"type": "sklearn", "model": m, "retrain_params": retrain_params}
         except Exception as exc:
             logger.warning("Could not load model object for '%s' (retraining disabled): %s", name, exc)
             store[name] = None
     return store
+
+
+def _build_torchvision_classifier(weights_path: str, num_classes: int):
+    """Build an EfficientNet/ResNet classifier + its inference transform.
+
+    Architecture inference and preprocessing mirror
+    adapters/loaders.py::torchvision_loader() exactly, so pseudo-labels
+    generated here are consistent with normal inference. Returns
+    (model, transform, arch_name); raises ValueError on unrecognised filename.
+    """
+    import torch
+    import torchvision.models as tv
+    from torchvision import transforms
+
+    name_lower = os.path.basename(weights_path).lower()
+    if "efficientnet_b0" in name_lower:
+        model = tv.efficientnet_b0(weights=None)
+        model.classifier[1] = torch.nn.Linear(model.classifier[1].in_features, num_classes)
+        arch = "efficientnet_b0"
+    elif "resnet101" in name_lower:
+        model = tv.resnet101(weights=None)
+        model.fc = torch.nn.Linear(model.fc.in_features, num_classes)
+        arch = "resnet101"
+    elif "resnet50" in name_lower:
+        model = tv.resnet50(weights=None)
+        model.fc = torch.nn.Linear(model.fc.in_features, num_classes)
+        arch = "resnet50"
+    else:
+        raise ValueError(
+            f"Cannot infer torchvision architecture from filename: {weights_path}. "
+            "Expected 'efficientnet_b0', 'resnet50', or 'resnet101' in the name."
+        )
+
+    state = torch.load(weights_path, map_location="cpu", weights_only=False)
+    model.load_state_dict(state)
+    model.eval()
+
+    transform = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+    ])
+    return model, transform, arch
+
+
+def _build_segformer_model(weights_path: str, num_classes: int):
+    """Build a SegFormer segmentation model + its HF image processor.
+
+    Architecture inference and preprocessing mirror
+    adapters/loaders.py::segformer_loader() exactly (reuses its hardcoded,
+    network-free MiT backbone table), so pseudo-labels generated here are
+    consistent with normal inference. Returns (model, processor, arch_key).
+    """
+    import torch
+    from transformers import SegformerForSemanticSegmentation, SegformerConfig, SegformerImageProcessor
+    from adapters.loaders import _SEGFORMER_ARCH
+
+    name_lower = os.path.basename(weights_path).lower()
+    if "segformer_b2" in name_lower or "segformer-b2" in name_lower:
+        arch_key = "nvidia/mit-b2"
+    elif "segformer_b1" in name_lower or "segformer-b1" in name_lower:
+        arch_key = "nvidia/mit-b1"
+    else:
+        arch_key = "nvidia/mit-b0"
+
+    cfg = SegformerConfig(**_SEGFORMER_ARCH[arch_key], num_labels=num_classes)
+    model = SegformerForSemanticSegmentation(cfg)
+    state = torch.load(weights_path, map_location="cpu", weights_only=False)
+    model.load_state_dict(state, strict=False)
+    model.eval()
+
+    processor = SegformerImageProcessor(
+        do_resize=True, size={"height": 512, "width": 512},
+        do_normalize=True, image_mean=[0.485, 0.456, 0.406], image_std=[0.229, 0.224, 0.225],
+        do_rescale=True, rescale_factor=1.0 / 255,
+    )
+    return model, processor, arch_key
+
+
+def _build_yolo_model(weights_path: str):
+    """Load a YOLO model via ultralytics — a thin wrapper, kept as its own
+    helper for symmetry with the other two _build_* functions."""
+    from ultralytics import YOLO
+    try:
+        from ultralytics.utils import SETTINGS
+        SETTINGS.update({"sync": False})  # disable telemetry / update checks
+    except Exception:
+        pass
+    return YOLO(weights_path)
+
+
+def _load_cv_model_store(dataset_config: dict, cv_task: str) -> dict:
+    """Load raw CV model objects for inline periodic fine-tuning (PRT+VMR, CV).
+
+    Covers all three CV task families:
+      - "classification": torchvision EfficientNet/ResNet (_build_torchvision_classifier)
+      - "segmentation":    SegFormer B0/B1/B2 (_build_segformer_model)
+      - "detection":       YOLOv8 n/s/m via ultralytics (_build_yolo_model)
+
+    An unrecognised task, or a model that fails to build, gets a None entry —
+    _do_cv_inline_finetune then no-ops cleanly (counted as retrain_skipped)
+    rather than silently pretending to fine-tune something that didn't load.
+
+    Returns {name: {"type": ..., "model": ..., ...} | None} — the exact
+    per-type dict shape is documented on each _build_* helper above and
+    consumed by _do_cv_inline_finetune / _do_cv_vmr_restore / _archive_in_vmr.
+    """
+    store: dict = {}
+    for name, spec in dataset_config.get("models", {}).items():
+        wp = spec["weights_path"]
+        if not os.path.isabs(wp):
+            wp = os.path.join(str(_TOOL_DIR), wp)
+        if not os.path.exists(wp):
+            store[name] = None
+            continue
+        try:
+            if cv_task == "classification":
+                num_classes = int(dataset_config.get("num_classes", 1000))
+                model, transform, arch = _build_torchvision_classifier(wp, num_classes)
+                store[name] = {
+                    "type": "torchvision_classifier",
+                    "model": model, "transform": transform,
+                    "arch": arch, "num_classes": num_classes,
+                }
+            elif cv_task == "segmentation":
+                num_classes = int(dataset_config.get("num_classes", 19))
+                model, processor, arch = _build_segformer_model(wp, num_classes)
+                store[name] = {
+                    "type": "segformer_segmentation",
+                    "model": model, "processor": processor,
+                    "arch": arch, "num_classes": num_classes,
+                }
+            elif cv_task == "detection":
+                model = _build_yolo_model(wp)
+                store[name] = {
+                    "type": "yolo_detection",
+                    "model": model,
+                    "nc": int(dataset_config.get("num_classes", 80)),  # COCO default
+                }
+            else:
+                logger.warning("Unrecognised cv_task '%s' — PRT disabled for '%s'.", cv_task, name)
+                store[name] = None
+        except Exception as exc:
+            logger.warning("Could not load CV model object for '%s' (PRT disabled): %s", name, exc)
+            store[name] = None
+    return store
+
+
+# ── CV initial train (weights-missing bootstrap) ────────────────────────────
+#
+# Mirrors _train_regression_models()'s "train if the weights file is absent"
+# gate, with one deliberate difference: this uses REAL ground truth from
+# train_split() (CVImageDirAdapter.train_labels()), not pseudo-labels.
+# Invariant I4 (label-free) is a property of the runtime STREAMING phase —
+# MAPE decisions can't peek at ground truth — it was never meant to restrict
+# the initial supervised bootstrap, and regression's own train_split() is
+# already fully supervised. As with PRT retrain, only the last
+# finetune_n_layers layers are trained (full backbone training from a
+# pretrained checkpoint is unnecessary and far more costly) — same knob,
+# same _select_finetune_params() helper, shared config keys.
+
+def _train_cv_models_if_missing(
+    dataset_config: dict,
+    cv_task: str,
+    train_paths: list[str],
+    train_label_paths: list[str | None],
+    train_inline_labels: list[int | None],
+    thresholds: dict,
+    run_path: Path | None,
+) -> None:
+    """For each model whose weights_path is missing, fine-tune from a
+    pretrained checkpoint on train_split() and save to weights_path.
+
+    Called once per run, before _load_models()/_load_cv_model_store() — by
+    the time those run, a model trained here loads normally like any other
+    pre-existing checkpoint. A model that still has no weights afterward
+    (training skipped or failed) is reported by _load_models() the same way
+    a genuinely missing file always has been (None entry, excluded from
+    available_models).
+    """
+    model_specs = dataset_config.get("models", {})
+    missing = []
+    for name, spec in model_specs.items():
+        wp = spec["weights_path"]
+        if not os.path.isabs(wp):
+            wp = os.path.join(str(_TOOL_DIR), wp)
+        if not os.path.exists(wp):
+            missing.append((name, wp))
+    if not missing:
+        return
+
+    logger.info(
+        "CV initial train: %d model(s) missing weights — fine-tuning from pretrained "
+        "on %d training images ...", len(missing), len(train_paths),
+    )
+    for name, wp in missing:
+        os.makedirs(os.path.dirname(wp), exist_ok=True)
+        try:
+            if cv_task == "classification":
+                num_classes = int(dataset_config.get("num_classes", 1000))
+                ok = _initial_train_torchvision_classifier(
+                    name, wp, num_classes, train_paths, train_inline_labels, thresholds,
+                )
+            elif cv_task == "segmentation":
+                num_classes = int(dataset_config.get("num_classes", 19))
+                ok = _initial_train_segformer_segmentation(
+                    name, wp, num_classes, train_paths, train_label_paths, thresholds,
+                )
+            elif cv_task == "detection":
+                ok = _initial_train_yolo_detection(
+                    name, wp, train_paths, train_label_paths, thresholds, run_path,
+                )
+            else:
+                logger.warning("CV initial train: unrecognised cv_task '%s' for '%s' — skipping.",
+                                cv_task, name)
+                ok = False
+        except Exception as exc:
+            logger.warning("CV initial train failed for '%s': %s", name, exc)
+            ok = False
+        if not ok:
+            logger.warning(
+                "CV initial train: '%s' still has no usable weights at %s — "
+                "will be excluded from available_models.", name, wp,
+            )
+
+
+def _initial_train_torchvision_classifier(
+    model_name: str,
+    weights_path: str,
+    num_classes: int,
+    train_paths: list[str],
+    train_inline_labels: list[int | None],
+    thresholds: dict,
+) -> bool:
+    """Build an ImageNet-pretrained classifier with a fresh num_classes head,
+    fine-tune the last finetune_n_layers layers on real (path, label) pairs
+    from train_split(), and save the resulting state_dict to weights_path.
+
+    After this, _build_torchvision_classifier() loads the saved file exactly
+    like any pre-existing checkpoint — no special-casing downstream.
+    """
+    import torch
+    import torch.nn as nn
+    import torchvision.models as tv
+    from torchvision import transforms
+    from PIL import Image
+
+    paths = [p for p, lbl in zip(train_paths, train_inline_labels) if lbl is not None]
+    labels = [int(lbl) for lbl in train_inline_labels if lbl is not None]
+
+    min_images = int(thresholds.get("finetune_min_images", 20))
+    if len(paths) < min_images:
+        logger.warning(
+            "CV initial train: only %d labeled training images for '%s' (need %d) — skipping.",
+            len(paths), model_name, min_images,
+        )
+        return False
+
+    name_lower = os.path.basename(weights_path).lower()
+    if "efficientnet_b0" in name_lower:
+        model = tv.efficientnet_b0(weights=tv.EfficientNet_B0_Weights.DEFAULT)
+        model.classifier[1] = nn.Linear(model.classifier[1].in_features, num_classes)
+    elif "resnet101" in name_lower:
+        model = tv.resnet101(weights=tv.ResNet101_Weights.DEFAULT)
+        model.fc = nn.Linear(model.fc.in_features, num_classes)
+    elif "resnet50" in name_lower:
+        model = tv.resnet50(weights=tv.ResNet50_Weights.DEFAULT)
+        model.fc = nn.Linear(model.fc.in_features, num_classes)
+    else:
+        raise ValueError(
+            f"Cannot infer torchvision architecture from filename: {weights_path}. "
+            "Expected 'efficientnet_b0', 'resnet50', or 'resnet101' in the name."
+        )
+
+    transform = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+    ])
+
+    n_layers = int(thresholds.get("finetune_n_layers", 10))
+    lr = float(thresholds.get("finetune_lr", 1e-4))
+    epochs = int(thresholds.get("finetune_epochs", 3))
+    batch_size = int(thresholds.get("finetune_batch_size", 8))
+
+    for p in model.parameters():
+        p.requires_grad_(False)
+    finetune_params = _select_finetune_params(model, n_layers)
+    if not finetune_params:
+        logger.warning("CV initial train: no parameters selected for '%s' (n_layers=%d).",
+                        model_name, n_layers)
+        return False
+    for p in finetune_params:
+        p.requires_grad_(True)
+
+    optimizer = torch.optim.Adam(finetune_params, lr=lr)
+    loss_fn = nn.CrossEntropyLoss()
+
+    model.train()
+    for _epoch in range(epochs):
+        for start in range(0, len(paths), batch_size):
+            batch_paths = paths[start : start + batch_size]
+            batch_labels = labels[start : start + batch_size]
+            if not batch_paths:
+                continue
+            try:
+                imgs = [transform(Image.open(p).convert("RGB")) for p in batch_paths]
+            except Exception as exc:
+                logger.debug("CV initial train batch load failed: %s", exc)
+                continue
+            x = torch.stack(imgs)
+            y = torch.tensor(batch_labels, dtype=torch.long)
+            optimizer.zero_grad()
+            loss_fn(model(x), y).backward()
+            optimizer.step()
+    model.eval()
+    for p in model.parameters():
+        p.requires_grad_(False)
+
+    torch.save(model.state_dict(), weights_path)
+    logger.info(
+        "CV initial train: saved '%s' -> %s (%d images, last %d layers unfrozen "
+        "(%d parameter tensors), %d epochs).",
+        model_name, weights_path, len(paths), n_layers, len(finetune_params), epochs,
+    )
+    return True
+
+
+def _initial_train_segformer_segmentation(
+    model_name: str,
+    weights_path: str,
+    num_classes: int,
+    train_paths: list[str],
+    train_label_paths: list[str | None],
+    thresholds: dict,
+) -> bool:
+    """Build a SegFormer model from HuggingFace's ImageNet-pretrained MiT
+    backbone with a fresh num_classes decode head, fine-tune the last
+    finetune_n_layers layers on real (image, mask) pairs from train_split(),
+    and save the resulting state_dict to weights_path.
+
+    Unlike _finetune_segformer_segmentation's pseudo-mask (which is derived
+    directly from the logits, so it's already at the logits' spatial
+    resolution), a real ground-truth mask is full-resolution — logits are
+    upsampled to match it before computing the loss (the standard SegFormer
+    fine-tuning recipe), rather than downsampling the mask.
+    """
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+    from PIL import Image
+    from transformers import SegformerForSemanticSegmentation, SegformerImageProcessor
+
+    ignore_index = 255
+    pairs = [
+        (p, lp) for p, lp in zip(train_paths, train_label_paths)
+        if lp and os.path.exists(lp)
+    ]
+    min_images = int(thresholds.get("finetune_min_images", 20))
+    if len(pairs) < min_images:
+        logger.warning(
+            "CV initial train: only %d training images with a GT mask for '%s' (need %d) — skipping.",
+            len(pairs), model_name, min_images,
+        )
+        return False
+
+    name_lower = os.path.basename(weights_path).lower()
+    if "segformer_b2" in name_lower or "segformer-b2" in name_lower:
+        arch_key = "nvidia/mit-b2"
+    elif "segformer_b1" in name_lower or "segformer-b1" in name_lower:
+        arch_key = "nvidia/mit-b1"
+    else:
+        arch_key = "nvidia/mit-b0"
+
+    model = SegformerForSemanticSegmentation.from_pretrained(
+        arch_key, num_labels=num_classes, ignore_mismatched_sizes=True,
+    )
+    processor = SegformerImageProcessor(
+        do_resize=True, size={"height": 512, "width": 512},
+        do_normalize=True, image_mean=[0.485, 0.456, 0.406], image_std=[0.229, 0.224, 0.225],
+        do_rescale=True, rescale_factor=1.0 / 255,
+    )
+
+    def _encode(path: str):
+        img = Image.open(path).convert("RGB")
+        return processor(images=img, return_tensors="pt")["pixel_values"]
+
+    def _encode_mask(label_path: str) -> torch.Tensor:
+        gt = np.array(Image.open(label_path), dtype=np.int64)
+        gt[(gt < 0) | (gt >= num_classes)] = ignore_index
+        return torch.from_numpy(gt)
+
+    n_layers = int(thresholds.get("finetune_n_layers", 10))
+    lr = float(thresholds.get("finetune_lr", 1e-4))
+    epochs = int(thresholds.get("finetune_epochs", 3))
+    batch_size = int(thresholds.get("finetune_batch_size", 4))
+
+    for p in model.parameters():
+        p.requires_grad_(False)
+    finetune_params = _select_finetune_params(model, n_layers)
+    if not finetune_params:
+        logger.warning("CV initial train: no parameters selected for '%s' (n_layers=%d).",
+                        model_name, n_layers)
+        return False
+    for p in finetune_params:
+        p.requires_grad_(True)
+
+    optimizer = torch.optim.Adam(finetune_params, lr=lr)
+    loss_fn = nn.CrossEntropyLoss(ignore_index=ignore_index)
+
+    model.train()
+    for _epoch in range(epochs):
+        for start in range(0, len(pairs), batch_size):
+            batch = pairs[start : start + batch_size]
+            if not batch:
+                continue
+            try:
+                xs = [_encode(p) for p, _lp in batch]
+                masks = [_encode_mask(lp) for _p, lp in batch]
+            except Exception as exc:
+                logger.debug("CV initial train batch load failed: %s", exc)
+                continue
+            x = torch.cat(xs, dim=0)
+            optimizer.zero_grad()
+            logits = model(pixel_values=x).logits
+            total_loss = None
+            for i, mask in enumerate(masks):
+                up = F.interpolate(
+                    logits[i : i + 1], size=mask.shape, mode="bilinear", align_corners=False,
+                )
+                li = loss_fn(up, mask.unsqueeze(0))
+                total_loss = li if total_loss is None else total_loss + li
+            if total_loss is not None:
+                total_loss.backward()
+                optimizer.step()
+    model.eval()
+    for p in model.parameters():
+        p.requires_grad_(False)
+
+    torch.save(model.state_dict(), weights_path)
+    logger.info(
+        "CV initial train: saved '%s' -> %s (%d images, last %d layers unfrozen "
+        "(%d parameter tensors), %d epochs).",
+        model_name, weights_path, len(pairs), n_layers, len(finetune_params), epochs,
+    )
+    return True
+
+
+def _initial_train_yolo_detection(
+    model_name: str,
+    weights_path: str,
+    train_paths: list[str],
+    train_label_paths: list[str | None],
+    thresholds: dict,
+    run_path: Path | None,
+) -> bool:
+    """Load a COCO-pretrained YOLO checkpoint (ultralytics resolves/downloads
+    it if weights_path is a recognised shorthand, e.g. "yolov8n.pt" — the
+    same resolution _build_yolo_model already relies on), fine-tune the last
+    finetune_n_layers layers on real GT boxes from train_split(), and save.
+
+    No class-head resize needed: BDD100K detections are evaluated in COCO's
+    own 80-class space (see offline_eval.py's _BDD_TO_COCO mapping) rather
+    than a BDD-specific taxonomy, so the stock pretrained head already
+    matches — this is a domain (not class-taxonomy) adaptation, same as
+    _finetune_yolo_detection's PRT fine-tune.
+    """
+    if run_path is None:
+        logger.warning("CV initial train (yolo): run_path not provided — cannot stage a temp dataset.")
+        return False
+
+    import shutil
+    from PIL import Image as PILImage
+    from experiments.offline_eval import _load_gt_boxes
+
+    min_images = int(thresholds.get("finetune_min_images", 20))
+    n_layers = int(thresholds.get("finetune_n_layers", 10))
+    lr = float(thresholds.get("finetune_lr", 1e-4))
+    epochs = int(thresholds.get("finetune_epochs", 3))
+    batch_size = int(thresholds.get("finetune_batch_size", 4))
+    nc = 80  # COCO head — matches the pretrained checkpoint's output space as-is
+
+    train_dir = run_path / f"_yolo_initial_train_tmp_{model_name}"
+    img_dir = train_dir / "images"
+    lbl_dir = train_dir / "labels"
+    if train_dir.exists():
+        shutil.rmtree(train_dir, ignore_errors=True)
+    img_dir.mkdir(parents=True, exist_ok=True)
+    lbl_dir.mkdir(parents=True, exist_ok=True)
+
+    kept = 0
+    model = None
+    try:
+        for p, lp in zip(train_paths, train_label_paths):
+            if not lp or not os.path.exists(lp):
+                continue
+            try:
+                with PILImage.open(p) as im:
+                    w, h = im.size
+            except Exception:
+                continue
+            boxes, classes = _load_gt_boxes(lp, w, h)
+            if len(boxes) == 0:
+                continue
+            lines = []
+            for (x1, y1, x2, y2), cls in zip(boxes, classes):
+                cx = ((x1 + x2) / 2) / w
+                cy = ((y1 + y2) / 2) / h
+                bw = (x2 - x1) / w
+                bh = (y2 - y1) / h
+                lines.append(f"{int(cls)} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}")
+            src = Path(p)
+            shutil.copy(src, img_dir / src.name)
+            (lbl_dir / f"{src.stem}.txt").write_text("\n".join(lines))
+            kept += 1
+
+        if kept < min_images:
+            logger.warning(
+                "CV initial train: only %d/%d training images with GT boxes for '%s' (need %d) — skipping.",
+                kept, len(train_paths), model_name, min_images,
+            )
+            return False
+
+        names_map = "{ " + ", ".join(f"{i}: {i}" for i in range(nc)) + " }"
+        train_yaml = train_dir / "initial_train.yaml"
+        train_yaml.write_text(
+            f"path: {train_dir.resolve()}\n"
+            f"train: images\n"
+            f"val: images\n"
+            f"nc: {nc}\n"
+            f"names: {names_map}\n"
+        )
+
+        model = _build_yolo_model(weights_path)
+
+        for p in model.model.parameters():
+            p.requires_grad_(False)
+        finetune_params = _select_finetune_params(model.model, n_layers)
+        if not finetune_params:
+            logger.warning("CV initial train: no parameters selected for '%s' (n_layers=%d).",
+                            model_name, n_layers)
+            return False
+        for p in finetune_params:
+            p.requires_grad_(True)
+
+        try:
+            model.train(
+                data=str(train_yaml), epochs=epochs, imgsz=640, batch=batch_size,
+                workers=2, patience=max(epochs, 1), pretrained=False, cache="disk",
+                lr0=lr, verbose=False,
+            )
+        except Exception as exc:
+            logger.warning("CV initial train (yolo) train() failed for '%s': %s", model_name, exc)
+            return False
+
+    finally:
+        if model is not None:
+            for p in model.model.parameters():
+                p.requires_grad_(False)
+        shutil.rmtree(train_dir, ignore_errors=True)
+
+    model.save(weights_path)
+    logger.info(
+        "CV initial train: saved '%s' -> %s (%d images, last %d layers unfrozen "
+        "(%d parameter tensors), %d epochs).",
+        model_name, weights_path, kept, n_layers, len(finetune_params), epochs,
+    )
+    return True
 
 
 def _do_inline_retrain(
@@ -592,6 +1202,9 @@ def _do_inline_retrain(
             return False
 
         if info["type"] == "sklearn":
+            retrain_params = info.get("retrain_params", {})
+            if retrain_params:
+                info["model"].set_params(**retrain_params)
             info["model"].fit(X, y)
             _m = info["model"]
             def _new_predict(inputs: np.ndarray, m=_m) -> float:
@@ -629,6 +1242,785 @@ def _do_inline_retrain(
     return False
 
 
+def _select_finetune_params(model, n_layers: int) -> list:
+    """Return the parameters of the last n_layers parameterised leaf modules.
+
+    Architecture-agnostic: walks model.modules(), keeps leaf modules (no
+    children) that actually own parameters (Conv2d, Linear, BatchNorm2d,
+    etc.), and selects the LAST n_layers of them in forward-definition order
+    — i.e. the layers closest to the output head, which is what "fine-tune
+    the last N layers" means for a classifier. Works the same way for
+    EfficientNet-B0 and ResNet-50/101 despite very different module trees.
+    n_layers is the tunable knob requested for this feature (config key
+    "finetune_n_layers", default 10).
+    """
+    leaf_param_modules = [
+        m for m in model.modules()
+        if len(list(m.children())) == 0 and list(m.parameters(recurse=False))
+    ]
+    selected = leaf_param_modules[-max(n_layers, 0):] if n_layers > 0 else []
+    params = []
+    for m in selected:
+        for p in m.parameters(recurse=False):
+            params.append(p)
+    return params
+
+
+def _do_cv_inline_finetune(
+    model_name: str,
+    model_store: dict,
+    models: dict,
+    image_path_history: list[str],
+    thresholds: dict,
+    drift_window: int,
+    run_path: Path | None = None,
+) -> bool:
+    """Periodic-retrain (PRT) fine-tune dispatcher for CV models.
+
+    Covers all three CV task families — dispatches on model_store[model_name]
+    ["type"] (set by _load_cv_model_store):
+      - "torchvision_classifier" -> _finetune_torchvision_classifier, or
+        _finetune_torchvision_classifier_tent if thresholds["retrain_tactic"]
+        == "tent" (imagenet/imagenet_c only — see DP25)
+      - "segformer_segmentation" -> _finetune_segformer_segmentation
+      - "yolo_detection"         -> _finetune_yolo_detection (needs run_path
+        for a temp on-disk YOLO dataset — ultralytics' training API is
+        filesystem-based, unlike the other two in-memory loops)
+
+    All three share the same label-free design (invariant I4 — no ground
+    truth read at runtime): pseudo-labels are the model's OWN high-confidence
+    predictions on the recent drift window, and only the last
+    `finetune_n_layers` parameterised layers are unfrozen (tunable, shared
+    across all three task types via _select_finetune_params) — full
+    end-to-end retraining of a CV backbone is far too costly to run inline,
+    on a schedule, inside a headless experiment loop. Each also applies a
+    safety valve comparing held-out confidence before/after, discarding the
+    fine-tune and restoring pre-tune weights if it drops too far.
+
+    Returns True on an accepted fine-tune, False if skipped (unsupported/
+    unloaded model, too few confident pseudo-labels, or safety-valve reject).
+    """
+    info = model_store.get(model_name)
+    if info is None:
+        return False
+
+    model_type = info.get("type")
+    if model_type == "torchvision_classifier":
+        # retrain_tactic (already present in every CV config as "pseudo_label",
+        # but never consumed by anything until now — see DP19/DP25) selects
+        # between the supervised pseudo-label path and TENT's entropy-
+        # minimization adaptation — classification only.
+        if thresholds.get("retrain_tactic", "pseudo_label") == "tent":
+            return _finetune_torchvision_classifier_tent(
+                model_name, model_store, models, image_path_history, thresholds, drift_window,
+            )
+        return _finetune_torchvision_classifier(
+            model_name, model_store, models, image_path_history, thresholds, drift_window,
+        )
+    elif model_type == "segformer_segmentation":
+        return _finetune_segformer_segmentation(
+            model_name, model_store, models, image_path_history, thresholds, drift_window,
+        )
+    elif model_type == "yolo_detection":
+        return _finetune_yolo_detection(
+            model_name, model_store, models, image_path_history, thresholds, drift_window, run_path,
+        )
+    else:
+        logger.debug("CV finetune: unrecognised model_store type '%s' for '%s'.",
+                     model_type, model_name)
+        return False
+
+
+def _finetune_torchvision_classifier(
+    model_name: str,
+    model_store: dict,
+    models: dict,
+    image_path_history: list[str],
+    thresholds: dict,
+    drift_window: int,
+) -> bool:
+    """Pseudo-labeled last-N-layer fine-tune for a torchvision classifier.
+    See _do_cv_inline_finetune's docstring for the shared design rationale.
+    """
+    info = model_store.get(model_name)
+    if info is None or info.get("type") != "torchvision_classifier":
+        return False
+
+    import torch
+    import torch.nn as nn
+    from PIL import Image
+
+    model = info["model"]
+    transform = info["transform"]
+
+    window = image_path_history[-drift_window:]
+    if not window:
+        return False
+
+    threshold = float(thresholds.get("pseudo_label_threshold", 0.8))
+    min_images = int(thresholds.get("finetune_min_images", 20))
+    n_layers = int(thresholds.get("finetune_n_layers", 10))
+    lr = float(thresholds.get("finetune_lr", 1e-4))
+    epochs = int(thresholds.get("finetune_epochs", 3))
+    tau_regression = float(thresholds.get("tau_regression", 0.05))
+    batch_size = int(thresholds.get("finetune_batch_size", 8))
+
+    # Step 1 — pseudo-label the window with the CURRENT (pre-tune) weights.
+    model.eval()
+    pseudo_paths: list[str] = []
+    pseudo_labels: list[int] = []
+    pseudo_confs: list[float] = []
+    with torch.no_grad():
+        for p in window:
+            try:
+                img = Image.open(p).convert("RGB")
+                x = transform(img).unsqueeze(0)
+                probs = torch.softmax(model(x), dim=1)
+                conf, cls = probs.max(dim=1)
+                conf = float(conf.item())
+                if conf >= threshold:
+                    pseudo_paths.append(p)
+                    pseudo_labels.append(int(cls.item()))
+                    pseudo_confs.append(conf)
+            except Exception as exc:
+                logger.debug("CV finetune pseudo-label failed for %s: %s", p, exc)
+
+    if len(pseudo_paths) < min_images:
+        logger.debug(
+            "CV finetune skipped for '%s': only %d/%d confident pseudo-labels (need %d).",
+            model_name, len(pseudo_paths), len(window), min_images,
+        )
+        return False
+
+    # Step 2 — hold out the last 20% (min 1) to sanity-check after fine-tuning.
+    n_holdout = max(1, len(pseudo_paths) // 5)
+    train_paths, holdout_paths = pseudo_paths[:-n_holdout], pseudo_paths[-n_holdout:]
+    train_labels = pseudo_labels[:-n_holdout]
+    pre_tune_conf = float(np.mean(pseudo_confs[-n_holdout:]))
+
+    if len(train_paths) < 2:
+        return False
+
+    # Snapshot for rollback if the safety valve trips.
+    pre_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+
+    try:
+        # Step 3 — freeze all but the last n_layers parameterised layers.
+        for p in model.parameters():
+            p.requires_grad_(False)
+        finetune_params = _select_finetune_params(model, n_layers)
+        if not finetune_params:
+            logger.warning("CV finetune: no parameters selected for '%s' (n_layers=%d).",
+                            model_name, n_layers)
+            return False
+        for p in finetune_params:
+            p.requires_grad_(True)
+
+        optimizer = torch.optim.Adam(finetune_params, lr=lr)
+        loss_fn = nn.CrossEntropyLoss()
+
+        model.train()
+        for _epoch in range(epochs):
+            for start in range(0, len(train_paths), batch_size):
+                batch_paths = train_paths[start : start + batch_size]
+                batch_labels = train_labels[start : start + batch_size]
+                if not batch_paths:
+                    continue
+                try:
+                    imgs = [transform(Image.open(p).convert("RGB")) for p in batch_paths]
+                except Exception as exc:
+                    logger.debug("CV finetune batch load failed: %s", exc)
+                    continue
+                x = torch.stack(imgs)
+                y = torch.tensor(batch_labels, dtype=torch.long)
+                optimizer.zero_grad()
+                loss_fn(model(x), y).backward()
+                optimizer.step()
+        model.eval()
+
+        # Step 4 — safety valve: re-check confidence on the SAME held-out images.
+        post_confs = []
+        with torch.no_grad():
+            for p in holdout_paths:
+                img = Image.open(p).convert("RGB")
+                x = transform(img).unsqueeze(0)
+                post_confs.append(float(torch.softmax(model(x), dim=1).max().item()))
+        post_tune_conf = float(np.mean(post_confs)) if post_confs else 0.0
+
+        if post_tune_conf < pre_tune_conf - tau_regression:
+            logger.info(
+                "CV finetune safety valve triggered for '%s': holdout confidence %.4f -> %.4f "
+                "(drop > tau_regression=%.4f). Discarding fine-tuned weights.",
+                model_name, pre_tune_conf, post_tune_conf, tau_regression,
+            )
+            model.load_state_dict(pre_state)
+            model.eval()
+            return False
+
+    finally:
+        for p in model.parameters():
+            p.requires_grad_(False)
+
+    # Step 5 — accepted: rebuild the predict closure so inference sees the new weights.
+    _m, _t = model, transform
+
+    def _new_predict(image_path, m=_m, t=_t) -> dict:
+        img = Image.open(str(image_path)).convert("RGB")
+        x = t(img).unsqueeze(0)
+        with torch.no_grad():
+            logits = m(x)
+            probs = torch.softmax(logits, dim=1)
+            proxy = float(probs.max().item())
+            pred_class = int(probs.argmax().item())
+        return {"proxy": proxy, "pred": pred_class}
+
+    models[model_name] = _new_predict
+    logger.info(
+        "CV finetune accepted for '%s': %d images, last %d layers unfrozen "
+        "(%d parameter tensors), holdout confidence %.4f -> %.4f.",
+        model_name, len(train_paths), n_layers, len(finetune_params), pre_tune_conf, post_tune_conf,
+    )
+    return True
+
+
+def _restore_bn_tracking(model, pre_state: dict) -> None:
+    """Undo core.tta.tent.configure_model()'s BatchNorm mutation.
+
+    configure_model() sets track_running_stats=False and running_mean/
+    running_var=None on every BN layer (so BN always uses fresh per-batch
+    statistics, per the paper). That De-registers those buffers entirely, so
+    a plain model.load_state_dict(pre_state) cannot restore them — this
+    helper re-enables tracking and re-registers the original buffers from a
+    state_dict snapshot taken BEFORE configure_model() ran. Used only by the
+    TENT safety-valve rollback path below.
+    """
+    import torch.nn as nn
+    for name, m in model.named_modules():
+        if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)):
+            m.track_running_stats = True
+            rm_key, rv_key, nbt_key = (
+                f"{name}.running_mean", f"{name}.running_var", f"{name}.num_batches_tracked",
+            )
+            if rm_key in pre_state:
+                m.running_mean = pre_state[rm_key].clone()
+                m.running_var = pre_state[rv_key].clone()
+                m.num_batches_tracked = pre_state[nbt_key].clone()
+
+
+def _finetune_torchvision_classifier_tent(
+    model_name: str,
+    model_store: dict,
+    models: dict,
+    image_path_history: list[str],
+    thresholds: dict,
+    drift_window: int,
+) -> bool:
+    """TENT (Wang, Shelhamer, Liu, Olshausen, Darrell — ICLR 2021) entropy-
+    minimization adaptation for a torchvision classifier — selected via the
+    "retrain_tactic": "tent" config key (present in every CV config as
+    "pseudo_label" already, previously never consumed by anything — DP19),
+    as an alternative to _finetune_torchvision_classifier's supervised
+    pseudo-label fine-tune (the default for every other CV dataset). See
+    context/DECISIONS_PENDING.md
+    DP25 for the full design rationale: imagenet/imagenet_c specifically,
+    since TENT's own headline robustness benchmark IS ImageNet-C, and
+    classification only — detection/segmentation already have natural drift
+    via their own domain-shift axes (weather/location/lighting), unlike
+    ImageNet's engineered corruption-based drift.
+
+    Reuses core/tta/tent.py's algorithm directly: configure_model() freezes
+    every parameter except each BatchNorm layer's affine scale/shift (typically
+    <1% of the model) and forces BN to estimate statistics fresh from each
+    batch; forward_and_adapt() runs one entropy-minimization gradient step per
+    batch. Unlike the supervised pseudo-label path:
+      - No confidence gating on individual images (finetune_n_layers/
+        pseudo_label_threshold do not apply) — TENT's entropy objective is
+        well-defined regardless of the model's current confidence, and the
+        paper adapts on every batch, confident or not.
+      - Adapts ALL BatchNorm layers throughout the network, not a suffix of
+        "last N layers" — this is the paper's own validated parameter set,
+        not a reduction of the supervised path's knob.
+      - Hyperparameters default to the paper's own ImageNet numbers
+        (tent_lr=2.5e-4, tent_batch_size=64, tent_steps=1 — SGD+momentum),
+        distinct config keys from finetune_lr/finetune_batch_size since the
+        two tactics have different validated regimes.
+    A confidence-based safety valve (tau_regression, same convention as the
+    supervised path) is kept for consistency with this codebase's established
+    caution, though the paper itself doesn't require one. Adaptation state
+    persists across repeated calls (no reset) — this event continues from
+    wherever the model's BN parameters already are, the harness-trigger-
+    granularity equivalent of the paper's "online" mode (see DP25 for why
+    this is episodic-per-retrain-event, not per individual inference step).
+    """
+    info = model_store.get(model_name)
+    if info is None or info.get("type") != "torchvision_classifier":
+        return False
+
+    import torch
+    from PIL import Image
+    from core.tta.tent import configure_model, collect_params, forward_and_adapt
+
+    model = info["model"]
+    transform = info["transform"]
+
+    window = image_path_history[-drift_window:]
+    if not window:
+        return False
+
+    min_images = int(thresholds.get("finetune_min_images", 20))
+    if len(window) < min_images:
+        logger.debug(
+            "CV finetune (tent) skipped for '%s': only %d images in window (need %d).",
+            model_name, len(window), min_images,
+        )
+        return False
+
+    lr = float(thresholds.get("tent_lr", 2.5e-4))
+    batch_size = int(thresholds.get("tent_batch_size", 64))
+    steps = int(thresholds.get("tent_steps", 1))
+    tau_regression = float(thresholds.get("tau_regression", 0.05))
+
+    # Step 1 — hold out the last 20% (min 1) to sanity-check after adapting.
+    n_holdout = max(1, len(window) // 5)
+    holdout_paths = window[-n_holdout:]
+    adapt_paths = window[:-n_holdout]
+    if len(adapt_paths) < 2:
+        return False
+
+    def _mean_confidence(paths: list[str]) -> float:
+        model.eval()
+        confs = []
+        with torch.no_grad():
+            for p in paths:
+                try:
+                    img = Image.open(p).convert("RGB")
+                    x = transform(img).unsqueeze(0)
+                    confs.append(float(torch.softmax(model(x), dim=1).max().item()))
+                except Exception as exc:
+                    logger.debug("CV finetune (tent) confidence check failed for %s: %s", p, exc)
+        return float(sum(confs) / len(confs)) if confs else 0.0
+
+    # Snapshot BEFORE configure_model() mutates BN tracking — needed both for
+    # ordinary weight rollback and (via _restore_bn_tracking) to undo that
+    # BN-specific mutation if the safety valve rejects this event.
+    pre_tune_conf = _mean_confidence(holdout_paths)
+    pre_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+
+    try:
+        configure_model(model)
+        try:
+            params, _ = collect_params(model)
+        except ValueError as exc:
+            logger.warning("CV finetune (tent): %s", exc)
+            return False
+        optimizer = torch.optim.SGD(params, lr=lr, momentum=0.9)
+
+        adapted_batches = 0
+        for start in range(0, len(adapt_paths), batch_size):
+            batch_paths = adapt_paths[start : start + batch_size]
+            try:
+                imgs = [transform(Image.open(p).convert("RGB")) for p in batch_paths]
+            except Exception as exc:
+                logger.debug("CV finetune (tent) batch load failed: %s", exc)
+                continue
+            if not imgs:
+                continue
+            x = torch.stack(imgs)
+            for _step in range(steps):
+                forward_and_adapt(x, model, optimizer)
+            adapted_batches += 1
+
+        if adapted_batches == 0:
+            _restore_bn_tracking(model, pre_state)
+            model.load_state_dict(pre_state, strict=False)
+            return False
+
+        model.eval()
+
+        post_tune_conf = _mean_confidence(holdout_paths)
+
+        if post_tune_conf < pre_tune_conf - tau_regression:
+            logger.info(
+                "CV finetune (tent) safety valve triggered for '%s': holdout confidence "
+                "%.4f -> %.4f (drop > tau_regression=%.4f). Discarding TENT-adapted weights.",
+                model_name, pre_tune_conf, post_tune_conf, tau_regression,
+            )
+            _restore_bn_tracking(model, pre_state)
+            model.load_state_dict(pre_state, strict=False)
+            model.eval()
+            return False
+
+    finally:
+        for p in model.parameters():
+            p.requires_grad_(False)
+
+    _m, _t = model, transform
+
+    def _new_predict(image_path, m=_m, t=_t) -> dict:
+        img = Image.open(str(image_path)).convert("RGB")
+        x = t(img).unsqueeze(0)
+        with torch.no_grad():
+            logits = m(x)
+            probs = torch.softmax(logits, dim=1)
+            proxy = float(probs.max().item())
+            pred_class = int(probs.argmax().item())
+        return {"proxy": proxy, "pred": pred_class}
+
+    models[model_name] = _new_predict
+    logger.info(
+        "CV finetune (tent) accepted for '%s': %d images (%d batches), "
+        "holdout confidence %.4f -> %.4f.",
+        model_name, len(adapt_paths), adapted_batches, pre_tune_conf, post_tune_conf,
+    )
+    return True
+
+
+def _finetune_segformer_segmentation(
+    model_name: str,
+    model_store: dict,
+    models: dict,
+    image_path_history: list[str],
+    thresholds: dict,
+    drift_window: int,
+) -> bool:
+    """Pseudo-labeled last-N-layer fine-tune for a SegFormer segmentation model.
+
+    Pseudo-labels are per-pixel: the argmax class at each pixel of the
+    model's own logits, with low-confidence pixels marked `ignore_index`
+    (255, matching the Cityscapes/ACDC convention already used elsewhere in
+    this codebase) so the loss only trains on pixels the model is already
+    confident about. The per-IMAGE gate (whether to include an image in the
+    fine-tune set at all) reuses the same mean-max-softmax "proxy" value
+    adapters/loaders.py::segformer_loader already computes for inference —
+    so pseudo_label_threshold means the same thing here as it does for
+    classification. See _do_cv_inline_finetune's docstring for the shared
+    design (layer selection, safety valve).
+    """
+    info = model_store.get(model_name)
+    if info is None or info.get("type") != "segformer_segmentation":
+        return False
+
+    import torch
+    import torch.nn as nn
+    from PIL import Image
+
+    model = info["model"]
+    processor = info["processor"]
+    ignore_index = 255
+
+    window = image_path_history[-drift_window:]
+    if not window:
+        return False
+
+    threshold = float(thresholds.get("pseudo_label_threshold", 0.7))
+    min_images = int(thresholds.get("finetune_min_images", 20))
+    n_layers = int(thresholds.get("finetune_n_layers", 10))
+    lr = float(thresholds.get("finetune_lr", 1e-4))
+    epochs = int(thresholds.get("finetune_epochs", 3))
+    tau_regression = float(thresholds.get("tau_regression", 0.05))
+    batch_size = int(thresholds.get("finetune_batch_size", 4))  # segmentation tensors are larger
+
+    def _encode(path: str):
+        img = Image.open(path).convert("RGB")
+        return processor(images=img, return_tensors="pt")["pixel_values"]
+
+    def _pseudo_mask(logits: torch.Tensor) -> tuple[torch.Tensor, float]:
+        """(H, W) int64 mask with low-confidence pixels set to ignore_index,
+        plus the mean-max-softmax proxy over the WHOLE image (matching
+        segformer_loader's inference-time proxy definition exactly)."""
+        probs = torch.softmax(logits, dim=1)
+        conf, cls = probs.max(dim=1)  # (1, H, W) each
+        proxy = float(conf.mean().item())
+        mask = cls.clone()
+        mask[conf < threshold] = ignore_index
+        return mask.squeeze(0).long(), proxy
+
+    # Step 1 — pseudo-label the window with the CURRENT (pre-tune) weights.
+    model.eval()
+    pseudo_paths: list[str] = []
+    pseudo_masks: list[torch.Tensor] = []
+    pseudo_confs: list[float] = []
+    with torch.no_grad():
+        for p in window:
+            try:
+                x = _encode(p)
+                logits = model(pixel_values=x).logits
+                mask, proxy = _pseudo_mask(logits)
+                if proxy >= threshold and bool((mask != ignore_index).any()):
+                    pseudo_paths.append(p)
+                    pseudo_masks.append(mask)
+                    pseudo_confs.append(proxy)
+            except Exception as exc:
+                logger.debug("CV finetune (segformer) pseudo-label failed for %s: %s", p, exc)
+
+    if len(pseudo_paths) < min_images:
+        logger.debug(
+            "CV finetune skipped for '%s': only %d/%d confident pseudo-labels (need %d).",
+            model_name, len(pseudo_paths), len(window), min_images,
+        )
+        return False
+
+    # Step 2 — hold out the last 20% (min 1) to sanity-check after fine-tuning.
+    n_holdout = max(1, len(pseudo_paths) // 5)
+    train_paths = pseudo_paths[:-n_holdout]
+    train_masks = pseudo_masks[:-n_holdout]
+    holdout_paths = pseudo_paths[-n_holdout:]
+    pre_tune_conf = float(np.mean(pseudo_confs[-n_holdout:]))
+
+    if len(train_paths) < 2:
+        return False
+
+    pre_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+
+    try:
+        for p in model.parameters():
+            p.requires_grad_(False)
+        finetune_params = _select_finetune_params(model, n_layers)
+        if not finetune_params:
+            logger.warning("CV finetune: no parameters selected for '%s' (n_layers=%d).",
+                            model_name, n_layers)
+            return False
+        for p in finetune_params:
+            p.requires_grad_(True)
+
+        optimizer = torch.optim.Adam(finetune_params, lr=lr)
+        loss_fn = nn.CrossEntropyLoss(ignore_index=ignore_index)
+
+        model.train()
+        for _epoch in range(epochs):
+            for start in range(0, len(train_paths), batch_size):
+                batch_paths = train_paths[start : start + batch_size]
+                batch_masks = train_masks[start : start + batch_size]
+                if not batch_paths:
+                    continue
+                try:
+                    xs = [_encode(p) for p in batch_paths]
+                except Exception as exc:
+                    logger.debug("CV finetune (segformer) batch load failed: %s", exc)
+                    continue
+                x = torch.cat(xs, dim=0)
+                optimizer.zero_grad()
+                total_loss = None
+                logits = model(pixel_values=x).logits
+                for i, mask in enumerate(batch_masks):
+                    # Logits and pseudo-mask share the same (decode-head) resolution
+                    # by construction — both were derived from the same forward pass
+                    # shape, no upsample/downsample needed for a self-training signal.
+                    li = loss_fn(logits[i : i + 1], mask.unsqueeze(0))
+                    total_loss = li if total_loss is None else total_loss + li
+                if total_loss is not None:
+                    total_loss.backward()
+                    optimizer.step()
+        model.eval()
+
+        # Step 4 — safety valve: re-check confidence on the SAME held-out images.
+        post_confs = []
+        with torch.no_grad():
+            for p in holdout_paths:
+                x = _encode(p)
+                logits = model(pixel_values=x).logits
+                post_confs.append(float(torch.softmax(logits, dim=1).max(dim=1).values.mean().item()))
+        post_tune_conf = float(np.mean(post_confs)) if post_confs else 0.0
+
+        if post_tune_conf < pre_tune_conf - tau_regression:
+            logger.info(
+                "CV finetune safety valve triggered for '%s': holdout confidence %.4f -> %.4f "
+                "(drop > tau_regression=%.4f). Discarding fine-tuned weights.",
+                model_name, pre_tune_conf, post_tune_conf, tau_regression,
+            )
+            model.load_state_dict(pre_state)
+            model.eval()
+            return False
+
+    finally:
+        for p in model.parameters():
+            p.requires_grad_(False)
+
+    _m, _proc = model, processor
+
+    def _new_predict(image_path, m=_m, proc=_proc) -> dict:
+        img = Image.open(str(image_path)).convert("RGB")
+        enc = proc(images=img, return_tensors="pt")
+        with torch.no_grad():
+            out = m(**enc)
+            probs = torch.softmax(out.logits, dim=1)
+            proxy = float(probs.max(dim=1).values.mean().item())
+            pred_mask = out.logits.argmax(dim=1).squeeze(0).byte().cpu().numpy()
+        return {"proxy": proxy, "pred": pred_mask}
+
+    models[model_name] = _new_predict
+    logger.info(
+        "CV finetune accepted for '%s': %d images, last %d layers unfrozen "
+        "(%d parameter tensors), holdout confidence %.4f -> %.4f.",
+        model_name, len(train_paths), n_layers, len(finetune_params), pre_tune_conf, post_tune_conf,
+    )
+    return True
+
+
+def _finetune_yolo_detection(
+    model_name: str,
+    model_store: dict,
+    models: dict,
+    image_path_history: list[str],
+    thresholds: dict,
+    drift_window: int,
+    run_path: Path | None,
+) -> bool:
+    """Pseudo-labeled last-N-layer fine-tune for a YOLO detection model.
+
+    Adapted from managed_system_cv/retrain_tactics/pseudo_label.py (the
+    existing, if currently-disconnected — see DP19 — reference
+    implementation for YOLO pseudo-label fine-tuning), with two changes to
+    match this harness's design:
+      1. Layer selection uses the same architecture-agnostic
+         _select_finetune_params(model.model, n_layers) as the other two CV
+         task types, instead of pseudo_label.py's "only the very last
+         top-level child module" scheme — one consistent finetune_n_layers
+         knob across all CV tasks, per the request that added this feature.
+      2. A held-out-confidence safety valve is applied here too (pseudo_label.py
+         has its own, functionally equivalent version).
+
+    ultralytics' training API (model.train(...)) is filesystem-based, not an
+    in-memory batch loop like the other two task types — this writes a small
+    temporary YOLO-format dataset under run_path and cleans it up afterward.
+    """
+    info = model_store.get(model_name)
+    if info is None or info.get("type") != "yolo_detection":
+        return False
+    if run_path is None:
+        logger.warning("CV finetune (yolo): run_path not provided — cannot stage a temp dataset.")
+        return False
+
+    import shutil
+    model = info["model"]
+    nc = info.get("nc", 80)
+
+    window = image_path_history[-drift_window:]
+    if not window:
+        return False
+
+    threshold = float(thresholds.get("pseudo_label_threshold", 0.5))
+    min_images = int(thresholds.get("finetune_min_images", 20))
+    n_layers = int(thresholds.get("finetune_n_layers", 10))
+    lr = float(thresholds.get("finetune_lr", 1e-4))
+    epochs = int(thresholds.get("finetune_epochs", 3))
+    tau_regression = float(thresholds.get("tau_regression", 0.05))
+    batch_size = int(thresholds.get("finetune_batch_size", 4))
+
+    def _mean_conf(paths: list[str]) -> float:
+        confs: list[float] = []
+        for p in paths:
+            results = model.predict(str(p), verbose=False)
+            if results and results[0].boxes is not None and len(results[0].boxes) > 0:
+                confs.extend(results[0].boxes.conf.tolist())
+        return float(np.mean(confs)) if confs else 0.0
+
+    # Step 1 — held-out confidence BEFORE any pseudo-labeling/training touches the model.
+    n_holdout = max(1, len(window) // 5)
+    holdout_paths = window[-n_holdout:]
+    train_candidates = window[:-n_holdout]
+    pre_tune_conf = _mean_conf(holdout_paths)
+
+    # Step 2 — pseudo-label the training candidates (boxes above threshold).
+    from pathlib import Path as _Path
+    pseudo_dir = (run_path or _Path(".")) / f"_yolo_pseudo_tmp_{model_name}"
+    img_dir = pseudo_dir / "images"
+    lbl_dir = pseudo_dir / "labels"
+    if pseudo_dir.exists():
+        shutil.rmtree(pseudo_dir, ignore_errors=True)
+    img_dir.mkdir(parents=True, exist_ok=True)
+    lbl_dir.mkdir(parents=True, exist_ok=True)
+
+    kept = 0
+    try:
+        for p in train_candidates:
+            try:
+                results = model.predict(str(p), conf=threshold, verbose=False)
+            except Exception as exc:
+                logger.debug("CV finetune (yolo) predict failed for %s: %s", p, exc)
+                continue
+            if not results or results[0].boxes is None or len(results[0].boxes) == 0:
+                continue
+            lines = []
+            for box in results[0].boxes:
+                cls = int(box.cls[0])
+                cx, cy, w, h = box.xywhn[0].tolist()
+                lines.append(f"{cls} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}")
+            if not lines:
+                continue
+            src = _Path(p)
+            shutil.copy(src, img_dir / src.name)
+            (lbl_dir / f"{src.stem}.txt").write_text("\n".join(lines))
+            kept += 1
+
+        if kept < min_images:
+            logger.debug(
+                "CV finetune skipped for '%s': only %d/%d images with confident pseudo-boxes (need %d).",
+                model_name, kept, len(train_candidates), min_images,
+            )
+            return False
+
+        # Step 3 — freeze all but the last n_layers parameterised layers (shared knob).
+        for p in model.model.parameters():
+            p.requires_grad_(False)
+        finetune_params = _select_finetune_params(model.model, n_layers)
+        if not finetune_params:
+            logger.warning("CV finetune: no parameters selected for '%s' (n_layers=%d).",
+                            model_name, n_layers)
+            return False
+        for p in finetune_params:
+            p.requires_grad_(True)
+
+        names_map = "{ " + ", ".join(f"{i}: {i}" for i in range(nc)) + " }"
+        train_yaml = pseudo_dir / "pseudo_retrain.yaml"
+        train_yaml.write_text(
+            f"path: {pseudo_dir.resolve()}\n"
+            f"train: images\n"
+            f"val: images\n"
+            f"nc: {nc}\n"
+            f"names: {names_map}\n"
+        )
+
+        try:
+            model.train(
+                data=str(train_yaml), epochs=epochs, imgsz=640, batch=batch_size,
+                workers=2, patience=max(epochs, 1), pretrained=False, cache="disk",
+                lr0=lr, verbose=False,
+            )
+        except Exception as exc:
+            logger.warning("CV finetune (yolo) train() failed for '%s': %s", model_name, exc)
+            return False
+
+        # Step 4 — safety valve.
+        post_tune_conf = _mean_conf(holdout_paths)
+        if post_tune_conf < pre_tune_conf - tau_regression:
+            logger.info(
+                "CV finetune safety valve triggered for '%s': holdout confidence %.4f -> %.4f "
+                "(drop > tau_regression=%.4f). Weights already mutated in-place by "
+                "ultralytics — model_store entry is now stale; the caller's "
+                "_archive_in_vmr(tag='pre_retrain') snapshot (taken before this call) "
+                "is the recovery path, not an in-memory restore.",
+                model_name, pre_tune_conf, post_tune_conf, tau_regression,
+            )
+            return False
+
+    finally:
+        for p in model.model.parameters():
+            p.requires_grad_(False)
+        shutil.rmtree(pseudo_dir, ignore_errors=True)
+
+    def _new_predict(inputs, m=model) -> Any:
+        return m(inputs, verbose=False)
+
+    models[model_name] = _new_predict
+    logger.info(
+        "CV finetune accepted for '%s': %d images, last %d layers unfrozen "
+        "(%d parameter tensors), holdout confidence %.4f -> %.4f.",
+        model_name, kept, n_layers, len(finetune_params), pre_tune_conf, post_tune_conf,
+    )
+    return True
+
+
 def _do_vmr_restore(
     version_path: str,
     model_name: str,
@@ -643,13 +2035,15 @@ def _do_vmr_restore(
     """
     import pickle
     try:
+        existing = model_store.get(model_name) or {}
+        retrain_params = existing.get("retrain_params", {})
         if version_path.endswith((".pth", ".pt")):
             from adapters.loaders import LSTMModel
             import torch
             m = LSTMModel()
             m.load_state_dict(torch.load(version_path, map_location="cpu", weights_only=False))
             m.eval()
-            model_store[model_name] = {"type": "lstm", "model": m}
+            model_store[model_name] = {"type": "lstm", "model": m, "retrain_params": retrain_params}
             _m = m
             def _new_predict(inputs: np.ndarray, m=_m) -> float:
                 import torch as _t
@@ -659,7 +2053,7 @@ def _do_vmr_restore(
         else:
             with open(version_path, "rb") as f:
                 m = pickle.load(f)
-            model_store[model_name] = {"type": "sklearn", "model": m}
+            model_store[model_name] = {"type": "sklearn", "model": m, "retrain_params": retrain_params}
             _m = m
             def _new_predict(inputs: np.ndarray, m=_m) -> float:
                 return float(m.predict(inputs.reshape(1, -1))[0])
@@ -667,6 +2061,149 @@ def _do_vmr_restore(
         return True
     except Exception as exc:
         logger.warning("VMR restore failed for '%s' from %s: %s", model_name, version_path, exc)
+        return False
+
+
+def _do_cv_vmr_restore(
+    version_path: str,
+    model_name: str,
+    models: dict,
+    model_store: dict,
+) -> bool:
+    """CV counterpart of _do_vmr_restore — dispatches on model_store's
+    recorded type rather than file extension (LSTM, torchvision classifier,
+    and SegFormer checkpoints are all .pt/.pth; only the YOLO/ultralytics
+    checkpoint is self-describing enough to not need this).
+
+    Requires model_store[model_name] to already describe a known CV type
+    (set by _load_cv_model_store()); rebuilds a fresh model of that same
+    architecture and loads the VMR-archived weights into it.
+    """
+    info = model_store.get(model_name)
+    model_type = info.get("type") if info else None
+
+    if model_type == "torchvision_classifier":
+        return _cv_vmr_restore_torchvision_classifier(version_path, model_name, models, model_store, info)
+    elif model_type == "segformer_segmentation":
+        return _cv_vmr_restore_segformer(version_path, model_name, models, model_store, info)
+    elif model_type == "yolo_detection":
+        return _cv_vmr_restore_yolo(version_path, model_name, models, model_store)
+    else:
+        logger.warning(
+            "CV VMR restore skipped for '%s': model_store has no known CV "
+            "entry to restore into (type=%s).", model_name, model_type,
+        )
+        return False
+
+
+def _cv_vmr_restore_torchvision_classifier(version_path, model_name, models, model_store, info) -> bool:
+    try:
+        import torch
+        import torchvision.models as tv
+
+        arch = info["arch"]
+        num_classes = info["num_classes"]
+        create_fn = getattr(tv, arch)
+        model = create_fn(weights=None)
+        if arch == "efficientnet_b0":
+            model.classifier[1] = torch.nn.Linear(model.classifier[1].in_features, num_classes)
+        else:  # resnet50 / resnet101
+            model.fc = torch.nn.Linear(model.fc.in_features, num_classes)
+
+        state = torch.load(version_path, map_location="cpu", weights_only=False)
+        model.load_state_dict(state)
+        model.eval()
+
+        transform = info["transform"]
+        model_store[model_name] = {
+            "type": "torchvision_classifier",
+            "model": model,
+            "transform": transform,
+            "arch": arch,
+            "num_classes": num_classes,
+        }
+
+        from PIL import Image
+        _m, _t = model, transform
+
+        def _new_predict(image_path, m=_m, t=_t) -> dict:
+            img = Image.open(str(image_path)).convert("RGB")
+            x = t(img).unsqueeze(0)
+            with torch.no_grad():
+                logits = m(x)
+                probs = torch.softmax(logits, dim=1)
+                proxy = float(probs.max().item())
+                pred_class = int(probs.argmax().item())
+            return {"proxy": proxy, "pred": pred_class}
+
+        models[model_name] = _new_predict
+        return True
+    except Exception as exc:
+        logger.warning("CV VMR restore failed for '%s' from %s: %s", model_name, version_path, exc)
+        return False
+
+
+def _cv_vmr_restore_segformer(version_path, model_name, models, model_store, info) -> bool:
+    try:
+        import torch
+        from transformers import SegformerForSemanticSegmentation, SegformerConfig
+        from adapters.loaders import _SEGFORMER_ARCH
+
+        arch = info["arch"]
+        num_classes = info["num_classes"]
+        cfg = SegformerConfig(**_SEGFORMER_ARCH[arch], num_labels=num_classes)
+        model = SegformerForSemanticSegmentation(cfg)
+        state = torch.load(version_path, map_location="cpu", weights_only=False)
+        model.load_state_dict(state, strict=False)
+        model.eval()
+
+        processor = info["processor"]
+        model_store[model_name] = {
+            "type": "segformer_segmentation",
+            "model": model,
+            "processor": processor,
+            "arch": arch,
+            "num_classes": num_classes,
+        }
+
+        from PIL import Image
+        _m, _proc = model, processor
+
+        def _new_predict(image_path, m=_m, proc=_proc) -> dict:
+            img = Image.open(str(image_path)).convert("RGB")
+            enc = proc(images=img, return_tensors="pt")
+            with torch.no_grad():
+                out = m(**enc)
+                probs = torch.softmax(out.logits, dim=1)
+                proxy = float(probs.max(dim=1).values.mean().item())
+                pred_mask = out.logits.argmax(dim=1).squeeze(0).byte().cpu().numpy()
+            return {"proxy": proxy, "pred": pred_mask}
+
+        models[model_name] = _new_predict
+        return True
+    except Exception as exc:
+        logger.warning("CV VMR restore failed for '%s' from %s: %s", model_name, version_path, exc)
+        return False
+
+
+def _cv_vmr_restore_yolo(version_path, model_name, models, model_store) -> bool:
+    """YOLO checkpoints (via ultralytics .save()) are self-describing —
+    no architecture bookkeeping needed, unlike the other two CV types."""
+    try:
+        model = _build_yolo_model(version_path)
+        model_store[model_name] = {
+            "type": "yolo_detection",
+            "model": model,
+            "nc": model_store.get(model_name, {}).get("nc", 80) if model_store.get(model_name) else 80,
+        }
+
+        def _new_predict(inputs, m=model) -> Any:
+            return m(inputs, verbose=False)
+
+        models[model_name] = _new_predict
+        return True
+    except Exception as exc:
+        logger.warning("CV VMR restore failed for '%s' from %s: %s", model_name, version_path, exc)
         return False
 
 
@@ -697,10 +2234,16 @@ def _archive_in_vmr(
         return
 
     try:
-        if info["type"] == "lstm":
+        if info["type"] in ("lstm", "torchvision_classifier", "segformer_segmentation"):
             import torch
             tmp_path = str(run_path / f"_vmr_tmp_{model_name}.pth")
             torch.save(info["model"].state_dict(), tmp_path)
+        elif info["type"] == "yolo_detection":
+            # ultralytics' own .save() writes a self-describing checkpoint
+            # (architecture + weights) — reloadable directly via YOLO(path),
+            # unlike a bare state_dict which would need external arch bookkeeping.
+            tmp_path = str(run_path / f"_vmr_tmp_{model_name}.pt")
+            info["model"].save(tmp_path)
         else:
             tmp_path = str(run_path / f"_vmr_tmp_{model_name}.pkl")
             with open(tmp_path, "wb") as f:
@@ -874,6 +2417,12 @@ def run_experiment(
         if any_missing:
             logger.info("Some model weights missing — training inline on training split ...")
             _train_regression_models(dataset_config, train_values, scaler)
+    else:
+        train_label_paths, train_inline_labels = adapter.train_labels()
+        _train_cv_models_if_missing(
+            dataset_config, cv_task, train_paths, train_label_paths, train_inline_labels,
+            thresholds, run_path,
+        )
 
     models = _load_models(dataset_config, configs_path)
     available_models = [m for m, fn in models.items() if fn is not None]
@@ -892,13 +2441,21 @@ def run_experiment(
             )
         available_models = [pin_model]
 
-    # Load raw model objects for inline retraining (regression only)
-    model_store: dict = _load_model_store(dataset_config) if not is_cv else {}
+    # Load raw model objects for inline retraining/fine-tuning.
+    # Regression: LSTM/sklearn objects (_load_model_store). CV: all three
+    # task families — classification/segmentation/detection — via
+    # _load_cv_model_store; a model that fails to load gets a None entry and
+    # PRT/VMR cleanly no-ops for it (see that function's docstring).
+    model_store: dict = (
+        _load_cv_model_store(dataset_config, cv_task) if is_cv
+        else _load_model_store(dataset_config)
+    )
     seq_length: int = int(dataset_config.get("seq_length", 5))
 
-    # ── VMR (regression only) ─────────────────────────────────────────────────
-    # Scoped per dataset so that pems/lstm and uci_electricity/lstm are
-    # independent namespaces and cannot cross-contaminate each other.
+    # ── VMR ───────────────────────────────────────────────────────────────────
+    # Scoped per dataset so that pems/lstm and uci_electricity/lstm (or
+    # imagenet/efficientnet_b0 vs imagenet_c/efficientnet_b0) are independent
+    # namespaces and cannot cross-contaminate each other.
     _vmr_dir = _TOOL_DIR / "knowledge" / "vmr" / dataset_name
     _vmr_dir.mkdir(parents=True, exist_ok=True)
     vmr = VMR(base_dir=str(_vmr_dir))
@@ -909,6 +2466,16 @@ def run_experiment(
         # Mirrors managed_system_regression/train.py's versionedMR/ seeding.
         _train_hist, _ = np.histogram(train_values, bins=_DRIFT_N_BINS)
         _initial_dist = {"type": "histogram", "data": _train_hist.tolist()}
+        _seed_vmr_initial(available_models, dataset_config, vmr, _initial_dist)
+    else:
+        # Same idea for CV: seed with the luminance reference already computed
+        # for the drift detector (_build_cv_reference), so a "replace" match is
+        # reachable from the first drift event even before any PRT fine-tune
+        # has happened. _seed_vmr_initial only copies the weights file — it is
+        # architecture-agnostic and needs no CV-specific changes.
+        with open(ref_dist_path) as _f:
+            _cv_ref = json.load(_f)
+        _initial_dist = {"type": "histogram", "data": _cv_ref["histogram"]}
         _seed_vmr_initial(available_models, dataset_config, vmr, _initial_dist)
 
     # ── Planner ───────────────────────────────────────────────────────────────
@@ -924,6 +2491,10 @@ def run_experiment(
     current_model = available_models[0]
     mape_info = _initial_mape_info(models)
     value_history: list[float] = []
+    # CV only: rolling history of recent image paths, for PRT pseudo-label
+    # fine-tuning (_do_cv_inline_finetune) — value_history holds luminance
+    # floats for drift detection, not the paths themselves.
+    image_path_history: list[str] = []
 
     # Batch accumulators (reset every monitor_interval steps)
     batch_y_true: list[float] = []
@@ -933,6 +2504,7 @@ def run_experiment(
     # Predictions log (written to CSV at end)
     prediction_rows: list[dict] = []
     mape_events: list[dict] = []
+    planner_decisions: list[dict] = []  # Phase 0.1: per-decision log with EMA snapshots
 
     # ── Run metadata ──────────────────────────────────────────────────────────
     start_ts = datetime.now(timezone.utc).isoformat()
@@ -979,6 +2551,7 @@ def run_experiment(
             # Luminance drives the drift detector (luminance_kl strategy)
             luminance = _compute_image_luminance(image_path)
             value_history.append(luminance)
+            image_path_history.append(image_path)
 
             batch_y_true.append(proxy_acc)
             batch_y_pred.append(proxy_acc)  # placeholder; accuracy= kwarg used in monitor
@@ -988,6 +2561,7 @@ def run_experiment(
                 "step": step,
                 "proxy_acc": round(proxy_acc, 6),
                 "active_model": current_model,
+                "planner": planner_name,
                 "energy_uJ": round(energy_uJ, 4),
                 "energy_valid": _em.valid,
             })
@@ -1031,6 +2605,11 @@ def run_experiment(
         # ── MAPE cycle ────────────────────────────────────────────────────────
         step += 1
         if step % monitor_interval == 0 and batch_y_true:
+            # Wrap the full MAPE cycle so that retrain, VMR restore, and heavy
+            # planner computation are attributed to mape_k_energy_uJ instead of
+            # bleeding into the adjacent inference step RAPL readings.
+            _mape_em = EnergyMeter("mape_cycle", backend=energy_backend)
+            _mape_em.__enter__()
             # Monitor
             if is_cv:
                 batch_proxy = float(np.mean(batch_y_true))
@@ -1049,15 +2628,18 @@ def run_experiment(
             violation = _analyse_violation(telemetry, mape_info, thresholds)
 
             # Analyse: drift? Build distribution snapshot for VMR matching first.
+            # Works identically for both domains — value_history holds true
+            # values for regression, luminance for CV, and drift_detector.window_size
+            # already reflects each domain's own configured window.
             current_dist: dict | None = None
-            if not is_cv and drift_detector._bin_edges is not None:
-                _window = value_history[-_DRIFT_WINDOW_SIZE:]
-                if len(_window) >= _DRIFT_WINDOW_SIZE:
+            if drift_detector._bin_edges is not None:
+                _window = value_history[-drift_detector.window_size:]
+                if len(_window) >= drift_detector.window_size:
                     _hist, _ = np.histogram(_window, bins=drift_detector._bin_edges)
                     current_dist = {"type": "histogram", "data": _hist.tolist()}
             drift_result = _analyse_drift(
                 value_history, drift_detector, thresholds,
-                vmr=vmr if not is_cv else None,
+                vmr=vmr,
                 current_model=current_model,
                 current_distribution=current_dist,
             )
@@ -1065,13 +2647,18 @@ def run_experiment(
             # Update energy boundary (B1 fix)
             _update_energy_boundary(mape_info, telemetry, thresholds)
 
-            # Plan
-            with EnergyMeter("mape_plan", backend=energy_backend) as _plan_em:
-                decision = _plan(
-                    violation, drift_result, current_model,
-                    available_models, mape_info, thresholds, planner,
-                    current_step=step,
-                )
+            # Phase 1.4: record that current_model was active at this step
+            mape_info["last_observed_step"][current_model] = step
+            mape_info["steps_since_last_switch"] = (
+                mape_info.get("steps_since_last_switch", 0) + 1
+            )
+
+            # Plan (runs inside the outer mape_cycle EnergyMeter — nesting forbidden)
+            decision = _plan(
+                violation, drift_result, current_model,
+                available_models, mape_info, thresholds, planner,
+                current_step=step,
+            )
 
             # EMA head-start: if the planner noops while some models have never
             # been observed (EMA still exactly at the 0.5 initialisation value),
@@ -1095,16 +2682,42 @@ def run_experiment(
                         )
                         logger.info("ema_head_start: forcing trial of %s", _trial)
 
-            # Execute — VMR restore or inline retrain for drift; switch for score/energy
-            plan_energy_uJ = _plan_em.total_uJ or 0.0
-            if decision.action in ("retrain", "replace") and not is_cv:
-                mape_info["event_counters"]["mape_k_energy_uJ"] += plan_energy_uJ
+            # Phase 0.1: per-decision log with EMA snapshots captured at decision time
+            planner_decisions.append({
+                "step": step,
+                "violation": violation,
+                "drift_detected": drift_result["drift_detected"],
+                "decision_action": decision.action,
+                "decision_model": decision.model,
+                "decision_reason": decision.reason,
+                "current_model": current_model,
+                **{f"ema_score_{m}": round(mape_info["ema_scores"].get(m, 0.5), 6)
+                   for m in available_models},
+                **{f"ema_acc_{m}": round(mape_info["ema_accuracy"].get(m, 0.5), 6)
+                   for m in available_models},
+                **{f"ema_eng_{m}": round(mape_info["ema_energy"].get(m, 0.5), 6)
+                   for m in available_models},
+            })
+
+            # Phase 1: count noops that occur despite a violation being active
+            if violation is not None and decision.action == "noop":
+                mape_info["event_counters"]["noop_on_violation"] = (
+                    mape_info["event_counters"].get("noop_on_violation", 0) + 1
+                )
+
+            # Execute — VMR restore or inline retrain/fine-tune for drift; switch for score/energy
+            if decision.action in ("retrain", "replace"):
                 vmr_done = False
 
                 if decision.action == "replace" and decision.version_path:
-                    vmr_done = _do_vmr_restore(
-                        decision.version_path, current_model, models, model_store,
-                    )
+                    if is_cv:
+                        vmr_done = _do_cv_vmr_restore(
+                            decision.version_path, current_model, models, model_store,
+                        )
+                    else:
+                        vmr_done = _do_vmr_restore(
+                            decision.version_path, current_model, models, model_store,
+                        )
                     if vmr_done:
                         mape_info["event_counters"]["vmr_events"] += 1
                         logger.info(
@@ -1125,12 +2738,26 @@ def run_experiment(
                         tag="pre_retrain",
                         proxy_score=mape_info["ema_scores"].get(current_model),
                     )
-                    retrained = _do_inline_retrain(
-                        current_model, model_store, models, value_history,
-                        scaler=scaler,
-                        seq_length=seq_length,
-                        drift_window=_DRIFT_WINDOW_SIZE,
-                    )
+                    if is_cv:
+                        # PRT fine-tune: last finetune_n_layers layers only,
+                        # pseudo-labeled (label-free, invariant I4). Covers
+                        # all three CV task types (classification/segmentation/
+                        # detection — see _do_cv_inline_finetune's docstring).
+                        # No-ops cleanly (False) when a model failed to load
+                        # or too few confident pseudo-labels exist in the window.
+                        retrained = _do_cv_inline_finetune(
+                            current_model, model_store, models, image_path_history,
+                            thresholds=thresholds,
+                            drift_window=int(thresholds.get("drift_window_size", _DRIFT_WINDOW_SIZE)),
+                            run_path=run_path,
+                        )
+                    else:
+                        retrained = _do_inline_retrain(
+                            current_model, model_store, models, value_history,
+                            scaler=scaler,
+                            seq_length=seq_length,
+                            drift_window=_DRIFT_WINDOW_SIZE,
+                        )
                     if retrained:
                         mape_info["event_counters"]["retrains"] += 1
                         logger.debug("Inline retrain: %s  (%s)", current_model, decision.reason)
@@ -1148,10 +2775,15 @@ def run_experiment(
             else:
                 new_model = _execute(
                     decision, current_model, mape_info,
-                    energy_uJ=plan_energy_uJ,
+                    energy_uJ=0.0,
                 )
+            _mape_em.__exit__(None, None, None)
+            mape_info["event_counters"]["mape_k_energy_uJ"] += (_mape_em.total_uJ or 0.0)
             old_model = current_model
             current_model = new_model
+            if current_model != old_model:
+                mape_info["steps_since_last_switch"] = 0
+                mape_info["last_observed_step"][current_model] = step
 
             mape_events.append({
                 "step": step,
@@ -1270,6 +2902,17 @@ def run_experiment(
             writer.writeheader()
             writer.writerows(mape_events)
 
+    # planner_decisions.csv — Phase 0.1: per-decision log with EMA snapshots
+    decisions_path = run_path / "planner_decisions.csv"
+    if planner_decisions:
+        decision_fields = list(planner_decisions[0].keys())
+        with open(decisions_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=decision_fields)
+            writer.writeheader()
+            writer.writerows(planner_decisions)
+    else:
+        decisions_path = None
+
     # mape_info.json — final state
     mape_info_path = run_path / "mape_info.json"
     with open(mape_info_path, "w") as f:
@@ -1301,6 +2944,7 @@ def run_experiment(
         "artifacts": {
             "predictions_csv": str(predictions_path),
             "mape_events_csv": str(events_path),
+            "planner_decisions_csv": str(decisions_path) if decisions_path else None,
             "mape_info_json": str(mape_info_path),
             "thresholds_json": str(thresholds_path),
             "reference_distribution_json": ref_dist_path,
