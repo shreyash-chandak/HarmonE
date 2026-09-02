@@ -50,14 +50,44 @@ class SegmentationAdapter(TaskAdapter):
           - A raw .pt/.pth state-dict file: loads the HuggingFace backbone by
             inferring the variant (b0/b1/b2) from model_name, then applies the
             state dict.  This matches the layout in configs/datasets/acdc.json.
-          - A HuggingFace model directory: passed directly to from_pretrained().
+          - A HuggingFace model directory or hub id (no .pt/.pth suffix, or
+            empty): passed to from_pretrained(), a real network fetch.
+
+        A weights_path that LOOKS like a local checkpoint (.pt/.pth suffix) but
+        doesn't resolve to an actual file raises FileNotFoundError instead of
+        silently falling through to the from_pretrained() branch. That silent
+        fallback used to use self._hf_model unconditionally — a single,
+        non-variant-aware default ("nvidia/segformer-b0-finetuned-ade-512-512")
+        regardless of whether model_name was b0/b1/b2 — so a missing
+        segformer_b2_acdc.pt would silently fetch a b0/ADE20K checkpoint over
+        the network instead, and ignore_mismatched_sizes=True would then reinit
+        the classifier head rather than erroring on the shape mismatch: a wrong
+        model, silently, with no clear signal anything was off. Every current
+        caller (managed_system_cv/inference.py, offline_eval_segmentation.py's
+        slow path, scripts/init_cv.py) already checks the file exists before
+        calling load_model() at all, so this never fires today — but the
+        function itself was not safe by construction, only safe because three
+        separate call sites each happened to duplicate the same guard.
         """
         import torch
         from pathlib import Path
         from transformers import SegformerForSemanticSegmentation, SegformerImageProcessor
 
         wp = Path(weights_path) if weights_path else None
-        is_pt_file = wp is not None and wp.suffix.lower() in (".pt", ".pth") and wp.is_file()
+        looks_like_local_checkpoint = wp is not None and wp.suffix.lower() in (".pt", ".pth")
+        is_pt_file = looks_like_local_checkpoint and wp.is_file()
+
+        if looks_like_local_checkpoint and not is_pt_file:
+            raise FileNotFoundError(
+                f"SegFormer weights not found at {wp} for model '{model_name}'. "
+                "This path has a local checkpoint extension (.pt/.pth) but doesn't "
+                "resolve to an actual file — refusing to silently substitute a "
+                "different HuggingFace checkpoint (which would previously have "
+                "fetched a fixed, non-variant-aware default regardless of which "
+                "model was requested). Train/place the weights file, or pass an "
+                "explicit HuggingFace model id/directory (no .pt/.pth suffix) if "
+                "a fresh pretrained checkpoint is actually what you want."
+            )
 
         if is_pt_file:
             # Infer backbone variant from model_name (segformer_b0 / _b1 / _b2)

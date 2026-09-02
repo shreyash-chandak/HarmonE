@@ -49,7 +49,8 @@
   "gamma": 0.8,
   "alpha": 0.1,
   "E_m": 300,
-  "E_M": 12000,
+  "E_M": 15000,
+  "energy_bounds_source": "calibrated_p99.5_pooled_batch_logs_20260902",
   "tau_drift": 0.5,
   "tau_drift_source": "paper_default",
   "drift_reference": "both",
@@ -59,5 +60,5 @@
   "energy_required": ["cpu"],
   "energy_meter": "rapl",
 
-  "_comment": "Original HarmonE PeMS dataset. Data is pre-split: flow_data_train.csv (~892 observations, 10%) is the initialization portion; flow_data_test.csv (~8 036 observations, 90%) is the streaming evaluation stream. Thresholds match the published paper values. Calibrate E_M per hardware after confirming RAPL availability."
+  "_comment": "Original HarmonE PeMS dataset. Data is pre-split: flow_data_train.csv (~892 observations, 10%) is the initialization portion; flow_data_test.csv (~8 036 observations, 90%) is the streaming evaluation stream. Thresholds match the published paper values. E_M recalibrated 2026-09-02 from pooled mape_events.csv logs across all pems_driftinduced planner runs (lstm batch energy: p99=13346, p99.5=15216 uJ) — the previous E_M=12000 sat below lstm's own p99, causing spurious 'energy' violations on ordinary measurement noise (see runs/energy_calibration_pems.json once experiments/calibrate_energy_bounds.py has been re-run against retrained weights). Re-run that script and update this value whenever weights are retrained or hardware changes."
 }

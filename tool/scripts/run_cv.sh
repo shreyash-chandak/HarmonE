@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # run_cv.sh — Run all HarmonE CV experiments sequentially.
 #
-# Dataset readiness
+# Dataset readiness (checked against disk 2026-09-02 — see DATASET_SENTINEL below,
+# which is the actual gate; this block is a human-readable summary of the same facts)
 # -----------------
 # C1 bdd100k      READY — yolov8n.pt + yolov8s.pt + yolov8m.pt present in tool/
+# C3 acdc         READY — segformer_b0/b1/b2_acdc.pt present in
+#                 managed_system_cv/models/ (already bootstrapped; no action needed —
+#                 see "Getting weights" below if these are ever missing again)
 # C4 imagenet     NEEDS WEIGHTS (2026-08-30) — the old efficientnet_b0/resnet50/
 #                 resnet101_imagenet.pth files were DELETED: they had 1000-class
 #                 heads, incompatible with the 100-class trim (DP26). Will
@@ -14,8 +18,8 @@
 #                 manifest — data/imagenet_c/imagenet_c_manifest.csv doesn't
 #                 exist until managed_system_cv/utility/drift/induce_imagenet_c.py
 #                 is run (see that script's own usage docstring). The sentinel
-#                 check below now verifies both.
-# C3 acdc         NEEDS WEIGHTS — see "Getting weights" below
+#                 check below now verifies both. Manifest already exists as of
+#                 2026-09-02 (1800 rows) — only the weight gate is still open.
 # C2 iwildcam     EXCLUDED from this grid (2026-08-30) — weights were never
 #                 produced (see DECISIONS_PENDING.md DP21's "CV initial train"
 #                 note) and ImageNet (C4) has since been assimilated as its
@@ -38,33 +42,23 @@
 # a path that doesn't exist yet, to let auto-train populate it once, then
 # re-run this script.
 #
-# ACDC (SegFormer-B0 / SegFormer-B1 / SegFormer-B2 fine-tuned on Cityscapes/ACDC, 19 classes):
+# ACDC's SegFormer weights were sourced manually (not via the auto-bootstrap
+# above, which fine-tunes from a torchvision/COCO backbone — SegFormer's
+# Cityscapes-pretrained checkpoints come from HuggingFace instead) and are
+# already present on disk as of 2026-09-02. Kept here for reference only, in
+# case they ever need regenerating — do NOT re-run this to "fix" anything;
+# it would overwrite already-working weights for no reason:
 #
 #   pip install transformers accelerate
 #   python - <<'EOF'
 #   import torch
 #   from transformers import SegformerForSemanticSegmentation
-
-#   # B0 — nvidia/segformer-b0-finetuned-cityscapes-1024-1024
-#   m = SegformerForSemanticSegmentation.from_pretrained(
-#       "nvidia/segformer-b0-finetuned-cityscapes-1024-1024"
-#   )
-#   torch.save(m.state_dict(), "managed_system_cv/models/segformer_b0_acdc.pt")
-
-#   # B1 — nvidia/segformer-b1-finetuned-cityscapes-1024-1024
-#   m1 = SegformerForSemanticSegmentation.from_pretrained(
-#       "nvidia/segformer-b1-finetuned-cityscapes-1024-1024"
-#   )
-#   torch.save(m1.state_dict(), "managed_system_cv/models/segformer_b1_acdc.pt")
-
-#   # B2 — nvidia/segformer-b2-finetuned-cityscapes-1024-1024
-#   m2 = SegformerForSemanticSegmentation.from_pretrained(
-#       "nvidia/segformer-b2-finetuned-cityscapes-1024-1024"
-#   )
-#   torch.save(m2.state_dict(), "managed_system_cv/models/segformer_b2_acdc.pt")
+#   for size in ("b0", "b1", "b2"):
+#       m = SegformerForSemanticSegmentation.from_pretrained(
+#           f"nvidia/segformer-{size}-finetuned-cityscapes-1024-1024"
+#       )
+#       torch.save(m.state_dict(), f"managed_system_cv/models/segformer_{size}_acdc.pt")
 #   EOF
-#
-# Run these from inside tool/ before executing this script for iwildcam/acdc.
 #
 # Usage (from inside tool/):
 #   bash scripts/run_cv.sh            # seed=1

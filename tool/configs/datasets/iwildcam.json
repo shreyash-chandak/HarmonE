@@ -33,6 +33,7 @@
   "embedding_dim": 1280,
   "embedding_sample_every": 5,
   "drift_window_size": 500,
+  "prt_interval": 500,
   "proxy": "max_softmax",
   "drift_detector": "mmd_embedding",
   "retrain_tactic": "pseudo_label",

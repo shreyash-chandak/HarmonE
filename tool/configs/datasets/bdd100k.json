@@ -34,6 +34,7 @@
   "proxy": "confidence",
   "drift_detector": "luminance_kl",
   "drift_window_size": 500,
+  "prt_interval": 500,
   "retrain_tactic": "pseudo_label",
   "pseudo_label_threshold": 0.5,
   "rollback_if_worse": true,

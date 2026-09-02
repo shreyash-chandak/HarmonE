@@ -77,7 +77,7 @@ context/
 # All (dataset × planner × seed) run directories written by run_experiment.py.
 # These can be hundreds of MBs; regenerate with: python experiments/run_grid.py
 tool/runs/
-
+tool/runs_*/
 # ── Live-system runtime state ─────────────────────────────────────────────────
 # These files accumulate during live managed-system operation and must NOT be
 # committed — they are noisy diffs that obscure real code changes.

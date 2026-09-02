@@ -438,12 +438,23 @@ def _monitor_batch(
 
     For regression, accuracy is computed as R²(y_true, y_pred).
     For CV, pass accuracy=<mean_confidence_proxy> directly (y_true/y_pred unused).
+
+    R² is mathematically unbounded below (a batch with low true-value variance can
+    send it to large negative numbers even for a decent model — this is exactly
+    what was observed with monitor_interval=50 batches in practice). Both branches
+    clip to [0, 1] so the result honors the contract compute_harmone_score() and
+    update_separated_emas() both document ("accuracy ... in [0, 1]") — previously
+    only the CV branch did this, letting an unbounded R² poison a model's EMA score
+    (and its ema_accuracy used by violation_aware/pareto's min_accuracy gate) after
+    a single noisy window, effectively locking switching-based planners onto
+    whichever model wasn't just hit by a bad batch.
     """
     if accuracy is not None:
         r2 = max(0.0, min(1.0, accuracy))
     else:
         from sklearn.metrics import r2_score as _r2
-        r2 = float(_r2(y_true, y_pred)) if len(y_true) > 1 else 0.0
+        raw_r2 = float(_r2(y_true, y_pred)) if len(y_true) > 1 else 0.0
+        r2 = max(0.0, min(1.0, raw_r2))
 
     avg_energy_uJ = float(np.mean(energies_uJ)) if energies_uJ else 0.0
     e_min = thresholds.get("E_m", 0.0)
@@ -834,8 +845,24 @@ def _initial_train_torchvision_classifier(
     thresholds: dict,
 ) -> bool:
     """Build an ImageNet-pretrained classifier with a fresh num_classes head,
-    fine-tune the last finetune_n_layers layers on real (path, label) pairs
-    from train_split(), and save the resulting state_dict to weights_path.
+    fine-tune it on real (path, label) pairs from train_split(), and save the
+    resulting state_dict to weights_path.
+
+    Two-phase fine-tune, not a single flat pass:
+      Phase 1 (head warmup): backbone stays fully frozen at its pretrained
+        weights; only the fresh, randomly-initialized head is trained, for
+        finetune_warmup_epochs (default 1). Prevents the large early gradients
+        a random-init head produces from being backpropagated into (and
+        degrading) the last finetune_n_layers pretrained layers before the
+        head has learned anything sensible — those layers stay untouched
+        during this phase.
+      Phase 2 (discriminative fine-tune): the last finetune_n_layers leaf
+        modules (which include the now-warmed-up head) are unfrozen, and
+        trained for finetune_epochs with TWO learning rates — the head at the
+        full finetune_lr, everything else (the unfrozen backbone layers) at
+        finetune_lr * finetune_backbone_lr_ratio (default 0.1). Standard
+        discriminative-LR transfer-learning practice: the head still has the
+        most to learn, the backbone layers only need small nudges.
 
     After this, _build_torchvision_classifier() loads the saved file exactly
     like any pre-existing checkpoint — no special-casing downstream.
@@ -861,12 +888,15 @@ def _initial_train_torchvision_classifier(
     if "efficientnet_b0" in name_lower:
         model = tv.efficientnet_b0(weights=tv.EfficientNet_B0_Weights.DEFAULT)
         model.classifier[1] = nn.Linear(model.classifier[1].in_features, num_classes)
+        head_module = model.classifier[1]
     elif "resnet101" in name_lower:
         model = tv.resnet101(weights=tv.ResNet101_Weights.DEFAULT)
         model.fc = nn.Linear(model.fc.in_features, num_classes)
+        head_module = model.fc
     elif "resnet50" in name_lower:
         model = tv.resnet50(weights=tv.ResNet50_Weights.DEFAULT)
         model.fc = nn.Linear(model.fc.in_features, num_classes)
+        head_module = model.fc
     else:
         raise ValueError(
             f"Cannot infer torchvision architecture from filename: {weights_path}. "
@@ -884,9 +914,43 @@ def _initial_train_torchvision_classifier(
     lr = float(thresholds.get("finetune_lr", 1e-4))
     epochs = int(thresholds.get("finetune_epochs", 3))
     batch_size = int(thresholds.get("finetune_batch_size", 8))
+    warmup_epochs = int(thresholds.get("finetune_warmup_epochs", 1))
+    backbone_lr_ratio = float(thresholds.get("finetune_backbone_lr_ratio", 0.1))
+
+    loss_fn = nn.CrossEntropyLoss()
+
+    def _run_epochs(n_epochs: int, optimizer) -> None:
+        model.train()
+        for _epoch in range(n_epochs):
+            for start in range(0, len(paths), batch_size):
+                batch_paths = paths[start : start + batch_size]
+                batch_labels = labels[start : start + batch_size]
+                if not batch_paths:
+                    continue
+                try:
+                    imgs = [transform(Image.open(p).convert("RGB")) for p in batch_paths]
+                except Exception as exc:
+                    logger.debug("CV initial train batch load failed: %s", exc)
+                    continue
+                x = torch.stack(imgs)
+                y = torch.tensor(batch_labels, dtype=torch.long)
+                optimizer.zero_grad()
+                loss_fn(model(x), y).backward()
+                optimizer.step()
 
     for p in model.parameters():
         p.requires_grad_(False)
+
+    # Phase 1: head-only warmup — backbone stays frozen at pretrained weights.
+    head_params = list(head_module.parameters())
+    if warmup_epochs > 0 and head_params:
+        for p in head_params:
+            p.requires_grad_(True)
+        warmup_optimizer = torch.optim.Adam(head_params, lr=lr)
+        _run_epochs(warmup_epochs, warmup_optimizer)
+
+    # Phase 2: unfreeze the last n_layers (includes the head) and fine-tune
+    # with a discriminative LR — head at lr, backbone layers at a fraction of it.
     finetune_params = _select_finetune_params(model, n_layers)
     if not finetune_params:
         logger.warning("CV initial train: no parameters selected for '%s' (n_layers=%d).",
@@ -895,35 +959,25 @@ def _initial_train_torchvision_classifier(
     for p in finetune_params:
         p.requires_grad_(True)
 
-    optimizer = torch.optim.Adam(finetune_params, lr=lr)
-    loss_fn = nn.CrossEntropyLoss()
+    head_param_ids = {id(p) for p in head_params}
+    backbone_params = [p for p in finetune_params if id(p) not in head_param_ids]
+    param_groups = [{"params": head_params, "lr": lr}]
+    if backbone_params:
+        param_groups.append({"params": backbone_params, "lr": lr * backbone_lr_ratio})
+    optimizer = torch.optim.Adam(param_groups)
+    _run_epochs(epochs, optimizer)
 
-    model.train()
-    for _epoch in range(epochs):
-        for start in range(0, len(paths), batch_size):
-            batch_paths = paths[start : start + batch_size]
-            batch_labels = labels[start : start + batch_size]
-            if not batch_paths:
-                continue
-            try:
-                imgs = [transform(Image.open(p).convert("RGB")) for p in batch_paths]
-            except Exception as exc:
-                logger.debug("CV initial train batch load failed: %s", exc)
-                continue
-            x = torch.stack(imgs)
-            y = torch.tensor(batch_labels, dtype=torch.long)
-            optimizer.zero_grad()
-            loss_fn(model(x), y).backward()
-            optimizer.step()
     model.eval()
     for p in model.parameters():
         p.requires_grad_(False)
 
     torch.save(model.state_dict(), weights_path)
     logger.info(
-        "CV initial train: saved '%s' -> %s (%d images, last %d layers unfrozen "
-        "(%d parameter tensors), %d epochs).",
-        model_name, weights_path, len(paths), n_layers, len(finetune_params), epochs,
+        "CV initial train: saved '%s' -> %s (%d images, %d warmup epoch(s) on head "
+        "only, then %d epoch(s) with last %d layers unfrozen (%d parameter tensors) "
+        "at backbone_lr_ratio=%.3f).",
+        model_name, weights_path, len(paths), warmup_epochs, epochs, n_layers,
+        len(finetune_params), backbone_lr_ratio,
     )
     return True
 

@@ -34,6 +34,7 @@
   "embedding_dim": 256,
   "embedding_sample_every": 5,
   "drift_window_size": 500,
+  "prt_interval": 500,
   "proxy": "max_logit",
   "drift_detector": "luminance_kl",
   "retrain_tactic": "pseudo_label",
