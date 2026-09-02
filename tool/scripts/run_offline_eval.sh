@@ -1,10 +1,20 @@
 #!/usr/bin/env bash
 # run_offline_eval.sh — Offline GT-accuracy evaluation for all completed CV runs.
 #
-# Iterates over CV run directories (bdd100k, iwildcam, acdc) produced by
-# run_cv.sh and calls experiments/offline_eval.py for each completed run.
+# Iterates over CV run directories (bdd100k, acdc, imagenet, imagenet_c —
+# matches run_cv.sh's active grid; iwildcam excluded, see run_cv.sh's header
+# comment) and calls experiments/offline_eval.py for each completed run.
 #
-# Outputs: {run_dir}/offline_eval.json for each evaluated run.
+# As of the 2026-08-30 offline_eval audit (split into per-task modules —
+# see experiments/offline_eval_{detection,classification,segmentation}.py),
+# each run's true metrics (mAP50/75/90 for detection, accuracy/precision/
+# recall/F1/TP/TN/FP/FN for classification, mIoU for segmentation) are ALSO
+# merged into that run's run_manifest.json under "offline_task_metrics",
+# alongside the live run's proxy-based "task_metrics" — not just written to
+# the standalone offline_eval.json this script's outputs describe below.
+#
+# Outputs: {run_dir}/offline_eval.json for each evaluated run (also updates
+#          {run_dir}/run_manifest.json in place — see above).
 # Logs:    runs/logs/<run_id>_offline_eval.log per run
 #          runs/logs/master_offline_eval.log   overall timeline
 #
@@ -14,7 +24,8 @@
 #
 # Prerequisites:
 #   - run_cv.sh must have completed for the target datasets/seed
-#   - Ground-truth label files must be present (column "label_path" in manifests)
+#   - Ground-truth label files must be present (column "label_path", or an
+#     inline "label" column for classification, in the dataset's manifest)
 #
 # Usage (from inside tool/):
 #   bash scripts/run_offline_eval.sh                         # seed=1, all CV datasets
@@ -98,30 +109,39 @@ log "Interval : $INTERVAL"
 if [ -z "$FILTER_DATASET" ] || [ "$FILTER_DATASET" = "bdd100k" ]; then
     for model in yolo_n yolo_s yolo_m; do
         _eval_one "bdd100k_naive_${model}_s${SEED}" "bdd100k"
+        _eval_one "bdd100k_naive_prt_${model}_s${SEED}" "bdd100k"
     done
-    for planner in random_switch greedy_switch harmone_original violation_aware pareto bandit; do
+    for planner in random_switch random_switch_prt greedy_switch harmone_original violation_aware pareto bandit; do
         _eval_one "bdd100k_${planner}_s${SEED}" "bdd100k"
     done
 fi
 
-# ── iwildcam — classification ─────────────────────────────────────────────────
+# ── imagenet / imagenet_c — classification ────────────────────────────────────
+# iwildcam is not evaluated here — excluded from run_cv.sh's active grid
+# (weights never produced; see that script's header and DECISIONS_PENDING.md
+# DP21/DP22). Re-add an iwildcam section, unchanged in shape from imagenet's
+# below, if it's ever repopulated.
 
-if [ -z "$FILTER_DATASET" ] || [ "$FILTER_DATASET" = "iwildcam" ]; then
-    for model in efficientnet_b0 resnet50 resnet101; do
-        _eval_one "iwildcam_naive_${model}_s${SEED}" "iwildcam"
-    done
-    for planner in random_switch greedy_switch harmone_original violation_aware pareto bandit; do
-        _eval_one "iwildcam_${planner}_s${SEED}" "iwildcam"
-    done
-fi
+for cv_dataset in imagenet imagenet_c; do
+    if [ -z "$FILTER_DATASET" ] || [ "$FILTER_DATASET" = "$cv_dataset" ]; then
+        for model in efficientnet_b0 resnet50 resnet101; do
+            _eval_one "${cv_dataset}_naive_${model}_s${SEED}" "$cv_dataset"
+            _eval_one "${cv_dataset}_naive_prt_${model}_s${SEED}" "$cv_dataset"
+        done
+        for planner in random_switch random_switch_prt greedy_switch harmone_original violation_aware pareto bandit; do
+            _eval_one "${cv_dataset}_${planner}_s${SEED}" "$cv_dataset"
+        done
+    fi
+done
 
 # ── acdc — segmentation ───────────────────────────────────────────────────────
 
 if [ -z "$FILTER_DATASET" ] || [ "$FILTER_DATASET" = "acdc" ]; then
     for model in segformer_b0 segformer_b1 segformer_b2; do
         _eval_one "acdc_naive_${model}_s${SEED}" "acdc"
+        _eval_one "acdc_naive_prt_${model}_s${SEED}" "acdc"
     done
-    for planner in random_switch greedy_switch harmone_original violation_aware pareto bandit; do
+    for planner in random_switch random_switch_prt greedy_switch harmone_original violation_aware pareto bandit; do
         _eval_one "acdc_${planner}_s${SEED}" "acdc"
     done
 fi
