@@ -1,7 +1,0 @@
-{
-  "model": "svr",
-  "timestamp": "20260823T001136_592802Z",
-  "tag": "retrain",
-  "proxy_score": -2.3235389483784776,
-  "drift_score": 0.13391
-}

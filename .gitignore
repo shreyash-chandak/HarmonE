@@ -72,7 +72,7 @@ credentials.json
 # ═══════════════════════════════════════════════════════════════════════════════
 # HarmonE-specific
 # ═══════════════════════════════════════════════════════════════════════════════
-
+context/
 # ── Experiment run outputs ────────────────────────────────────────────────────
 # All (dataset × planner × seed) run directories written by run_experiment.py.
 # These can be hundreds of MBs; regenerate with: python experiments/run_grid.py
@@ -102,6 +102,7 @@ tool/managed_system_*/knowledge/calibration.json
 tool/managed_system_*/knowledge/vmr/
 tool/managed_system_regression/versionedMR/
 tool/managed_system_cv/versionedMR/
+tool/knowledge/vmr/
 
 # ── CV dataset (BDD100k and similar) ─────────────────────────────────────────
 # Large image datasets are stored outside the repo; mount or symlink at runtime.
