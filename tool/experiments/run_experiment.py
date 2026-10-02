@@ -1420,7 +1420,8 @@ def _finetune_torchvision_classifier(
     model = info["model"]
     transform = info["transform"]
 
-    window = image_path_history[-drift_window:]
+    finetune_window = int(thresholds.get("finetune_window_images", drift_window))
+    window = image_path_history[-finetune_window:]
     if not window:
         return False
 
@@ -1630,7 +1631,8 @@ def _finetune_torchvision_classifier_tent(
     model = info["model"]
     transform = info["transform"]
 
-    window = image_path_history[-drift_window:]
+    finetune_window = int(thresholds.get("finetune_window_images", drift_window))
+    window = image_path_history[-finetune_window:]
     if not window:
         return False
 
@@ -1775,7 +1777,8 @@ def _finetune_segformer_segmentation(
     processor = info["processor"]
     ignore_index = 255
 
-    window = image_path_history[-drift_window:]
+    finetune_window = int(thresholds.get("finetune_window_images", drift_window))
+    window = image_path_history[-finetune_window:]
     if not window:
         return False
 
@@ -1962,7 +1965,8 @@ def _finetune_yolo_detection(
     model = info["model"]
     nc = info.get("nc", 80)
 
-    window = image_path_history[-drift_window:]
+    finetune_window = int(thresholds.get("finetune_window_images", drift_window))
+    window = image_path_history[-finetune_window:]
     if not window:
         return False
 

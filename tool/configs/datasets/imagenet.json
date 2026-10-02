@@ -38,7 +38,8 @@
   "retrain_tactic": "tent",
   "pseudo_label_threshold": 0.8,
   "rollback_if_worse": true,
-  "finetune_n_layers": 10,
+  "finetune_n_layers": 1,
+  "finetune_window_images": 300,
   "finetune_lr": 0.0001,
   "finetune_epochs": 3,
   "finetune_min_images": 20,
@@ -67,5 +68,5 @@
   "ema_head_start": 0.1,
   "energy_required": ["gpu"],
   "_comment": "C4 — added 2026-08-28 as a trial replacement candidate for iWildCam (see context/idea.md and DECISIONS_PENDING.md DP18). iWildCam is NOT removed. Base manifest (this config's default manifest_csv) is single-domain ('clean') — ImageNet-1k has no natural weather/location drift attribute on disk. A genuinely drift-ordered variant is produced by managed_system_cv/utility/drift/induce_imagenet_c.py (Hendrycks & Dietterich ImageNet-C-style corruption schedule, the exact benchmark TENT is validated on); point manifest_csv at data/imagenet_c/imagenet_c_manifest.csv to run the drift-aware grid instead of this clean one. CORRECTED 2026-08-30 (DECISIONS_PENDING.md DP24): num_classes does NOT match torchvision's pretrained head order — scripts/preprocess_imagenet.py builds the manifest's label column from data/imagenet/class_mapping.csv + gt.csv (the authoritative, alphabetically-ordered ground truth actually present on disk), not torchvision's canonical class order, and the old --export-pretrained-weights path was removed for the same reason. This dataset instead goes through experiments/run_experiment.py::_train_cv_models_if_missing()'s initial-train bootstrap like any dataset whose label order doesn't match an off-the-shelf pretrained head — see DECISIONS_PENDING.md DP22. TRIMMED 2026-08-30 (DP26): manifest reduced from 539 826 rows (1000 classes) to 10 000 (scripts/trim_manifest.py --dataset imagenet --n-classes 100 --images-per-class 100 --seed 42) — flat total-image trimming (the ~3000-image budget every other CV dataset uses) would have left ~3 images/class, useless for classification signal, so this trims on CLASS COUNT instead. num_classes dropped 1000 -> 100 to match; labels were remapped to a fresh contiguous 0..99 range (data/imagenet/class_index_trimmed.json records the mapping). The three weights_path files below were DELETED (their 1000-unit heads cannot even load into a 100-class model — a hard shape-mismatch, not a subtle misalignment) — the initial-train bootstrap (DP22) will regenerate correctly-sized ones on the next run. A TENT-based test-time-adaptation tactic is proposed in context/idea.md and implemented as a standalone module in core/tta/tent.py — wiring it into the CV retrain dispatch (as the natural fit for this dataset's corruption-based drift specifically) is tracked as DP25. Periodic-retrain + VMR (naive_prt/random_switch_prt planners, or drift-triggered VMR replace under any planner) IS wired for this dataset as of 2026-08-28, in experiments/run_experiment.py only (not the live managed_system_cv dashboard path) — pseudo-labeled fine-tune of the last finetune_n_layers layers (tunable, default 10), gated by pseudo_label_threshold/finetune_min_images, with a confidence-drop safety valve (tau_regression). See CHANGES_FROM_PAPER.md and DECISIONS_PENDING.md DP21.",
-  "energy_meter": "nvml"
+  "energy_meter": "polling"
 }

@@ -38,7 +38,8 @@
   "retrain_tactic": "tent",
   "pseudo_label_threshold": 0.8,
   "rollback_if_worse": true,
-  "finetune_n_layers": 10,
+  "finetune_n_layers": 1,
+  "finetune_window_images": 300,
   "finetune_lr": 0.0001,
   "finetune_epochs": 3,
   "finetune_min_images": 20,
@@ -67,5 +68,5 @@
   "ema_head_start": 0.1,
   "energy_required": ["gpu"],
   "_comment": "C4-drift — the corruption-ordered companion to imagenet.json, built by managed_system_cv/utility/drift/induce_imagenet_c.py (clean -> gaussian_noise -> defocus_blur -> fog -> brightness_low -> contrast_low). train_frac=val_frac=0.0 because this manifest is inference-only — models are NOT bootstrapped from this config; they share imagenet.json's weights_path files verbatim, so imagenet's own run (via experiments/run_experiment.py::_train_cv_models_if_missing()) must populate them first. CORRECTED 2026-08-30 (DECISIONS_PENDING.md DP24/DP26): the old scripts/preprocess_imagenet.py --export-pretrained-weights flow this comment used to reference no longer exists — see imagenet.json's _comment for the full story (class_mapping.csv/gt.csv are the authoritative, alphabetically-ordered ground truth; imagenet.json's manifest and num_classes were trimmed from 1000 to 100 classes, so the weights_path files below — shared with imagenet.json — were deleted rather than left stale, since their old 1000-unit heads can't even load into a 100-class model). induce_imagenet_c.py was run 2026-08-30 (--target-per-domain 333, matching the 2000-row trimmed stream split / 6 domains) — data/imagenet_c/imagenet_c_manifest.csv now exists, 1800 rows, 300 images/domain, balanced. Fixed a real pandas-3.0 groupby.apply() bug in that script while doing so (see DECISIONS_PENDING.md DP25's follow-up entry). Still blocked on the SHARED weights_path files below (deleted by DP26, not yet re-bootstrapped — needs torchvision + network) before any actual run of this config can happen; the manifest/images are ready and waiting. drift_detector is set to mmd_embedding as the INTENDED signal (embedding drift should be comparable against luminance on the same corruption schedule, since several ImageNet-C families are luminance-visible and others are not) but as of 2026-08-28 experiments/run_experiment.py's CV path hardcodes KLFixedRefDetector on luminance values regardless of this key (see context/DECISIONS_PENDING.md DP20) — the same gap affects iwildcam.json's mmd_embedding claim. This key is honest about INTENT, not current harness behavior, until DP20 is resolved. This is the dataset variant that exercises the TENT-related ideas in context/idea.md — see DECISIONS_PENDING.md DP19/DP25 for the wiring plan.",
-  "energy_meter": "nvml"
+  "energy_meter": "polling"
 }

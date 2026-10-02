@@ -40,7 +40,8 @@
   "retrain_tactic": "pseudo_label",
   "pseudo_label_threshold": 0.7,
   "rollback_if_worse": true,
-  "finetune_n_layers": 10,
+  "finetune_n_layers": 1,
+  "finetune_window_images": 300,
   "finetune_lr": 0.0001,
   "finetune_epochs": 3,
   "finetune_min_images": 20,
@@ -68,5 +69,5 @@
     "gpu"
   ],
   "_comment": "Adverse-condition segmentation. clear\u2192fog\u2192rain\u2192night\u2192snow drift stream. Cityscapes label format, ignore_index=255. See docs/datasets/acdc.md. Calibrate tau_drift per hardware. train_frac/val_frac CHANGED 2026-08-30 (0.7/0.1 -> 0.2/0.0): weights already exist on disk (never trained by this harness), so train_split() only ever fed _build_cv_reference()'s luminance histogram, which is internally capped at ~1000 samples regardless of input size -- the old 70% allocation (~1404 images) was mostly wasted. val_split() has zero consumers anywhere in experiments/run_experiment.py's actual per-run pipeline (only experiments/calibrate_drift_threshold.py, a separate script, reads it) -- dropped to 0.0 entirely. Frees ~80% of the trimmed manifest for the stream instead of ~20%. Manifest currently covers train+val only (2006 rows) -- ACDC's public test split (2000 more frames) has no released GT masks, so preprocess_acdc.py never ingests it; those frames COULD be added to the stream later since streaming is label-free (I4), but that needs a preprocess_acdc.py change, not done here.",
-  "energy_meter": "nvml"
+  "energy_meter": "polling"
 }

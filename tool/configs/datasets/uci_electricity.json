@@ -15,7 +15,7 @@
       "loader": "adapters.loaders.lstm_loader",
       "cost_class": "medium",
       "hyperparams": {
-        "train":   {"epochs": 75, "lr": 0.0005, "batch_size": 16},
+        "train":   {"epochs": 4, "lr": 0.0005, "batch_size": 8},
         "retrain": {}
       }
     },
@@ -24,7 +24,7 @@
       "loader": "adapters.loaders.sklearn_loader",
       "cost_class": "light",
       "hyperparams": {
-        "train":   {"alpha": 20},
+        "train":   {"alpha": 500},
         "retrain": {"alpha": 5}
       }
     },
@@ -33,7 +33,7 @@
       "loader": "adapters.loaders.sklearn_loader",
       "cost_class": "medium",
       "hyperparams": {
-        "train":   {"kernel": "linear", "C": 2.0, "tol": 0.001, "epsilon": 0.01},
+        "train":   {"kernel": "linear", "C": 0.5, "tol": 0.001, "epsilon": 0.15},
         "retrain": {}
       }
     }
@@ -41,8 +41,9 @@
   "min_score": 0.5,
   "min_accuracy": 0.5,
   "max_energy": 0.5,
-  "E_ref": 0.5,
-  "energy_reference": 0.5,
+  "E_ref": 0.19,
+  "energy_reference": 0.19,
+  "energy_reference_source": "calibrated_replay_harmone_original_20260903",
   "w_acc": 1.0,
   "w_e": 1.0,
   "delta": 0.05,

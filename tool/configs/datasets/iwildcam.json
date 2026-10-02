@@ -39,7 +39,8 @@
   "retrain_tactic": "pseudo_label",
   "pseudo_label_threshold": 0.8,
   "rollback_if_worse": true,
-  "finetune_n_layers": 10,
+  "finetune_n_layers": 1,
+  "finetune_window_images": 300,
   "finetune_lr": 0.0001,
   "finetune_epochs": 3,
   "finetune_min_images": 20,
@@ -67,5 +68,5 @@
     "gpu"
   ],
   "_comment": "Geographic drift showcase. embedding-based drift (MMD on EfficientNet-B0 features). See docs/datasets/iwildcam.md. Calibrate tau_drift per hardware.",
-  "energy_meter": "nvml"
+  "energy_meter": "polling"
 }
