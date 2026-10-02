@@ -36,6 +36,7 @@
   "switch_hold_cycles": "OPTIONAL: after any model switch, suppress further switches for this many MAPE cycles (original HarmonE recovery_cycles=3). Both harnesses, all planners (default: 0 = off)",
   "explore_prob": "OPTIONAL: S5/S6 per-cycle probability of probing the least-recently-observed model, so frozen EMA estimates get refreshed (default: 0.0 = off)",
   "drift_cooldown_rows": "OPTIONAL (concurrent harness): after a replace/retrain of a model, suppress drift for that model for this many stream rows; its drift reference is also re-based to the adapted window (default: drift window size)",
+  "device": "OPTIONAL (cv): where CV models run — \"cuda\" (require a GPU; fail fast if CUDA is unavailable), \"cuda:N\", \"cpu\", or \"auto\" (GPU if available). All CV configs set \"cuda\" (default when absent: auto). See core/device.py",
   "max_batches_ahead": "OPTIONAL (concurrent harness): how many monitor_interval batches inference may run ahead of the manager. 1 = decisions apply exactly one batch later; 0 = lockstep; negative = no barrier (default: 1)",
   "E_m": "OPTIONAL: minimum raw energy µJ for normalisation (default: 0)",
   "E_M": "OPTIONAL: maximum raw energy µJ for normalisation (CALIBRATE per hardware+dataset)",

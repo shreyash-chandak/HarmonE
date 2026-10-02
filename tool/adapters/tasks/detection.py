@@ -91,13 +91,16 @@ class DetectionAdapter(TaskAdapter):
         """Load a YOLO model and attach the embedding hook."""
         from ultralytics import YOLO
 
+        from core.device import get_device
         yolo = YOLO(weights_path)
+        yolo.to(get_device())
         hook_state = self._attach_embedding_hook(yolo)
         return _LoadedDetection(yolo=yolo, hook_state=hook_state)
 
     def infer(self, model: "_LoadedDetection", input_path: str) -> Any:
         """Run YOLO detection on a single image.  Returns ultralytics Results list."""
-        return model.yolo(input_path, verbose=False)
+        from core.device import yolo_device
+        return model.yolo(input_path, verbose=False, device=yolo_device())
 
     def extract_proxy(self, result: Any) -> float:
         """Mean detection confidence.  Returns 0.0 on genuinely empty detections."""
@@ -119,8 +122,9 @@ class DetectionAdapter(TaskAdapter):
         import torch
 
         # Run forward — the hook captures the feature map
+        from core.device import yolo_device
         with torch.no_grad():
-            _ = model.yolo(input_path, verbose=False)
+            _ = model.yolo(input_path, verbose=False, device=yolo_device())
 
         feat = model.hook_state._embedding
         if feat is None:

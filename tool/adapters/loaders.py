@@ -9,6 +9,10 @@ Loader references in configs/datasets/<name>.json point here:
 Each loader function takes (weights_path, **kwargs) and returns a callable
     predict(inputs: np.ndarray) -> float | Any
 
+CV loaders (yolo/torchvision/segformer) place the model and every input on
+core.device.get_device() (GPU when the dataset config sets "device": "cuda").
+Regression loaders stay on CPU.
+
 LSTMModel is also exported for use by managed_system_regression/inference.py
 so both code paths share one definition.
 """
@@ -93,10 +97,12 @@ def yolo_loader(weights_path: str, **kwargs) -> Callable[[Any], Any]:
         SETTINGS.update({"sync": False})  # disable telemetry / update checks
     except Exception:
         pass
+    from core.device import yolo_device
     model = YOLO(weights_path)
+    device = yolo_device()  # explicit — never rely on ultralytics' auto-selection
 
     def predict(inputs: Any) -> Any:
-        return model(inputs, verbose=False)
+        return model(inputs, verbose=False, device=device)
 
     return predict
 
@@ -130,8 +136,11 @@ def torchvision_loader(weights_path: str, **kwargs) -> Callable[[Any], float]:
             "Expected 'efficientnet_b0', 'resnet50', or 'resnet101' in the name."
         )
 
+    from core.device import get_device
+    device = get_device()
     state = torch.load(weights_path, map_location="cpu", weights_only=False)
     model.load_state_dict(state)
+    model.to(device)
     model.eval()
 
     _tf = transforms.Compose([
@@ -143,7 +152,7 @@ def torchvision_loader(weights_path: str, **kwargs) -> Callable[[Any], float]:
 
     def predict(inputs: Any) -> dict:
         img = Image.open(str(inputs)).convert("RGB")
-        x = _tf(img).unsqueeze(0)
+        x = _tf(img).unsqueeze(0).to(device)
         with torch.no_grad():
             logits = model(x)
             probs = torch.softmax(logits, dim=1)
@@ -227,9 +236,12 @@ def segformer_loader(weights_path: str, **kwargs) -> Callable[[Any], dict]:
         arch_key = "nvidia/mit-b0"
 
     cfg = SegformerConfig(**_SEGFORMER_ARCH[arch_key], num_labels=num_classes)
+    from core.device import get_device
+    device = get_device()
     model = SegformerForSemanticSegmentation(cfg)
     state = torch.load(weights_path, map_location="cpu", weights_only=False)
     model.load_state_dict(state, strict=False)
+    model.to(device)
     model.eval()
 
     # Standard ImageNet preprocessing — identical to what HF hub config.json specifies.
@@ -245,7 +257,7 @@ def segformer_loader(weights_path: str, **kwargs) -> Callable[[Any], dict]:
 
     def predict(inputs: Any) -> dict:
         img = Image.open(str(inputs)).convert("RGB")
-        enc = processor(images=img, return_tensors="pt")
+        enc = {k: v.to(device) for k, v in processor(images=img, return_tensors="pt").items()}
         with torch.no_grad():
             out = model(**enc)
             probs = torch.softmax(out.logits, dim=1)

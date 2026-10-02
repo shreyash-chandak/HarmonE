@@ -62,6 +62,7 @@
   "explore_prob": 0.05,
   "drift_cooldown_rows": 500,
   "max_batches_ahead": 1,
+  "device": "cuda",
   "E_m": 3300000,
   "E_M": 18500000,
   "tau_drift": 0.07,

@@ -188,7 +188,7 @@ def adapt_classifier(
     batch_size: int = 32,
     steps: int = 1,
     episodic: bool = False,
-    device: str = "cpu",
+    device: str | None = None,
 ) -> tuple[Tent, list[int]]:
     """Run Tent adaptation over a list of image files using a
     ClassificationAdapter-style `_LoadedClassifier` (has `.model` and
@@ -205,7 +205,10 @@ def adapt_classifier(
     tactic module.
     """
     from PIL import Image
+    from core.device import get_device
 
+    if device is None:
+        device = get_device()  # process-wide CV device (core/device.py)
     model = configure_model(loaded_classifier.model).to(device)
     params, _ = collect_params(model)
     optimizer = torch.optim.Adam(params, lr=lr)

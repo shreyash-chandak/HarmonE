@@ -50,6 +50,7 @@ from core.scoring import (
 from core.energy import EnergyMeter
 from core.drift.kl_fixed_ref import KLFixedRefDetector
 from core.vmr import VMR
+from core.device import get_device as _dev, yolo_device, configure_device, device_info
 
 logger = logging.getLogger(__name__)
 
@@ -684,6 +685,7 @@ def _build_torchvision_classifier(weights_path: str, num_classes: int):
 
     state = torch.load(weights_path, map_location="cpu", weights_only=False)
     model.load_state_dict(state)
+    model.to(_dev())
     model.eval()
 
     transform = transforms.Compose([
@@ -719,6 +721,7 @@ def _build_segformer_model(weights_path: str, num_classes: int):
     model = SegformerForSemanticSegmentation(cfg)
     state = torch.load(weights_path, map_location="cpu", weights_only=False)
     model.load_state_dict(state, strict=False)
+    model.to(_dev())
     model.eval()
 
     processor = SegformerImageProcessor(
@@ -738,7 +741,9 @@ def _build_yolo_model(weights_path: str):
         SETTINGS.update({"sync": False})  # disable telemetry / update checks
     except Exception:
         pass
-    return YOLO(weights_path)
+    model = YOLO(weights_path)
+    model.to(_dev())
+    return model
 
 
 def _load_cv_model_store(dataset_config: dict, cv_task: str) -> dict:
@@ -957,6 +962,7 @@ def _initial_train_torchvision_classifier(
     warmup_epochs = int(thresholds.get("finetune_warmup_epochs", 1))
     backbone_lr_ratio = float(thresholds.get("finetune_backbone_lr_ratio", 0.1))
 
+    model.to(_dev())
     loss_fn = nn.CrossEntropyLoss()
 
     def _run_epochs(n_epochs: int, optimizer) -> None:
@@ -972,8 +978,8 @@ def _initial_train_torchvision_classifier(
                 except Exception as exc:
                     logger.debug("CV initial train batch load failed: %s", exc)
                     continue
-                x = torch.stack(imgs)
-                y = torch.tensor(batch_labels, dtype=torch.long)
+                x = torch.stack(imgs).to(_dev())
+                y = torch.tensor(batch_labels, dtype=torch.long).to(_dev())
                 optimizer.zero_grad()
                 loss_fn(model(x), y).backward()
                 optimizer.step()
@@ -1070,7 +1076,7 @@ def _initial_train_segformer_segmentation(
 
     model = SegformerForSemanticSegmentation.from_pretrained(
         arch_key, num_labels=num_classes, ignore_mismatched_sizes=True,
-    )
+    ).to(_dev())
     processor = SegformerImageProcessor(
         do_resize=True, size={"height": 512, "width": 512},
         do_normalize=True, image_mean=[0.485, 0.456, 0.406], image_std=[0.229, 0.224, 0.225],
@@ -1079,12 +1085,12 @@ def _initial_train_segformer_segmentation(
 
     def _encode(path: str):
         img = Image.open(path).convert("RGB")
-        return processor(images=img, return_tensors="pt")["pixel_values"]
+        return processor(images=img, return_tensors="pt")["pixel_values"].to(_dev())
 
     def _encode_mask(label_path: str) -> torch.Tensor:
         gt = np.array(Image.open(label_path), dtype=np.int64)
         gt[(gt < 0) | (gt >= num_classes)] = ignore_index
-        return torch.from_numpy(gt)
+        return torch.from_numpy(gt).to(_dev())
 
     n_layers = int(thresholds.get("finetune_n_layers", 10))
     lr = float(thresholds.get("finetune_lr", 1e-4))
@@ -1243,7 +1249,7 @@ def _initial_train_yolo_detection(
             model.train(
                 data=str(train_yaml), epochs=epochs, imgsz=640, batch=batch_size,
                 workers=2, patience=max(epochs, 1), pretrained=False, cache="disk",
-                lr0=lr, verbose=False,
+                lr0=lr, verbose=False, device=yolo_device(),
             )
         except Exception as exc:
             logger.warning("CV initial train (yolo) train() failed for '%s': %s", model_name, exc)
@@ -1469,7 +1475,7 @@ def _finetune_torchvision_classifier(
         for p in window:
             try:
                 img = Image.open(p).convert("RGB")
-                x = transform(img).unsqueeze(0)
+                x = transform(img).unsqueeze(0).to(_dev())
                 probs = torch.softmax(model(x), dim=1)
                 conf, cls = probs.max(dim=1)
                 conf = float(conf.item())
@@ -1526,8 +1532,8 @@ def _finetune_torchvision_classifier(
                 except Exception as exc:
                     logger.debug("CV finetune batch load failed: %s", exc)
                     continue
-                x = torch.stack(imgs)
-                y = torch.tensor(batch_labels, dtype=torch.long)
+                x = torch.stack(imgs).to(_dev())
+                y = torch.tensor(batch_labels, dtype=torch.long).to(_dev())
                 optimizer.zero_grad()
                 loss_fn(model(x), y).backward()
                 optimizer.step()
@@ -1538,7 +1544,7 @@ def _finetune_torchvision_classifier(
         with torch.no_grad():
             for p in holdout_paths:
                 img = Image.open(p).convert("RGB")
-                x = transform(img).unsqueeze(0)
+                x = transform(img).unsqueeze(0).to(_dev())
                 post_confs.append(float(torch.softmax(model(x), dim=1).max().item()))
         post_tune_conf = float(np.mean(post_confs)) if post_confs else 0.0
 
@@ -1561,7 +1567,7 @@ def _finetune_torchvision_classifier(
 
     def _new_predict(image_path, m=_m, t=_t) -> dict:
         img = Image.open(str(image_path)).convert("RGB")
-        x = t(img).unsqueeze(0)
+        x = t(img).unsqueeze(0).to(_dev())
         with torch.no_grad():
             logits = m(x)
             probs = torch.softmax(logits, dim=1)
@@ -1690,7 +1696,7 @@ def _finetune_torchvision_classifier_tent(
             for p in paths:
                 try:
                     img = Image.open(p).convert("RGB")
-                    x = transform(img).unsqueeze(0)
+                    x = transform(img).unsqueeze(0).to(_dev())
                     confs.append(float(torch.softmax(model(x), dim=1).max().item()))
                 except Exception as exc:
                     logger.debug("CV finetune (tent) confidence check failed for %s: %s", p, exc)
@@ -1721,7 +1727,7 @@ def _finetune_torchvision_classifier_tent(
                 continue
             if not imgs:
                 continue
-            x = torch.stack(imgs)
+            x = torch.stack(imgs).to(_dev())
             for _step in range(steps):
                 forward_and_adapt(x, model, optimizer)
             adapted_batches += 1
@@ -1754,7 +1760,7 @@ def _finetune_torchvision_classifier_tent(
 
     def _new_predict(image_path, m=_m, t=_t) -> dict:
         img = Image.open(str(image_path)).convert("RGB")
-        x = t(img).unsqueeze(0)
+        x = t(img).unsqueeze(0).to(_dev())
         with torch.no_grad():
             logits = m(x)
             probs = torch.softmax(logits, dim=1)
@@ -1819,7 +1825,7 @@ def _finetune_segformer_segmentation(
 
     def _encode(path: str):
         img = Image.open(path).convert("RGB")
-        return processor(images=img, return_tensors="pt")["pixel_values"]
+        return processor(images=img, return_tensors="pt")["pixel_values"].to(_dev())
 
     def _pseudo_mask(logits: torch.Tensor) -> tuple[torch.Tensor, float]:
         """(H, W) int64 mask with low-confidence pixels set to ignore_index,
@@ -1937,7 +1943,7 @@ def _finetune_segformer_segmentation(
 
     def _new_predict(image_path, m=_m, proc=_proc) -> dict:
         img = Image.open(str(image_path)).convert("RGB")
-        enc = proc(images=img, return_tensors="pt")
+        enc = {k: v.to(_dev()) for k, v in proc(images=img, return_tensors="pt").items()}
         with torch.no_grad():
             out = m(**enc)
             probs = torch.softmax(out.logits, dim=1)
@@ -2008,7 +2014,7 @@ def _finetune_yolo_detection(
     def _mean_conf(paths: list[str]) -> float:
         confs: list[float] = []
         for p in paths:
-            results = model.predict(str(p), verbose=False)
+            results = model.predict(str(p), verbose=False, device=yolo_device())
             if results and results[0].boxes is not None and len(results[0].boxes) > 0:
                 confs.extend(results[0].boxes.conf.tolist())
         return float(np.mean(confs)) if confs else 0.0
@@ -2033,7 +2039,7 @@ def _finetune_yolo_detection(
     try:
         for p in train_candidates:
             try:
-                results = model.predict(str(p), conf=threshold, verbose=False)
+                results = model.predict(str(p), conf=threshold, verbose=False, device=yolo_device())
             except Exception as exc:
                 logger.debug("CV finetune (yolo) predict failed for %s: %s", p, exc)
                 continue
@@ -2083,7 +2089,7 @@ def _finetune_yolo_detection(
             model.train(
                 data=str(train_yaml), epochs=epochs, imgsz=640, batch=batch_size,
                 workers=2, patience=max(epochs, 1), pretrained=False, cache="disk",
-                lr0=lr, verbose=False,
+                lr0=lr, verbose=False, device=yolo_device(),
             )
         except Exception as exc:
             logger.warning("CV finetune (yolo) train() failed for '%s': %s", model_name, exc)
@@ -2108,7 +2114,7 @@ def _finetune_yolo_detection(
         shutil.rmtree(pseudo_dir, ignore_errors=True)
 
     def _new_predict(inputs, m=model) -> Any:
-        return m(inputs, verbose=False)
+        return m(inputs, verbose=False, device=yolo_device())
 
     models[model_name] = _new_predict
     logger.info(
@@ -2210,6 +2216,7 @@ def _cv_vmr_restore_torchvision_classifier(version_path, model_name, models, mod
 
         state = torch.load(version_path, map_location="cpu", weights_only=False)
         model.load_state_dict(state)
+        model.to(_dev())
         model.eval()
 
         transform = info["transform"]
@@ -2226,7 +2233,7 @@ def _cv_vmr_restore_torchvision_classifier(version_path, model_name, models, mod
 
         def _new_predict(image_path, m=_m, t=_t) -> dict:
             img = Image.open(str(image_path)).convert("RGB")
-            x = t(img).unsqueeze(0)
+            x = t(img).unsqueeze(0).to(_dev())
             with torch.no_grad():
                 logits = m(x)
                 probs = torch.softmax(logits, dim=1)
@@ -2253,6 +2260,7 @@ def _cv_vmr_restore_segformer(version_path, model_name, models, model_store, inf
         model = SegformerForSemanticSegmentation(cfg)
         state = torch.load(version_path, map_location="cpu", weights_only=False)
         model.load_state_dict(state, strict=False)
+        model.to(_dev())
         model.eval()
 
         processor = info["processor"]
@@ -2269,7 +2277,7 @@ def _cv_vmr_restore_segformer(version_path, model_name, models, model_store, inf
 
         def _new_predict(image_path, m=_m, proc=_proc) -> dict:
             img = Image.open(str(image_path)).convert("RGB")
-            enc = proc(images=img, return_tensors="pt")
+            enc = {k: v.to(_dev()) for k, v in proc(images=img, return_tensors="pt").items()}
             with torch.no_grad():
                 out = m(**enc)
                 probs = torch.softmax(out.logits, dim=1)
@@ -2296,7 +2304,7 @@ def _cv_vmr_restore_yolo(version_path, model_name, models, model_store) -> bool:
         }
 
         def _new_predict(inputs, m=model) -> Any:
-            return m(inputs, verbose=False)
+            return m(inputs, verbose=False, device=yolo_device())
 
         models[model_name] = _new_predict
         return True
@@ -2522,6 +2530,10 @@ def run_experiment(
     domain = dataset_config.get("domain", "regression")
     is_cv = (domain == "cv")
     cv_task: str = dataset_config.get("task", "detection")  # segmentation/classification/detection
+    if is_cv:
+        # All CV work runs on core.device's device (config "device"; "cuda"
+        # fails fast if no GPU) — see core/device.py.
+        configure_device(thresholds)
 
     import pickle
 
@@ -3105,6 +3117,7 @@ def run_experiment(
         "pin_model": pin_model,
         "seed": seed,
         "monitor_interval": monitor_interval,
+        "compute_device": device_info() if is_cv else {"device": "cpu"},
         "started_at": start_ts,
         "finished_at": end_ts,
         "elapsed_s": round(elapsed_s, 3),

@@ -248,7 +248,8 @@ def _collect_stream_predictions(
                 print(f"[EVAL detection] loaded {model_name}")
             yolo = _model_cache[model_name]
             try:
-                results = yolo.predict(img_path, verbose=False)
+                from core.device import yolo_device
+                results = yolo.predict(img_path, verbose=False, device=yolo_device())
             except Exception as exc:
                 print(f"[EVAL detection] predict failed ({img_path}): {exc}")
                 continue

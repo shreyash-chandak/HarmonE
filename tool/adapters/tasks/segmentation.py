@@ -127,6 +127,8 @@ class SegmentationAdapter(TaskAdapter):
                 num_labels=self._num_classes,
             )
 
+        from core.device import get_device
+        model.to(get_device())
         model.eval()
 
         # Register hook on encoder last hidden state
@@ -142,10 +144,12 @@ class SegmentationAdapter(TaskAdapter):
 
         img = Image.open(input_path).convert("RGB")
         orig_size = (img.height, img.width)
-        inputs = model.processor(images=img, return_tensors="pt")
+        from core.device import get_device
+        dev = get_device()
+        inputs = {k: v.to(dev) for k, v in model.processor(images=img, return_tensors="pt").items()}
         with torch.no_grad():
             outputs = model.model(**inputs)
-        return outputs.logits, orig_size
+        return outputs.logits.cpu(), orig_size  # callers post-process on CPU
 
     def extract_proxy(self, result: Any) -> float:
         """Mean per-pixel maximum softmax as segmentation confidence proxy."""
@@ -160,7 +164,9 @@ class SegmentationAdapter(TaskAdapter):
         from PIL import Image
 
         img = Image.open(input_path).convert("RGB")
-        inputs = model.processor(images=img, return_tensors="pt")
+        from core.device import get_device
+        dev = get_device()
+        inputs = {k: v.to(dev) for k, v in model.processor(images=img, return_tensors="pt").items()}
         with torch.no_grad():
             _ = model.model(**inputs)
 

@@ -63,8 +63,10 @@ class ClassificationAdapter(TaskAdapter):
             elif isinstance(clf, torch.nn.Linear):
                 model.classifier = torch.nn.Linear(clf.in_features, self._num_classes)
 
+        from core.device import get_device
         state = torch.load(weights_path, map_location="cpu", weights_only=False)
         model.load_state_dict(state)
+        model.to(get_device())
         model.eval()
 
         # Build transform once
@@ -85,11 +87,12 @@ class ClassificationAdapter(TaskAdapter):
         import torch
         from PIL import Image
 
+        from core.device import get_device
         img = Image.open(input_path).convert("RGB")
-        x = model.transform(img).unsqueeze(0)
+        x = model.transform(img).unsqueeze(0).to(get_device())
         with torch.no_grad():
             logits = model.model(x)
-        return logits
+        return logits.cpu()  # callers post-process on CPU
 
     def extract_proxy(self, result: Any) -> float:
         """Max softmax probability as confidence proxy."""
@@ -104,8 +107,9 @@ class ClassificationAdapter(TaskAdapter):
         import torch
         from PIL import Image
 
+        from core.device import get_device
         img = Image.open(input_path).convert("RGB")
-        x = model.transform(img).unsqueeze(0)
+        x = model.transform(img).unsqueeze(0).to(get_device())
         with torch.no_grad():
             _ = model.model(x)
 
