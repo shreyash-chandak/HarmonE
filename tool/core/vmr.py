@@ -235,6 +235,25 @@ class VMR:
             total += pi * math.log(pi / qi)
         return total
 
+    @classmethod
+    def _kl_raw(cls, cur_raw: list[float], ref_raw: list[float], n_bins: int = 50) -> float:
+        """KL(current ‖ archived) with both raw windows binned on shared edges
+        spanning their union — the comparison is bin-for-bin consistent and
+        no value is dropped."""
+        import numpy as np
+        cur = np.asarray(cur_raw, dtype=float)
+        ref = np.asarray(ref_raw, dtype=float)
+        lo = float(min(cur.min(), ref.min()))
+        hi = float(max(cur.max(), ref.max()))
+        if hi <= lo:
+            hi = lo + 1.0
+        edges = np.linspace(lo, hi, n_bins + 1)
+        p, _ = np.histogram(cur, bins=edges)
+        q, _ = np.histogram(ref, bins=edges)
+        p = p / max(p.sum(), 1)
+        q = q / max(q.sum(), 1)
+        return cls._kl_divergence(p.tolist(), q.tolist())
+
     def _closest_histogram(
         self, versions: list[VMRVersion], current: dict
     ) -> tuple[VMRVersion, float]:
@@ -242,8 +261,9 @@ class VMR:
         if no archived version has a comparable histogram at all, so a caller
         applying a threshold correctly rejects this case instead of silently
         accepting an incomparable fallback."""
+        cur_raw = current.get("raw")
         cur_data = current.get("data", [])
-        if not cur_data:
+        if not cur_data and not cur_raw:
             return versions[0], 0.0  # no current data to compare — unconditional fallback
         cur_sum = sum(cur_data) or 1.0
         cur_norm = [x / cur_sum for x in cur_data]
@@ -251,6 +271,20 @@ class VMR:
         best, best_kl = versions[0], float("inf")
         for v in versions:
             if v.distribution is None or v.distribution.get("type") != "histogram":
+                continue
+            # Raw-vs-raw path (audit E2, 2026-09-28): when both sides carry
+            # their raw window, histogram BOTH on edges spanning the union of
+            # the two windows, so nothing falls outside the bins. The binned
+            # "data" path below uses the fixed training-reference edges, which
+            # silently drop out-of-range values (20% of the pems drift stream).
+            v_raw = v.distribution.get("raw")
+            if cur_raw and v_raw:
+                kl = self._kl_raw(cur_raw, v_raw, n_bins=len(cur_data) or 50)
+                if kl < best_kl:
+                    best_kl = kl
+                    best = v
+                continue
+            if not cur_data:
                 continue
             ref_data = v.distribution.get("data", [])
             if len(ref_data) != len(cur_data):

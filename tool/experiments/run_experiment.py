@@ -585,7 +585,34 @@ def _plan(
         last_observed_step=dict(mape_info.get("last_observed_step", {})),
         staleness_window=int(thresholds.get("staleness_window", 500)),
     )
-    return planner.plan(ctx)
+    decision = planner.plan(ctx)
+
+    # Switch hold (audit A2/A3/D1, 2026-09-28) — mirrors the original HarmonE's
+    # recovery_cycles (HarmonE/mape/analyse.py: after an energy violation, no
+    # switching for the next 3 cycles), generalised to "after ANY switch".
+    # Gives a newly activated model full monitoring windows before it can be
+    # judged again, which damps thrashing. Retrain/replace/noop decisions are
+    # never suppressed. Relies on mape_info["steps_since_last_switch"] being
+    # incremented once per cycle BEFORE planning and reset to 0 on a switch
+    # (both harnesses do this). Not applied before the first switch of a run.
+    # switch_hold_cycles=0 (the default) disables it.
+    hold = int(thresholds.get("switch_hold_cycles", 0))
+    if (
+        hold > 0
+        and decision.action == "switch"
+        and decision.model
+        and decision.model != current_model
+        and mape_info.get("event_counters", {}).get("model_switches", 0) > 0
+        and mape_info.get("steps_since_last_switch", hold + 1) <= hold
+    ):
+        return PlanDecision(
+            action="noop",
+            reason=(
+                f"switch hold: {mape_info.get('steps_since_last_switch')} cycle(s) since "
+                f"last switch <= switch_hold_cycles={hold} (suppressed: {decision.reason})"
+            ),
+        )
+    return decision
 
 
 def _load_model_store(dataset_config: dict) -> dict:
@@ -2278,6 +2305,19 @@ def _cv_vmr_restore_yolo(version_path, model_name, models, model_store) -> bool:
         return False
 
 
+_VMR_RAW_MAX = 2000
+
+
+def _subsample_raw(values, max_len: int = _VMR_RAW_MAX) -> list[float]:
+    """Evenly subsample a value window to at most max_len floats (keeps VMR
+    distribution.json small while preserving the window's distribution)."""
+    arr = np.asarray(values, dtype=float)
+    if len(arr) > max_len:
+        idx = np.linspace(0, len(arr) - 1, max_len).astype(int)
+        arr = arr[idx]
+    return [round(float(x), 6) for x in arr]
+
+
 def _load_reference_bin_edges(run_path: Path, n_bins: int) -> np.ndarray | None:
     """Load the fixed drift-reference bin edges for this run, if available.
 
@@ -2362,7 +2402,17 @@ def _archive_in_vmr(
         if len(window) >= 10:
             bin_edges = _load_reference_bin_edges(run_path, n_bins)
             hist, _ = np.histogram(window, bins=bin_edges if bin_edges is not None else n_bins)
-            distribution = {"type": "histogram", "data": hist.tolist()}
+            # "raw" (audit E2, 2026-09-28): also keep the raw window values,
+            # like the original HarmonE kept each version's data.csv in
+            # versionedMR/. core/vmr.py re-bins raw-vs-raw on edges spanning
+            # BOTH windows, so values outside the training range are no longer
+            # silently dropped by the fixed reference edges. The binned "data"
+            # is kept for callers whose query has no raw window.
+            distribution = {
+                "type": "histogram",
+                "data": hist.tolist(),
+                "raw": _subsample_raw(window),
+            }
         else:
             distribution = {"type": "histogram", "data": []}
         vmr.store(
@@ -2581,7 +2631,11 @@ def run_experiment(
         # vmr.best_match() has candidates from the very first drift event.
         # Mirrors managed_system_regression/train.py's versionedMR/ seeding.
         _train_hist, _ = np.histogram(train_values, bins=_DRIFT_N_BINS)
-        _initial_dist = {"type": "histogram", "data": _train_hist.tolist()}
+        _initial_dist = {
+            "type": "histogram",
+            "data": _train_hist.tolist(),
+            "raw": _subsample_raw(train_values),  # audit E2: raw-vs-raw VMR matching
+        }
         _seed_vmr_initial(available_models, dataset_config, vmr, _initial_dist)
     else:
         # Same idea for CV: seed with the luminance reference already computed
@@ -2752,7 +2806,11 @@ def run_experiment(
                 _window = value_history[-drift_detector.window_size:]
                 if len(_window) >= drift_detector.window_size:
                     _hist, _ = np.histogram(_window, bins=drift_detector._bin_edges)
-                    current_dist = {"type": "histogram", "data": _hist.tolist()}
+                    current_dist = {
+                        "type": "histogram",
+                        "data": _hist.tolist(),
+                        "raw": _subsample_raw(_window),  # VMR raw-vs-raw matching (audit E2)
+                    }
             drift_result = _analyse_drift(
                 value_history, drift_detector, thresholds,
                 vmr=vmr,

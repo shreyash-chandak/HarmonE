@@ -24,6 +24,7 @@ import logging
 
 from .base import Planner, PlanningContext, PlanDecision, REGISTRY
 from .hysteresis import should_switch
+from .exploration import maybe_explore
 
 logger = logging.getLogger(__name__)
 
@@ -49,11 +50,20 @@ class ViolationAwarePlanner(Planner):
     name = "violation_aware"
 
     def plan(self, ctx: PlanningContext) -> PlanDecision:
-        if ctx.violation is None:
-            return PlanDecision(action="noop", reason="S5 violation_aware: no violation")
-
         if ctx.violation == "drift":
             return self._handle_drift(ctx)
+
+        # Audit A2 (2026-09-28): periodically re-probe the stalest inactive
+        # model, like the original HarmonE's per-cycle exploration, so frozen
+        # EMA estimates get refreshed. Disabled unless explore_prob > 0.
+        probe = maybe_explore(
+            ctx, float(ctx.thresholds.get("explore_prob", 0.0)), "S5 violation_aware"
+        )
+        if probe is not None:
+            return probe
+
+        if ctx.violation is None:
+            return PlanDecision(action="noop", reason="S5 violation_aware: no violation")
 
         if ctx.violation == "energy":
             return self._handle_energy_violation(ctx)
