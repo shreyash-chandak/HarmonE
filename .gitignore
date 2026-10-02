@@ -73,11 +73,21 @@ credentials.json
 # HarmonE-specific
 # ═══════════════════════════════════════════════════════════════════════════════
 context/
+HarmonE/
+# Concurrent-harness run outputs and archives (runs/, runs_5.9/, runs_old/, ...)
+tool/concurrent_harness/runs*/
+# Local package mirrors / lockfiles used to ship a venv to the remote machine
+tool/linux_pkgs/
+tool/resolved.txt
+# Mutable bandit state (shared across runs; audit B7) — never commit
+tool/knowledge/bandit_pending.json
+tool/knowledge/bandit_state.json
 # ── Experiment run outputs ────────────────────────────────────────────────────
 # All (dataset × planner × seed) run directories written by run_experiment.py.
 # These can be hundreds of MBs; regenerate with: python experiments/run_grid.py
 tool/runs/
 tool/runs_*/
+
 # ── Live-system runtime state ─────────────────────────────────────────────────
 # These files accumulate during live managed-system operation and must NOT be
 # committed — they are noisy diffs that obscure real code changes.
