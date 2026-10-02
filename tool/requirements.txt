@@ -126,3 +126,11 @@ ultralytics==8.2.103; python_version < "3.12"
 ultralytics>=8.3.0; python_version >= "3.12"
 
 tqdm==4.67.1
+
+#########################################
+# Packages imported by the experiment harnesses but previously missing here
+#########################################
+transformers>=4.40      # SegFormer (acdc) — adapters/loaders.py, run_experiment.py
+nvidia-ml-py>=12.0      # pynvml: GPU power for energy_meter "nvml"/"polling" probes (core/energy.py)
+pyyaml>=6.0             # experiments/run_grid.py
+pytest>=8.0             # tests/

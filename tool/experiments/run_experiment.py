@@ -2597,7 +2597,9 @@ def run_experiment(
     if not available_models:
         raise RuntimeError(
             f"No loadable models found for dataset '{dataset_name}'. "
-            "Check that weights_path entries in the config point to existing files."
+            "See the 'Failed to load model' / 'weights not found' warnings above: either "
+            "a weights file is missing or a required package is not installed (e.g. "
+            "transformers for SegFormer, ultralytics for YOLO, torchvision)."
         )
 
     # Pin to a single model (used for per-model naive baseline runs)
