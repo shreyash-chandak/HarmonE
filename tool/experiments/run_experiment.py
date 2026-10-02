@@ -519,6 +519,18 @@ def _analyse_drift(
 
     When drift is detected, queries the VMR for a suitable archived version.
     Returns action="replace" + version path if found, else action="retrain".
+
+    The VMR match is only accepted if its distribution distance clears
+    thresholds["tau_drift"] — mirroring the original paper's own gate ("if
+    some prior version's training data is a closer match [min KL < 0.75],
+    that version... is returned... instead of retraining"). Reusing tau_drift
+    here (rather than a separate config key) mirrors the original apparently
+    using the same single constant for both "is this drift?" and "is this
+    archived version close enough to reuse?". Previously there was no gate at
+    all — any non-empty archive always "won" regardless of how distant the
+    best match actually was, which meant a genuine retrain could never fire
+    again once even one version existed for a model (confirmed happening in
+    practice, 2026-09-03).
     """
     detection = drift_detector.detect(value_history)
     kl = detection.get("kl_div")
@@ -531,6 +543,7 @@ def _analyse_drift(
             current_model,
             current_distribution=current_distribution,
             strategy=strategy,
+            threshold=thresholds.get("tau_drift") if strategy == "closest_distribution" else None,
         )
         if best is not None:
             return {
@@ -2261,6 +2274,25 @@ def _cv_vmr_restore_yolo(version_path, model_name, models, model_store) -> bool:
         return False
 
 
+def _load_reference_bin_edges(run_path: Path, n_bins: int) -> np.ndarray | None:
+    """Load the fixed drift-reference bin edges for this run, if available.
+
+    Returns None (never raises) if reference_distribution.json is missing or
+    its bin count doesn't match n_bins — callers fall back to auto-ranged
+    bins in that case rather than fail archiving outright.
+    """
+    ref_path = Path(run_path) / "reference_distribution.json"
+    try:
+        with open(ref_path) as f:
+            data = json.load(f)
+        edges = np.array(data["bin_edges"], dtype=float)
+        if len(edges) == n_bins + 1:
+            return edges
+    except Exception:
+        pass
+    return None
+
+
 def _archive_in_vmr(
     model_name: str,
     model_store: dict,
@@ -2277,6 +2309,21 @@ def _archive_in_vmr(
 
     Writes weights to a temp file, hands it to vmr.store() (which copies it),
     then removes the temp file.  Fire-and-forget: logs a warning on failure.
+
+    The archived distribution is histogrammed on the SAME fixed reference bin
+    edges used to build the "current window" distribution at match time
+    (core/vmr.py::_closest_histogram compares the two bin-for-bin, with no
+    re-binning of its own) — previously this used `np.histogram(window,
+    bins=n_bins)`, an integer bin COUNT that auto-ranges to that window's own
+    min/max every call, so every archived version ended up on different,
+    mutually incomparable bin edges. That made every closest_distribution
+    match essentially noise: bin[i] in one archive and bin[i] in another (or
+    in the live query) rarely represented the same value range at all, so the
+    computed KL distance almost never cleared `tau_drift` regardless of how
+    many versions were archived or how similar their source data actually
+    was. Falls back to the old auto-ranged behavior only if
+    reference_distribution.json can't be loaded (should not happen in normal
+    operation — both harnesses write it before any archiving can occur).
 
     tag="pre_retrain"  — snapshot of the model BEFORE it is overwritten.
     tag="retrain"      — snapshot of the model AFTER retraining completes.
@@ -2309,7 +2356,8 @@ def _archive_in_vmr(
     try:
         window = value_history[-drift_window:]
         if len(window) >= 10:
-            hist, _ = np.histogram(window, bins=n_bins)
+            bin_edges = _load_reference_bin_edges(run_path, n_bins)
+            hist, _ = np.histogram(window, bins=bin_edges if bin_edges is not None else n_bins)
             distribution = {"type": "histogram", "data": hist.tolist()}
         else:
             distribution = {"type": "histogram", "data": []}
@@ -2507,10 +2555,20 @@ def run_experiment(
     seq_length: int = int(dataset_config.get("seq_length", 5))
 
     # ── VMR ───────────────────────────────────────────────────────────────────
-    # Scoped per dataset so that pems/lstm and uci_electricity/lstm (or
-    # imagenet/efficientnet_b0 vs imagenet_c/efficientnet_b0) are independent
-    # namespaces and cannot cross-contaminate each other.
-    _vmr_dir = _TOOL_DIR / "knowledge" / "vmr" / dataset_name
+    # Scoped per dataset AND per planner (knowledge/vmr/<dataset>/<planner>/<model>/
+    # <version>/) so that pems/lstm and uci_electricity/lstm are independent
+    # namespaces, AND so that e.g. naive_prt's retrains can't be silently reused
+    # by a later harmone_original/violation_aware/pareto run in the same grid —
+    # confirmed happening in practice (2026-09-03): naive_prt's retrain-archived
+    # versions were being picked up via VMR "replace" by every switching planner
+    # that ran afterward in the same dataset's grid, since the old path was only
+    # keyed by dataset_name. Different seeds of the SAME planner still share this
+    # pool deliberately (not scoped further) — only cross-planner leakage is
+    # closed here. Pre-existing dataset-only VMR trees (accumulated since
+    # 2026-08-30) are NOT migrated by this change — they're simply orphaned under
+    # the old `knowledge/vmr/<dataset>/<model>/` path; a cleanup/migration pass
+    # is tracked as separate follow-up work, not done here.
+    _vmr_dir = _TOOL_DIR / "knowledge" / "vmr" / dataset_name / planner_name
     _vmr_dir.mkdir(parents=True, exist_ok=True)
     vmr = VMR(base_dir=str(_vmr_dir))
 

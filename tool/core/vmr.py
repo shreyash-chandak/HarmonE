@@ -161,15 +161,29 @@ class VMR:
         model_name: str,
         current_distribution: dict | None = None,
         strategy: str = "best_score",
+        threshold: float | None = None,
     ) -> VMRVersion | None:
-        """Return the best-matching VMR version.
+        """Return the best-matching VMR version, or None if nothing qualifies.
 
         Strategies:
         - "best_score": highest stored proxy_score (ignores distribution).
         - "closest_distribution": minimum divergence to current_distribution.
           Supported distribution types: "histogram" (KL), "embedding" (MMD²).
 
-        Returns None if no versions are stored.
+        threshold (closest_distribution only): the archived version closest to
+        current_distribution is only returned if its distance is BELOW this
+        value — mirroring the original paper's own VMR-reuse gate ("if some
+        prior version's training data is a closer match [min KL < 0.75], that
+        version... is returned... instead of retraining"). Below prior versions
+        of this function had no such gate at all: any non-empty archive always
+        "won", however distant the best available match actually was, which
+        meant a genuine retrain could never fire again once even one version
+        existed for a model. threshold=None preserves that unconditional
+        behavior (used by callers that don't have a meaningful distance-based
+        gate to apply, e.g. the "best_score" strategy).
+
+        Returns None if no versions are stored, or if the closest available
+        distribution-based match doesn't clear `threshold`.
         """
         versions = self.list_versions(model_name)
         if not versions:
@@ -184,9 +198,14 @@ class VMR:
         if strategy == "closest_distribution" and current_distribution is not None:
             dist_type = current_distribution.get("type", "histogram")
             if dist_type == "histogram":
-                return self._closest_histogram(versions, current_distribution)
+                best, best_dist = self._closest_histogram(versions, current_distribution)
             elif dist_type in ("embedding", "raw"):
-                return self._closest_embedding(versions, current_distribution)
+                best, best_dist = self._closest_embedding(versions, current_distribution)
+            else:
+                return versions[0]
+            if threshold is not None and best_dist >= threshold:
+                return None
+            return best
 
         return versions[0]  # newest fallback
 
@@ -218,10 +237,14 @@ class VMR:
 
     def _closest_histogram(
         self, versions: list[VMRVersion], current: dict
-    ) -> VMRVersion:
+    ) -> tuple[VMRVersion, float]:
+        """Return (closest version, its KL distance). Distance is float("inf")
+        if no archived version has a comparable histogram at all, so a caller
+        applying a threshold correctly rejects this case instead of silently
+        accepting an incomparable fallback."""
         cur_data = current.get("data", [])
         if not cur_data:
-            return versions[0]
+            return versions[0], 0.0  # no current data to compare — unconditional fallback
         cur_sum = sum(cur_data) or 1.0
         cur_norm = [x / cur_sum for x in cur_data]
 
@@ -238,17 +261,19 @@ class VMR:
             if kl < best_kl:
                 best_kl = kl
                 best = v
-        return best
+        return best, best_kl
 
     def _closest_embedding(
         self, versions: list[VMRVersion], current: dict
-    ) -> VMRVersion:
-        """Use Fréchet distance approximation for embedding distributions."""
+    ) -> tuple[VMRVersion, float]:
+        """Use Fréchet distance approximation for embedding distributions.
+        Returns (closest version, its distance) — see _closest_histogram's
+        docstring for why an incomparable case returns float("inf")."""
         import math
 
         cur_data = current.get("data", [])
         if not cur_data or not isinstance(cur_data[0], (int, float)):
-            return versions[0]
+            return versions[0], 0.0  # no current data to compare — unconditional fallback
 
         # Treat data as a flat mean vector (already stored as mean at archive time)
         cur_mean = cur_data
@@ -265,4 +290,4 @@ class VMR:
             if dist < best_dist:
                 best_dist = dist
                 best = v
-        return best
+        return best, best_dist
