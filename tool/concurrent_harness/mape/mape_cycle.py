@@ -143,6 +143,7 @@ def run_cycle(
                 decision = _plan(
                     violation, drift_result, current_model, available_models,
                     mape_info, thresholds, planner, current_step=current_step,
+                    telemetry=telemetry, served_model=monitor_model,
                 )
                 decision = _head_start(decision, is_cv, thresholds, available_models,
                                        current_model, mape_info)

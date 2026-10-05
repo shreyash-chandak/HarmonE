@@ -1,33 +1,50 @@
 """
-core/planners/bandit.py — S7: LinUCB contextual bandit planner (Phase 4 redesign).
+core/planners/bandit.py — S7: constrained LinUCB contextual bandit planner (v3).
 
-Phase 4 changes from the v1 scalar-reward implementation:
+v3 (2026-10-06, audit B1–B6) replaces the v2 design, which never learned:
+its reward-resolution hook was never called by either harness (B1), so every
+choice was a fixed function of the features (B2); its energy feasibility
+filter compared a raw UCB magnitude with a normalised threshold (B3); 6 of its
+10 global features were constants (B4); its reward was a difference of EMAs
+(B5); it only acted on violations and an EMA-accuracy hysteresis check vetoed
+almost every choice (B6).
 
-  4.1 Dual estimators: separate A_acc/b_acc and A_eng/b_eng matrices per arm,
-      updated independently from per-interval accuracy and energy observations.
-      The old scalar reward (acc_delta / switch_cost_J with switch_cost_J=0.0)
-      is retired.
+Design
+------
+Arms are the models. Each arm has two disjoint linear estimators over a
+shared context vector x (dim 4): one predicts the arm's batch accuracy, one
+its normalised batch energy (both in [0, 1], the same quantities the monitor
+measures).
 
-  4.2 Candidate-specific feature vectors φ(x, m): each arm is evaluated with
-      a 16-dim feature vector that mixes global context with arm-specific
-      information (acc_m, eng_m, ratios to current, cost_class, is_current).
-      Context dim is fixed at 16 regardless of the number of models.
+Every MAPE cycle (`plan`) does two things:
 
-  4.3 Constrained selection:
-        (a) Feasibility filter: E_UCB(m) ≤ current_energy_threshold
-        (b) Score: argmax( A_UCB(m) − λ(Q) · E_UCB(m) − switch_penalty(m) )
-        where Q is the Lyapunov energy-debt accumulator and
-        λ(Q) = bandit_lambda_0 + bandit_mu * Q (grows with debt).
+1. **Learn.** The batch just monitored was served by one model (the
+   telemetry's served model). Its measured accuracy and normalised energy
+   are that arm's outcome for the context recorded at the previous decision;
+   both estimators of the served arm are updated (A += x xᵀ, b += r x). The
+   energy-debt queue is updated: Q ← max(0, Q + e_norm − E_ref).
 
-  4.4 Reward attribution fix: pending records carry decision_step; reward is
-      resolved when current_step − decision_step ≥ bandit_min_observation_steps
-      (config key, not wall-clock).
+2. **Decide.** Each arm that has never been observed is tried once first.
+   Otherwise, for each arm:
+       acc_ucb = θ_accᵀx + α·sqrt(xᵀA⁻¹x)        (optimistic accuracy)
+       eng_lcb = θ_engᵀx − α·sqrt(xᵀA⁻¹x)        (optimistic energy), clipped to [0, 1]
+   Feasible arms: eng_lcb ≤ live energy threshold τ (same normalised units);
+   if none, the arm with the lowest eng_lcb. Choose
+       argmax  acc_ucb − λ·eng_lcb − switch_cost·[arm ≠ current]
+   with λ = bandit_lambda_0 + bandit_mu·Q (Lyapunov drift-plus-penalty: the
+   more the run has exceeded the energy budget E_ref, the more energy costs).
+   Staying on the current model is a valid choice, so the bandit decides on
+   every cycle, not only on violations.
 
-  4.5 State versioning: bandit_state.json now carries state_version=2.
-      Loading v1 state emits a warning and starts fresh for that dataset.
+Drift with no score/energy violation still goes to the fixed VMR-replace /
+retrain rule shared with S4–S6 (retrain/replace are not arms).
 
-Planners stay pure: all file I/O goes through harness-mediated helpers and
-run_experiment.py's bandit_pending.json contract.
+Context x: [1, drift_signal, volatility, τ] — describes the stream, from the
+current cycle's telemetry (PlanningContext.telemetry, filled by both
+harnesses' _plan()); see build_context().
+
+State (θ statistics, Q, counters) persists to <run_dir>/bandit_state.json
+after each update (audit B7: per run, never shared between runs).
 """
 
 from __future__ import annotations
@@ -40,18 +57,17 @@ from pathlib import Path
 import numpy as np
 
 from .base import Planner, PlanningContext, PlanDecision, REGISTRY
-from .hysteresis import should_switch
 
 logger = logging.getLogger(__name__)
 
-_STATE_VERSION = 2
-_CONTEXT_DIM = 16          # fixed; independent of model count
+_STATE_VERSION = 3
+_CONTEXT_DIM = 4
 _DEFAULT_ALPHA = 1.0
 _DEFAULT_LAMBDA_0 = 0.1
 _DEFAULT_MU = 0.05
-_DEFAULT_MIN_OBS_STEPS = 50
+_DEFAULT_SWITCH_COST = 0.01
 
-# Module-level bandit instance — set once by manage.py / run_experiment.py
+# Module-level bandit instance — set once per run by the harness.
 _bandit_instance: "LinUCBBandit | None" = None
 
 
@@ -59,8 +75,6 @@ def set_bandit_instance(bandit: "LinUCBBandit | None") -> None:
     global _bandit_instance
     _bandit_instance = bandit
 
-
-# ── Atomic write ──────────────────────────────────────────────────────────────
 
 def _atomic_write(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -70,304 +84,172 @@ def _atomic_write(path: Path, data: dict) -> None:
     os.replace(tmp, str(path))
 
 
-# ── Dual-estimator LinUCB per arm ─────────────────────────────────────────────
+# ── Dual-estimator disjoint LinUCB ────────────────────────────────────────────
 
 class LinUCBBandit:
-    """
-    LinUCB bandit with separate accuracy and energy estimators per arm.
-
-    State persists to knowledge/bandit_state.json keyed by dataset_id.
-    State version 2 — v1 scalar-reward state is not compatible.
-    Learning accumulates across runs (never reset by run_reset.py).
-    """
+    """Per-arm accuracy and energy ridge-regression estimators with UCB/LCB."""
 
     def __init__(
         self,
         models: list[str],
         context_dim: int,
         alpha: float,
-        w_acc: float,
-        w_energy: float,
         state_path: str | Path,
+        lambda_0: float = _DEFAULT_LAMBDA_0,
+        mu: float = _DEFAULT_MU,
+        energy_budget: float = 0.5,
     ) -> None:
         self.models = list(models)
         self.context_dim = context_dim
         self.alpha = alpha
-        self.w_acc = w_acc
-        self.w_energy = w_energy
+        self.lambda_0 = lambda_0
+        self.mu = mu
+        self.energy_budget = energy_budget
         self.state_path = Path(state_path)
 
-        # Dual estimators per arm
         self.A_acc: dict[str, np.ndarray] = {}
         self.b_acc: dict[str, np.ndarray] = {}
         self.A_eng: dict[str, np.ndarray] = {}
         self.b_eng: dict[str, np.ndarray] = {}
+        self.n_obs: dict[str, int] = {}
 
-        # Energy-debt accumulator (Lyapunov)
         self.Q: float = 0.0
-
         self.total_decisions: int = 0
         self.total_updates: int = 0
         self._current_dataset_id: str = "unknown"
-
-        self._init_arms()
-
-    def _init_arms(self) -> None:
-        d = self.context_dim
+        # Context of the last decision, consumed by the next observation.
+        self.pending_x: np.ndarray | None = None
         for m in self.models:
-            self.A_acc[m] = np.eye(d, dtype=np.float64)
-            self.b_acc[m] = np.zeros(d, dtype=np.float64)
-            self.A_eng[m] = np.eye(d, dtype=np.float64)
-            self.b_eng[m] = np.zeros(d, dtype=np.float64)
+            self._ensure_arm(m)
 
     def _ensure_arm(self, m: str) -> None:
-        d = self.context_dim
         if m not in self.A_acc:
-            self.A_acc[m] = np.eye(d, dtype=np.float64)
-            self.b_acc[m] = np.zeros(d, dtype=np.float64)
-            self.A_eng[m] = np.eye(d, dtype=np.float64)
-            self.b_eng[m] = np.zeros(d, dtype=np.float64)
+            d = self.context_dim
+            self.A_acc[m] = np.eye(d)
+            self.b_acc[m] = np.zeros(d)
+            self.A_eng[m] = np.eye(d)
+            self.b_eng[m] = np.zeros(d)
+            self.n_obs[m] = 0
 
-    # ── Persistence ───────────────────────────────────────────────────────────
+    # ── Estimates ─────────────────────────────────────────────────────────────
 
-    def _load_state(self, dataset_id: str) -> None:
-        self._current_dataset_id = dataset_id
-        if not self.state_path.exists():
-            return
-        try:
-            with open(self.state_path) as f:
-                all_state = json.load(f)
-        except (json.JSONDecodeError, OSError) as exc:
-            logger.warning("[Bandit] Cannot read state (%s); starting fresh.", exc)
-            return
-
-        if dataset_id not in all_state:
-            self._init_arms()
-            return
-
-        ds = all_state[dataset_id]
-
-        # Version check (Phase 4.5)
-        if ds.get("state_version", 1) != _STATE_VERSION:
-            logger.warning(
-                "[Bandit] State for '%s' is version %d (expected %d); starting fresh.",
-                dataset_id, ds.get("state_version", 1), _STATE_VERSION,
-            )
-            self._init_arms()
-            return
-
-        self.total_decisions = ds.get("total_decisions", 0)
-        self.total_updates = ds.get("total_updates", 0)
-        self.Q = float(ds.get("Q", 0.0))
-
-        for m in self.models:
-            if m in ds.get("A_acc", {}):
-                self.A_acc[m] = np.array(ds["A_acc"][m], dtype=np.float64)
-                self.b_acc[m] = np.array(ds["b_acc"][m], dtype=np.float64)
-            if m in ds.get("A_eng", {}):
-                self.A_eng[m] = np.array(ds["A_eng"][m], dtype=np.float64)
-                self.b_eng[m] = np.array(ds["b_eng"][m], dtype=np.float64)
-
-        logger.info(
-            "[Bandit] Loaded v2 state for '%s': %d decisions, %d updates, Q=%.4f.",
-            dataset_id, self.total_decisions, self.total_updates, self.Q,
-        )
-
-    def _save_state(self, dataset_id: str) -> None:
-        try:
-            all_state: dict = {}
-            if self.state_path.exists():
-                with open(self.state_path) as f:
-                    all_state = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            all_state = {}
-
-        arms = [m for m in self.models if m in self.A_acc]
-        all_state[dataset_id] = {
-            "state_version": _STATE_VERSION,
-            "total_decisions": self.total_decisions,
-            "total_updates": self.total_updates,
-            "Q": float(self.Q),
-            "A_acc": {m: self.A_acc[m].tolist() for m in arms},
-            "b_acc": {m: self.b_acc[m].tolist() for m in arms},
-            "A_eng": {m: self.A_eng[m].tolist() for m in arms},
-            "b_eng": {m: self.b_eng[m].tolist() for m in arms},
-        }
-        _atomic_write(self.state_path, all_state)
-
-    # ── UCB computation ───────────────────────────────────────────────────────
-
-    def _ucb(self, phi: np.ndarray, A: np.ndarray, b: np.ndarray) -> float:
-        x = phi.astype(np.float64)
-        try:
-            A_inv = np.linalg.inv(A)
-        except np.linalg.LinAlgError:
-            A_inv = np.eye(len(b))
+    def _mean_and_width(self, x: np.ndarray, A: np.ndarray, b: np.ndarray) -> tuple[float, float]:
+        A_inv = np.linalg.inv(A)
         theta = A_inv @ b
-        expected = float(theta @ x)
-        uncertainty = self.alpha * float(np.sqrt(max(0.0, x @ A_inv @ x)))
-        return expected + uncertainty
+        width = self.alpha * float(np.sqrt(max(0.0, x @ A_inv @ x)))
+        return float(theta @ x), width
 
-    def acc_ucb(self, phi: np.ndarray, arm: str) -> float:
+    def acc_ucb(self, x: np.ndarray, arm: str) -> float:
         self._ensure_arm(arm)
-        return self._ucb(phi, self.A_acc[arm], self.b_acc[arm])
+        mean, width = self._mean_and_width(x, self.A_acc[arm], self.b_acc[arm])
+        return mean + width
 
-    def eng_ucb(self, phi: np.ndarray, arm: str) -> float:
+    def eng_lcb(self, x: np.ndarray, arm: str) -> float:
         self._ensure_arm(arm)
-        return self._ucb(phi, self.A_eng[arm], self.b_eng[arm])
+        mean, width = self._mean_and_width(x, self.A_eng[arm], self.b_eng[arm])
+        return float(np.clip(mean - width, 0.0, 1.0))
 
-    # ── Constrained selection (Phase 4.3) ─────────────────────────────────────
+    @property
+    def lam(self) -> float:
+        return self.lambda_0 + self.mu * max(0.0, self.Q)
+
+    # ── Learning ──────────────────────────────────────────────────────────────
+
+    def observe_outcome(self, x: np.ndarray, arm: str, accuracy: float, energy_norm: float) -> None:
+        """Update the served arm with its measured accuracy and normalised energy."""
+        self._ensure_arm(arm)
+        x = np.asarray(x, dtype=np.float64)
+        outer = np.outer(x, x)
+        self.A_acc[arm] = self.A_acc[arm] + outer
+        self.b_acc[arm] = self.b_acc[arm] + float(accuracy) * x
+        self.A_eng[arm] = self.A_eng[arm] + outer
+        self.b_eng[arm] = self.b_eng[arm] + float(energy_norm) * x
+        self.n_obs[arm] = self.n_obs.get(arm, 0) + 1
+        self.Q = max(0.0, self.Q + float(energy_norm) - self.energy_budget)
+        self.total_updates += 1
+
+    # ── Selection ─────────────────────────────────────────────────────────────
 
     def select_action(
         self,
-        phi_per_arm: dict[str, np.ndarray],
+        x: np.ndarray,
         current_model: str,
         candidates: list[str],
         energy_threshold: float,
-        lambda_0: float,
-        mu: float,
-        switch_costs: dict[str, float],
-    ) -> str:
+        switch_cost: float = _DEFAULT_SWITCH_COST,
+    ) -> tuple[str, dict]:
+        """Return (chosen arm, per-arm diagnostics)."""
         if not candidates:
             raise ValueError("No candidates to select from.")
+        untried = [m for m in candidates if self.n_obs.get(m, 0) == 0]
+        if untried:
+            pick = current_model if current_model in untried else untried[0]
+            return pick, {"untried": untried}
 
-        lam = lambda_0 + mu * max(0.0, self.Q)
-
-        a_ucb = {m: self.acc_ucb(phi_per_arm[m], m) for m in candidates}
-        e_ucb = {m: self.eng_ucb(phi_per_arm[m], m) for m in candidates}
-
-        # Feasibility filter
-        feasible = [m for m in candidates if e_ucb[m] <= energy_threshold]
-        pool = feasible if feasible else sorted(candidates, key=lambda m: e_ucb[m])[:1]
-
-        # Score: maximize acc_ucb - λ·eng_ucb - switch_cost
+        a_ucb = {m: self.acc_ucb(x, m) for m in candidates}
+        e_lcb = {m: self.eng_lcb(x, m) for m in candidates}
+        feasible = [m for m in candidates if e_lcb[m] <= energy_threshold]
+        pool = feasible if feasible else [min(candidates, key=lambda m: e_lcb[m])]
+        lam = self.lam
         scores = {
-            m: a_ucb[m] - lam * e_ucb[m] - (switch_costs.get(m, 0.0) if m != current_model else 0.0)
+            m: a_ucb[m] - lam * e_lcb[m] - (switch_cost if m != current_model else 0.0)
             for m in pool
         }
-        logger.debug("[Bandit] UCB scores: %s", scores)
-        return max(scores, key=lambda m: scores[m])
+        chosen = max(scores, key=lambda m: scores[m])
+        return chosen, {"acc_ucb": a_ucb, "eng_lcb": e_lcb, "feasible": feasible,
+                        "scores": scores, "lambda": lam}
 
-    # ── Pending record ────────────────────────────────────────────────────────
+    # ── Persistence ───────────────────────────────────────────────────────────
 
-    def record_pending(
-        self,
-        phi: np.ndarray,
-        action: str,
-        ema_acc_before: float,
-        ema_eng_before: float,
-        decision_step: int,
-    ) -> dict:
-        return {
-            "phi": phi.tolist(),
-            "action": action,
-            "ema_acc_before": float(ema_acc_before),
-            "ema_eng_before": float(ema_eng_before),
-            "decision_step": int(decision_step),
-        }
-
-    # ── Dual reward update (Phase 4.1) ────────────────────────────────────────
-
-    def observe_outcome(
-        self,
-        phi: np.ndarray,
-        action: str,
-        acc_reward: float,
-        eng_reward: float,
-        dataset_id: str | None = None,
-    ) -> None:
-        """Update A_acc/b_acc and A_eng/b_eng for the selected arm."""
-        self._ensure_arm(action)
-        x = phi.astype(np.float64)
-        self.A_acc[action] = self.A_acc[action] + np.outer(x, x)
-        self.b_acc[action] = self.b_acc[action] + acc_reward * x
-        self.A_eng[action] = self.A_eng[action] + np.outer(x, x)
-        self.b_eng[action] = self.b_eng[action] + eng_reward * x
-        self.total_updates += 1
-        self._save_state(dataset_id or self._current_dataset_id)
-
-    def update_energy_debt(self, energy_used: float, energy_budget: float) -> None:
-        """Update Lyapunov energy-debt accumulator Q."""
-        self.Q = max(0.0, self.Q + energy_used - energy_budget)
+    def save(self) -> None:
+        _atomic_write(self.state_path, {
+            "state_version": _STATE_VERSION,
+            "dataset_id": self._current_dataset_id,
+            "total_decisions": self.total_decisions,
+            "total_updates": self.total_updates,
+            "Q": float(self.Q),
+            "n_obs": dict(self.n_obs),
+            "A_acc": {m: v.tolist() for m, v in self.A_acc.items()},
+            "b_acc": {m: v.tolist() for m, v in self.b_acc.items()},
+            "A_eng": {m: v.tolist() for m, v in self.A_eng.items()},
+            "b_eng": {m: v.tolist() for m, v in self.b_eng.items()},
+        })
 
     def get_stats(self) -> dict:
-        theta_norms: dict[str, float] = {}
-        for m in self.models:
-            if m in self.A_acc:
-                try:
-                    theta = np.linalg.inv(self.A_acc[m]) @ self.b_acc[m]
-                    theta_norms[m] = float(np.linalg.norm(theta))
-                except np.linalg.LinAlgError:
-                    theta_norms[m] = 0.0
-        pending_path = self.state_path.parent / "bandit_pending.json"
+        theta_norms = {
+            m: float(np.linalg.norm(np.linalg.inv(self.A_acc[m]) @ self.b_acc[m]))
+            for m in self.A_acc
+        }
         return {
             "total_decisions": self.total_decisions,
             "total_updates": self.total_updates,
             "Q": self.Q,
-            "has_pending": pending_path.exists(),
+            "n_obs": dict(self.n_obs),
             "theta_acc_l2_norms": theta_norms,
         }
 
 
-# ── Candidate-specific feature vector φ(x, m) ── Phase 4.2 ──────────────────
+# ── Context ───────────────────────────────────────────────────────────────────
 
-_COST_CLASS_ENC = {"light": 0.0, "medium": 0.5, "heavy": 1.0}
+def build_context(ctx: PlanningContext) -> np.ndarray:
+    """Context x for this cycle: describes the STREAM, not the serving arm.
 
-
-def build_candidate_context(ctx: PlanningContext, arm: str, models_cfg: dict) -> np.ndarray:
-    """Build a 16-dim candidate-specific feature vector φ(x, m).
-
-    Global features (10):
-      violation_score, violation_energy, violation_drift,
-      current_ema, current_energy_norm, drift_signal,
-      ema_slope, steps_since_switch, retrains_norm, vmr_size_norm
-
-    Candidate features (6):
-      acc_m, eng_m, acc_ratio (m/current), eng_ratio (m/current),
-      is_current, cost_class_encoding
+    [1, drift_signal, volatility, τ]
+      drift_signal — this cycle's drift statistic relative to tau_drift, in [0, 1]
+      volatility   — batch variance / reference-window variance, in [0, 1]
+                     (regression with accuracy_signal="window_r2"; 0.5 otherwise)
+      τ            — the live adaptive energy threshold
+    The served model's own accuracy/energy are its reward, never its context:
+    with them in x, each arm's estimator only ever sees contexts it produced
+    itself and comparisons across arms become extrapolation.
     """
-    thr = ctx.thresholds
-
-    # Global (same for all arms)
-    v_score  = float(ctx.violation == "score")
-    v_energy = float(ctx.violation == "energy")
-    v_drift  = float(ctx.violation == "drift")
-    curr_ema = float(np.clip(ctx.ema_scores.get(ctx.current_model, 0.5), 0, 1))
-    curr_e   = float(np.clip(thr.get("current_normalised_energy", 0.5), 0, 1))
-    drift_s  = float(np.clip((thr.get("current_kl_div") or 0.0) / 2.0, 0, 1))
-    slope    = float(np.clip(thr.get("ema_slope", 0.0), -1.0, 1.0))
-    steps_sw = float(np.clip(thr.get("steps_since_last_switch", 0) / 500.0, 0, 1))
-    r_norm   = float(np.clip(thr.get("retrains_this_run", 0) / 10.0, 0, 1))
-    vmr_n    = float(np.clip(thr.get("vmr_size", 0) / 20.0, 0, 1))
-
-    # Candidate-specific
-    ema_acc = ctx.ema_accuracy if ctx.ema_accuracy else ctx.ema_scores
-    ema_eng = ctx.ema_energy if ctx.ema_energy else {}
-
-    acc_m = float(np.clip(ema_acc.get(arm, 0.5), 0, 1))
-    eng_m = float(np.clip(ema_eng.get(arm, 0.5), 0, 1))
-
-    curr_acc = float(ema_acc.get(ctx.current_model, 0.5))
-    curr_eng = float(ema_eng.get(ctx.current_model, 0.5))
-    acc_ratio = float(np.clip(acc_m / max(curr_acc, 1e-6), 0, 2))
-    eng_ratio = float(np.clip(eng_m / max(curr_eng, 1e-6), 0, 2))
-
-    is_current = float(arm == ctx.current_model)
-    cost_enc = _COST_CLASS_ENC.get(
-        models_cfg.get(arm, {}).get("cost_class", "medium"), 0.5
-    )
-
-    return np.array([
-        v_score, v_energy, v_drift,
-        curr_ema, curr_e, drift_s, slope, steps_sw, r_norm, vmr_n,
-        acc_m, eng_m, acc_ratio, eng_ratio, is_current, cost_enc,
-    ], dtype=np.float32)
-
-
-# Legacy alias kept for tests
-def build_context(ctx: PlanningContext, models: list[str]) -> np.ndarray:
-    """Backward-compat wrapper: returns the context vector for the first model."""
-    return build_candidate_context(ctx, models[0] if models else ctx.current_model, {})
+    tel = ctx.telemetry or {}
+    tau_d = float(ctx.thresholds.get("tau_drift", 0.5)) or 0.5
+    drift = float(np.clip((tel.get("kl_div") or 0.0) / (2.0 * tau_d), 0.0, 1.0))
+    vol = tel.get("volatility")
+    vol = 0.5 if vol is None else float(np.clip(vol, 0.0, 1.0))
+    return np.array([1.0, drift, vol, float(np.clip(ctx.current_energy_threshold, 0.0, 1.0))],
+                    dtype=np.float64)
 
 
 # ── Factory ───────────────────────────────────────────────────────────────────
@@ -378,219 +260,96 @@ def load_or_create_bandit(
     knowledge_dir: str | Path,
     dataset_id: str | None = None,
 ) -> LinUCBBandit:
-    alpha   = float(thresholds.get("bandit_alpha", _DEFAULT_ALPHA))
-    beta    = float(thresholds.get("beta", 0.95))
-    w_acc   = float(thresholds.get("w_acc", beta))
-    w_eng   = float(thresholds.get("w_energy", 1.0 - beta))
-    state_path = Path(knowledge_dir) / "bandit_state.json"
-
+    """New bandit for one run; state lives in knowledge_dir (the run directory)."""
     bandit = LinUCBBandit(
         models=models,
         context_dim=_CONTEXT_DIM,
-        alpha=alpha,
-        w_acc=w_acc,
-        w_energy=w_eng,
-        state_path=state_path,
+        alpha=float(thresholds.get("bandit_alpha", _DEFAULT_ALPHA)),
+        state_path=Path(knowledge_dir) / "bandit_state.json",
+        lambda_0=float(thresholds.get("bandit_lambda_0", _DEFAULT_LAMBDA_0)),
+        mu=float(thresholds.get("bandit_mu", _DEFAULT_MU)),
+        energy_budget=float(thresholds.get("E_ref", 0.5)),
     )
-    if dataset_id:
-        bandit._load_state(dataset_id)
+    bandit._current_dataset_id = dataset_id or "unknown"
     return bandit
 
 
-# ── Pending reward resolution (Phase 4.4) ────────────────────────────────────
-
-def resolve_pending(
-    bandit: LinUCBBandit,
-    pending_path: Path,
-    thresholds: dict,
-    mape_info: dict,
-    current_step: int = 0,
-) -> bool:
-    """Resolve a pending reward if bandit_min_observation_steps have elapsed.
-
-    Phase 4.4 fix: resolution is step-gated, not wall-clock-gated.
-    Returns True if resolved (or deleted on error), False if not ready.
-    """
-    try:
-        with open(pending_path) as f:
-            pending = json.load(f)
-
-        min_steps = int(thresholds.get("bandit_min_observation_steps", _DEFAULT_MIN_OBS_STEPS))
-        decision_step = int(pending.get("decision_step", 0))
-        if (current_step - decision_step) < min_steps:
-            return False
-
-        arm = pending["action"]
-        phi = np.array(pending["phi"], dtype=np.float32)
-
-        # Accuracy reward: change in EMA accuracy
-        acc_after = float(mape_info.get("ema_accuracy", {}).get(arm, 0.5))
-        acc_reward = float(np.clip(acc_after - float(pending["ema_acc_before"]), -1.0, 1.0))
-
-        # Energy reward: negative of normalised energy change (lower energy = positive reward)
-        eng_after = float(mape_info.get("ema_energy", {}).get(arm, 0.5))
-        eng_reward = float(np.clip(float(pending["ema_eng_before"]) - eng_after, -1.0, 1.0))
-
-        # Update energy debt
-        e_norm = float(mape_info.get("current_normalised_energy", 0.5))
-        e_budget = float(mape_info.get("current_energy_threshold", 0.5))
-        bandit.update_energy_debt(e_norm, e_budget)
-
-        bandit.observe_outcome(phi, arm, acc_reward, eng_reward)
-        os.unlink(str(pending_path))
-        logger.info(
-            "[Bandit] Resolved pending: arm=%s, acc_r=%.4f, eng_r=%.4f, Q=%.4f",
-            arm, acc_reward, eng_reward, bandit.Q,
-        )
-        return True
-
-    except Exception as exc:
-        logger.warning("[Bandit] Failed to resolve pending (%s). Deleting to avoid stale state.", exc)
-        try:
-            os.unlink(str(pending_path))
-        except OSError:
-            pass
-        return True
-
-
-# ── BanditPlanner — Planner ABC adapter ──────────────────────────────────────
+# ── Planner ───────────────────────────────────────────────────────────────────
 
 class BanditPlanner(Planner):
-    """S7 — LinUCB contextual bandit planner with dual estimators (Phase 4).
-
-    Registered as "bandit" in the planner registry.
-    """
+    """S7 — constrained LinUCB over models; learns from every monitored batch."""
 
     name = "bandit"
 
-    def __init__(
-        self,
-        bandit: "LinUCBBandit | None" = None,
-        dataset_id: str = "unknown",
-    ) -> None:
+    def __init__(self, bandit: "LinUCBBandit | None" = None, dataset_id: str = "unknown") -> None:
         if bandit is None:
             if _bandit_instance is None:
                 raise RuntimeError(
                     "BanditPlanner: no bandit instance registered. "
-                    "run_experiment.py must call set_bandit_instance() before the MAPE loop."
+                    "The harness must call set_bandit_instance() before the MAPE loop."
                 )
-            self._bandit = _bandit_instance
-        else:
-            self._bandit = bandit
-        self.dataset_id = dataset_id or self._bandit._current_dataset_id
+            bandit = _bandit_instance
+        self._bandit = bandit
+        self.dataset_id = dataset_id or bandit._current_dataset_id
+
+    def _learn(self, ctx: PlanningContext) -> None:
+        tel = ctx.telemetry or {}
+        b = self._bandit
+        if b.pending_x is None or tel.get("accuracy") is None or tel.get("normalized_energy") is None:
+            return
+        served = tel.get("served_model") or ctx.current_model
+        b.observe_outcome(b.pending_x, served, tel["accuracy"], tel["normalized_energy"])
+        b.save()
 
     def plan(self, ctx: PlanningContext) -> PlanDecision:
-        if ctx.violation is None:
-            return PlanDecision(action="noop", reason="S7 bandit: no violation")
+        b = self._bandit
+        self._learn(ctx)
+        x = build_context(ctx)
+        b.pending_x = x  # the next monitored batch is this decision's outcome
 
         if ctx.violation == "drift":
             return self._handle_drift(ctx)
 
-        thr = ctx.thresholds
-        models_cfg = thr.get("models", {})
         candidates = list(ctx.available_models)
-
         if not candidates:
             return PlanDecision(action="noop", reason="S7 bandit: no candidates")
 
-        # Build candidate-specific context vectors (Phase 4.2)
-        phi_per_arm = {
-            m: build_candidate_context(ctx, m, models_cfg)
-            for m in candidates
-        }
-
-        # Switch costs from cost_class
-        switch_costs = {
-            m: _COST_CLASS_ENC.get(models_cfg.get(m, {}).get("cost_class", "medium"), 0.5) * 0.1
-            for m in candidates
-        }
-
-        lambda_0 = float(thr.get("bandit_lambda_0", _DEFAULT_LAMBDA_0))
-        mu       = float(thr.get("bandit_mu", _DEFAULT_MU))
-
-        try:
-            selected = self._bandit.select_action(
-                phi_per_arm=phi_per_arm,
-                current_model=ctx.current_model,
-                candidates=candidates,
-                energy_threshold=ctx.current_energy_threshold,
-                lambda_0=lambda_0,
-                mu=mu,
-                switch_costs=switch_costs,
-            )
-        except Exception as exc:
-            logger.warning("[Bandit] select_action failed (%s); greedy fallback.", exc)
-            ema_acc = ctx.ema_accuracy if ctx.ema_accuracy else ctx.ema_scores
-            selected = max(candidates, key=lambda m: ema_acc.get(m, 0.0))
-
-        # Hysteresis check (Phase 4.6)
-        margin = float(thr.get("bandit_switch_margin", 0.01))
-        curr_acc = (ctx.ema_accuracy or ctx.ema_scores).get(ctx.current_model, 0.5)
-        sel_acc  = (ctx.ema_accuracy or ctx.ema_scores).get(selected, 0.5)
-        if selected == ctx.current_model or not should_switch(
-            d_current=-curr_acc, d_candidate=-sel_acc, margin=margin
-        ):
-            return PlanDecision(
-                action="noop",
-                reason=(
-                    f"S7 bandit: selected arm '{selected}' not better than current "
-                    f"'{ctx.current_model}' by margin={margin} — hysteresis guard."
-                ),
-            )
-
-        phi_selected = phi_per_arm[selected]
-        ema_acc_before = float((ctx.ema_accuracy or ctx.ema_scores).get(selected, 0.5))
-        ema_eng_before = float((ctx.ema_energy or {}).get(selected, 0.5))
-
-        pending = self._bandit.record_pending(
-            phi=phi_selected,
-            action=selected,
-            ema_acc_before=ema_acc_before,
-            ema_eng_before=ema_eng_before,
-            decision_step=ctx.current_step,
+        switch_cost = float(ctx.thresholds.get("bandit_switch_cost", _DEFAULT_SWITCH_COST))
+        chosen, diag = b.select_action(
+            x, ctx.current_model, candidates, ctx.current_energy_threshold, switch_cost,
         )
-
-        pending_path = self._bandit.state_path.parent / "bandit_pending.json"
-        _atomic_write(pending_path, pending)
-        self._bandit.total_decisions += 1
-
-        stats = self._bandit.get_stats()
-        return PlanDecision(
-            action="switch",
-            model=selected,
-            reason=(
-                f"S7 bandit: violation={ctx.violation}, selected={selected}, "
-                f"decisions={self._bandit.total_decisions}, Q={self._bandit.Q:.4f}"
-            ),
-            metadata={
-                "bandit_pending": pending,
-                "dataset_id": self.dataset_id,
-                "bandit_stats": stats,
-            },
-        )
+        b.total_decisions += 1
+        meta = {"bandit_stats": b.get_stats(), "diagnostics": _round(diag)}
+        if "untried" in diag:
+            why = f"trying unobserved arm (untried={diag['untried']})"
+        else:
+            why = (f"score={diag['scores'].get(chosen, float('nan')):.4f} "
+                   f"lambda={diag['lambda']:.3f} Q={b.Q:.3f}")
+        if chosen == ctx.current_model:
+            return PlanDecision(action="noop", reason=f"S7 bandit: stay on {chosen} ({why})",
+                                metadata=meta)
+        return PlanDecision(action="switch", model=chosen,
+                            reason=f"S7 bandit: switch to {chosen} ({why})", metadata=meta)
 
     def _handle_drift(self, ctx: PlanningContext) -> PlanDecision:
-        """Drift violation: route to VMR replace or inline retrain.
-
-        Same contract as S4/S5/S6 (harmone_original / violation_aware /
-        pareto) — drift is not an arm-selection problem the LinUCB estimators
-        model (there's no "retrain" arm with its own context vector), so it
-        bypasses select_action()/record_pending() entirely and is not fed
-        into the reward update. Previously this always no-op'd (referenced a
-        never-implemented plan_drift()), so drift-triggered retrain/replace
-        never fired under the bandit planner.
-        """
+        """Drift without a score/energy violation: the fixed VMR-replace /
+        retrain rule shared with S4–S6 (retrain/replace are not arms)."""
         dr = ctx.drift_result
         if dr is None:
             return PlanDecision(action="noop", reason="S7 bandit: drift signalled but no drift_result")
         if dr.get("action") == "replace":
             path = dr.get("version")
-            return PlanDecision(
-                action="replace",
-                version_path=path,
-                reason=f"S7 bandit: VMR replace → {path}",
-            )
+            return PlanDecision(action="replace", version_path=path,
+                                reason=f"S7 bandit: VMR replace → {path}")
         return PlanDecision(action="retrain", reason="S7 bandit: no VMR match, retrain")
+
+
+def _round(obj):
+    if isinstance(obj, dict):
+        return {k: _round(v) for k, v in obj.items()}
+    if isinstance(obj, float):
+        return round(obj, 4)
+    return obj
 
 
 REGISTRY["bandit"] = BanditPlanner

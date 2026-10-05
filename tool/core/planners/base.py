@@ -33,6 +33,10 @@ class PlanningContext:
     # Audit A5: model -> has it been monitored yet. Empty = not supplied
     # (legacy callers); is_observed() then falls back to the 0.5 seed check.
     observed: dict = field(default_factory=dict)
+    # This cycle's monitor output: accuracy, normalized_energy, kl_div and
+    # served_model (the model that served the monitored batch). Used by the
+    # bandit to learn from every batch (audit B1/B5).
+    telemetry: dict = field(default_factory=dict)
 
 
 def is_observed(ctx: "PlanningContext", model: str) -> bool:

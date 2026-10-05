@@ -525,6 +525,7 @@ def _monitor_batch(
     The raw batch R² is always reported as telemetry["r2"]; telemetry["accuracy"]
     is the value that drives the EMAs, scores and violations.
     """
+    volatility = None  # batch variance relative to the reference window, in [0, 1]
     if accuracy is not None:
         acc = max(0.0, min(1.0, accuracy))
         r2 = acc
@@ -538,6 +539,8 @@ def _monitor_batch(
         if thresholds.get("accuracy_signal", "batch_r2") == "window_r2" and reference_values is not None:
             ref_var = float(np.var(np.asarray(reference_values, dtype=float))) if len(reference_values) > 1 else 0.0
             acc = max(0.0, min(1.0, 1.0 - mse / ref_var)) if ref_var > 0 else r2
+            if ref_var > 0:
+                volatility = min(batch_var / ref_var, 2.0) / 2.0
 
     avg_energy_uJ = float(np.mean(energies_uJ)) if energies_uJ else 0.0
     e_min = thresholds.get("E_m", 0.0)
@@ -568,6 +571,7 @@ def _monitor_batch(
         "avg_energy_uJ": round(avg_energy_uJ, 4),
         "normalized_energy": round(e_norm, 6),
         "ema_score": round(ema, 6),
+        "volatility": None if volatility is None else round(volatility, 6),
     }
 
 
@@ -657,6 +661,8 @@ def _plan(
     thresholds: dict,
     planner,
     current_step: int = 0,
+    telemetry: dict | None = None,
+    served_model: str | None = None,
 ) -> PlanDecision:
     effective_violation = violation
     if drift_result["drift_detected"] and violation is None:
@@ -677,6 +683,13 @@ def _plan(
         last_observed_step=dict(mape_info.get("last_observed_step", {})),
         staleness_window=int(thresholds.get("staleness_window", 500)),
         observed=dict(mape_info.get("observed", {})),
+        telemetry={
+            "accuracy": (telemetry or {}).get("accuracy"),
+            "normalized_energy": (telemetry or {}).get("normalized_energy"),
+            "volatility": (telemetry or {}).get("volatility"),
+            "kl_div": drift_result.get("kl_div"),
+            "served_model": served_model or current_model,
+        },
     )
     decision = planner.plan(ctx)
 
@@ -2978,6 +2991,7 @@ def run_experiment(
                     violation, drift_result, current_model,
                     available_models, mape_info, thresholds, planner,
                     current_step=step,
+                    telemetry=telemetry, served_model=current_model,
                 )
 
                 # EMA head-start: if the planner noops while some models have never
