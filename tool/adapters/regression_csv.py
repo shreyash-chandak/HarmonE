@@ -11,6 +11,10 @@ Config schema (all keys read from the dataset config JSON):
     data_path         : path to the CSV file (absolute or relative to tool/)
     train_frac        : fraction of rows used for training (default 0.8)
     val_frac          : optional held-out slice between train and stream (default 0.0)
+    train_window_rows : optional; train on only the last N rows before the
+                        stream starts (default: all rows before it). The
+                        stream is unchanged. Added 2026-10-06 for spot_prices,
+                        whose train_frac 0.6 put 15 years (1999-2014) in training.
 
   Mode B — pre-split files (original HarmonE format):
     train_path        : CSV containing the initial training portion only
@@ -88,7 +92,9 @@ class RegressionCSVAdapter(DatasetAdapter):
 
     def train_split(self) -> np.ndarray:
         """Return raw training values (unscaled). Scaler should be fit on this."""
-        return self._values[: self._train_end]
+        window = self._config.get("train_window_rows")
+        start = max(0, self._train_end - int(window)) if window else 0
+        return self._values[start : self._train_end]
 
     def val_split(self) -> np.ndarray:
         """Return a held-out slice between train end and stream start."""

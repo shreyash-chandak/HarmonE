@@ -33,8 +33,8 @@
       "loader": "adapters.loaders.sklearn_loader",
       "cost_class": "medium",
       "hyperparams": {
-        "train":   {"kernel": "linear", "C": 0.5, "tol": 0.001, "epsilon": 0.15},
-        "retrain": {}
+        "train":   {"kernel": "linear", "C": 0.00025, "tol": 0.001, "epsilon": 0.0005, "max_train_samples": 12000},
+        "retrain": {"window_rows": 12000}
       }
     }
   },

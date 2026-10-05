@@ -159,13 +159,68 @@ def _seed_vmr_initial(
             logger.warning("VMR seed failed for '%s': %s", model_name, exc)
 
 
+def _write_weights_meta(dataset_config: dict, name: str, wp: str, n_train_values: int) -> None:
+    with open(wp + ".meta.json", "w") as f:
+        json.dump(_weights_meta(dataset_config, name, n_train_values), f, indent=2)
+
+
+def _weights_meta(dataset_config: dict, name: str, n_train_values: int) -> dict:
+    """What a regression model's weights were trained with — written next to
+    the weights (<weights>.meta.json) and compared on load (see
+    _stale_regression_models)."""
+    spec = dataset_config["models"][name]
+    return {
+        "train_hyperparams": spec.get("hyperparams", {}).get("train", {}),
+        "seq_length": int(dataset_config.get("seq_length", 5)),
+        "n_train_values": int(n_train_values),
+        # Not data_path: the clean and *_driftinduced configs share weights
+        # and have identical training rows (drift is only induced in the stream).
+        "split": {k: dataset_config.get(k) for k in
+                  ("train_path", "train_frac", "train_window_rows")},
+    }
+
+
+def _abs_weights_path(spec: dict) -> str:
+    wp = spec["weights_path"]
+    return wp if os.path.isabs(wp) else os.path.join(str(_TOOL_DIR), wp)
+
+
+def _stale_regression_models(dataset_config: dict, train_values: np.ndarray) -> list[str]:
+    """Models whose weights are missing or were trained with different
+    hyperparameters / data than the config now specifies (2026-10-06).
+
+    Weights are reused across runs and are not retrained when a config
+    changes, so without this check a hyperparameter change was silently
+    ignored (the old weights kept being loaded). Weights with no
+    <weights>.meta.json (trained before this check existed) count as stale.
+    """
+    stale = []
+    for name, spec in dataset_config.get("models", {}).items():
+        wp = _abs_weights_path(spec)
+        meta_path = wp + ".meta.json"
+        if not os.path.exists(wp) or not os.path.exists(meta_path):
+            stale.append(name)
+            continue
+        try:
+            with open(meta_path) as f:
+                saved = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            stale.append(name)
+            continue
+        if saved != json.loads(json.dumps(_weights_meta(dataset_config, name, len(train_values)))):
+            stale.append(name)
+    return stale
+
+
 def _train_regression_models(
-    dataset_config: dict, train_values: np.ndarray, scaler
+    dataset_config: dict, train_values: np.ndarray, scaler, only: list[str] | None = None,
 ) -> None:
     """Train LSTM + Ridge + SVR on train_values and save to the paths in config.
 
-    Only called when weight files are absent.  Models are saved to the paths
-    specified in dataset_config["models"][name]["weights_path"].
+    Called for models whose weights are missing or stale
+    (_stale_regression_models); `only` restricts training to those names.
+    Each model's weights get a <weights>.meta.json recording what they were
+    trained with.
     """
     import pickle
     import torch
@@ -189,6 +244,8 @@ def _train_regression_models(
 
     model_specs = dataset_config.get("models", {})
     for name, spec in model_specs.items():
+        if only is not None and name not in only:
+            continue
         wp = spec["weights_path"]
         if not os.path.isabs(wp):
             wp = os.path.join(str(_TOOL_DIR), wp)
@@ -220,6 +277,7 @@ def _train_regression_models(
                                 epoch_loss / len(loader))
             torch.save(model.state_dict(), wp)
             logger.info("  Saved LSTM → %s", wp)
+            _write_weights_meta(dataset_config, name, wp, len(train_values))
 
         elif "ridge" in name or "linear" in name:
             hp = spec.get("hyperparams", {}).get("train", {})
@@ -230,6 +288,7 @@ def _train_regression_models(
             with open(wp, "wb") as f:
                 pickle.dump(m, f)
             logger.info("  Saved Ridge → %s", wp)
+            _write_weights_meta(dataset_config, name, wp, len(train_values))
 
         elif "svr" in name or "svm" in name:
             hp = spec.get("hyperparams", {}).get("train", {})
@@ -253,7 +312,7 @@ def _train_regression_models(
                 idx = np.random.RandomState(0).choice(len(X), max_train_samples, replace=False)
                 X_fit, y_fit = X[idx], y[idx]
             logger.info(
-                "Training SVR for '%s' (kernel=%s, C=%.3f, tol=%.4f, epsilon=%.4f, "
+                "Training SVR for '%s' (kernel=%s, C=%g, tol=%g, epsilon=%g, "
                 "n=%d%s) ...",
                 name, kernel, C, tol, epsilon, len(X_fit),
                 f" subsampled from {len(X)}" if len(X_fit) < len(X) else "",
@@ -263,6 +322,7 @@ def _train_regression_models(
             with open(wp, "wb") as f:
                 pickle.dump(m, f)
             logger.info("  Saved SVR → %s", wp)
+            _write_weights_meta(dataset_config, name, wp, len(train_values))
 
         else:
             logger.warning("No inline trainer for model '%s' — skipping.", name)
@@ -738,10 +798,16 @@ def _load_model_store(dataset_config: dict) -> dict:
         if not os.path.exists(wp):
             store[name] = None
             continue
-        retrain_params = spec.get("hyperparams", {}).get("retrain", {})
+        retrain_params = dict(spec.get("hyperparams", {}).get("retrain", {}))
+        # Optional per-model retrain window (rows of recent stream history);
+        # default = drift_window_size. SVR uses a window as large as its
+        # training cap, otherwise a 1,200-row refit leaves it with at most
+        # 1,200 support vectors and moves it on the energy axis.
+        window_rows = retrain_params.pop("window_rows", None)
         # For sample-scaled retraining (audit N4): the hyperparameters and
         # training-set size the on-disk model was originally fitted with.
         scale_info = {
+            "retrain_window_rows": window_rows,
             "train_params": spec.get("hyperparams", {}).get("train", {}),
             "n_train_sequences": dataset_config.get("_n_train_sequences"),
             "retrain_regularisation": dataset_config.get("retrain_regularisation", "sample_scaled"),
@@ -1436,7 +1502,8 @@ def _do_inline_retrain(
     if info is None:
         return False
 
-    recent_raw = value_history[-drift_window:] if len(value_history) > drift_window else value_history
+    window = int(info.get("retrain_window_rows") or drift_window)
+    recent_raw = value_history[-window:] if len(value_history) > window else value_history
     if len(recent_raw) <= seq_length:
         return False
 
@@ -2766,16 +2833,10 @@ def run_experiment(
 
     # ── Models ────────────────────────────────────────────────────────────────
     if not is_cv:
-        any_missing = any(
-            not os.path.exists(
-                spec["weights_path"] if os.path.isabs(spec["weights_path"])
-                else os.path.join(str(_TOOL_DIR), spec["weights_path"])
-            )
-            for spec in dataset_config.get("models", {}).values()
-        )
-        if any_missing:
-            logger.info("Some model weights missing — training inline on training split ...")
-            _train_regression_models(dataset_config, train_values, scaler)
+        stale = _stale_regression_models(dataset_config, train_values)
+        if stale:
+            logger.info("Model weights missing or stale %s — training inline on training split ...", stale)
+            _train_regression_models(dataset_config, train_values, scaler, only=stale)
     else:
         train_label_paths, train_inline_labels = adapter.train_labels()
         _train_cv_models_if_missing(

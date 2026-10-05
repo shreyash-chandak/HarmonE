@@ -33,8 +33,8 @@
       "loader": "adapters.loaders.sklearn_loader",
       "cost_class": "medium",
       "hyperparams": {
-        "train":   {"kernel": "linear", "C": 0.5, "tol": 0.001, "epsilon": 0.15},
-        "retrain": {}
+        "train":   {"kernel": "linear", "C": 0.00025, "tol": 0.001, "epsilon": 0.0005, "max_train_samples": 12000},
+        "retrain": {"window_rows": 12000}
       }
     }
   },
@@ -73,8 +73,8 @@
   "E_m": 8493.4,
   "E_M": 58874.0,
   "energy_bounds_source": "calibrate_from_naive_runs: naive runs 2026-10-02 (regression) / 2026-10-03 (CV), per-step metering -- PROVISIONAL, recalibrate with batch metering",
-  "tau_drift": 0.75,
-  "tau_drift_source": "calibrated_p99_1200w",
+  "tau_drift": 1.16452,
+  "tau_drift_source": "calibrate_drift_threshold kl_overflow p99 window=1200 null=stream[:4975]",
   "drift_reference": "both",
   "planner": "harmone_original",
   "energy_required": [

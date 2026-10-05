@@ -98,6 +98,13 @@ def run(
 
     # Windows used by retrain/fine-tune (capped to drift_window).
     value_history: list[float] = []
+    # Keep enough raw history for the longest per-model retrain window
+    # (hyperparams.retrain.window_rows, e.g. SVR); drift/accuracy use the
+    # last drift_window of it.
+    history_keep = max([drift_window] + [
+        int(spec.get("hyperparams", {}).get("retrain", {}).get("window_rows") or 0)
+        for spec in dataset_config.get("models", {}).values()
+    ])
     luminance_history: list[float] = []
     image_path_history: list[str] = []
 
@@ -133,7 +140,7 @@ def run(
                     # Retrain window is the raw stream (all rows), like
                     # single-threaded's value_history.
                     value_history.extend(float(r["y_true"]) for r in batch)
-                    value_history = value_history[-drift_window:]
+                    value_history = value_history[-history_keep:]
 
                 last_adaptation = mape_store.load().get("last_adaptation", {})
                 drift_result = _drift_for_batch(kp, current_step, current_model, last_adaptation)

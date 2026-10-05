@@ -37,9 +37,11 @@
 set -uo pipefail
 
 SEED=1
+ONLY_NAIVE=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --seed) SEED="$2"; shift 2 ;;
+        --only-naive) ONLY_NAIVE=1; shift ;;   # naive runs only, for experiments/calibrate_from_naive_runs.py
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
 done
@@ -140,6 +142,7 @@ for dataset in "${DATASETS[@]}"; do
     done
 
     # All adaptive planners: one run each (full model pool).
+    [ "$ONLY_NAIVE" -eq 1 ] && continue
     for planner in "${ADAPTIVE_PLANNERS[@]}"; do
         _run_one "${dataset}_${planner}_conc" \
             --dataset "$dataset" --planner "$planner"

@@ -129,7 +129,8 @@ def run_cycle(
                             [float(r["y_true"]) for r in monitor_rows],
                             [float(r["y_pred"]) for r in monitor_rows],
                             energies, monitor_model, mape_info, thresholds,
-                            reference_values=value_history,  # last drift_window values (audit A1)
+                            # last drift_window values (audit A1)
+                            reference_values=(value_history or [])[-int(thresholds.get("drift_window_size", 1200)):],
                         )
                     # ── Analyse (before the boundary update, as single-threaded)
                     if monitor_model == current_model:

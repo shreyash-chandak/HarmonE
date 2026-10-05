@@ -19,8 +19,21 @@ like. This script reuses OUR existing (and Augur-inspired) drift detectors
 against OUR existing held-out data, which is the part of Augur's process
 directly actionable without new infrastructure.
 
+Detector "kl_overflow" (2026-10-06, audit N1) is the one the concurrent
+harness actually runs (concurrent_harness/mape/drift_ref.py): KL against the
+training histogram with 50 bins plus two open-ended overflow bins, so values
+outside the training range raise the score. Calibrate tau_drift with it.
+
+Null pool: --null-stream-rows N uses the first N stream rows (before the first
+injected drift region) instead of val_split(): pems_driftinduced 2000,
+spot_prices_driftinduced 2364, uci_electricity_driftinduced 4975 (rows where
+the *_driftInduced stream first differs from the clean one). --write stores
+the kl_overflow threshold as tau_drift in the dataset config.
+
 Usage:
     cd tool/
+    python3 experiments/calibrate_drift_threshold.py --dataset pems_driftinduced \
+        --detectors kl_overflow --window-size 1200 --null-stream-rows 2000 --write
     python3 experiments/calibrate_drift_threshold.py --dataset pems
     python3 experiments/calibrate_drift_threshold.py --dataset imagenet_c \\
         --detectors kl_fixed_ref,hellinger_fixed_ref --window-size 300
@@ -45,7 +58,28 @@ if str(_TOOL_DIR) not in sys.path:
 _DEFAULT_WINDOW_SIZE = 200
 _DEFAULT_PERCENTILE = 99.0
 
+class _KLOverflowDetector:
+    """KL vs the training histogram with overflow bins — same scoring as
+    concurrent_harness/mape/drift_ref.PerModelDriftReference."""
+
+    def __init__(self, n_bins: int = 50) -> None:
+        self.n_bins = n_bins
+        self.edges = None
+        self.ref = None
+
+    def fit_reference(self, values) -> None:
+        hist, base_edges = np.histogram(np.asarray(values, dtype=float), bins=self.n_bins)
+        self.edges = np.concatenate(([-np.inf], base_edges, [np.inf]))
+        self.ref = np.concatenate(([0.0], hist.astype(float), [0.0]))
+
+    def score(self, window) -> float:
+        from core.drift.kl_fixed_ref import _kl_divergence
+        hist, _ = np.histogram(np.asarray(window, dtype=float), bins=self.edges)
+        return float(_kl_divergence(hist.astype(float), self.ref))
+
+
 _DETECTOR_BUILDERS: dict[str, str] = {
+    "kl_overflow": "kl_overflow",
     "kl_fixed_ref": "kl_fixed_ref",
     "hellinger_fixed_ref": "hellinger_fixed_ref",
     "energy_distance": "energy_distance",
@@ -53,6 +87,8 @@ _DETECTOR_BUILDERS: dict[str, str] = {
 
 
 def _make_detector(name: str, window_size: int, n_bins: int = 50):
+    if name == "kl_overflow":
+        return _KLOverflowDetector(n_bins=n_bins)
     if name == "kl_fixed_ref":
         from core.drift.kl_fixed_ref import KLFixedRefDetector
         # KLFixedRefDetector loads its reference from a JSON file rather than
@@ -97,11 +133,16 @@ def _null_window_scores(
     return scores
 
 
-def _load_regression_values(dataset_config: dict, tool_dir: Path):
+def _load_regression_values(dataset_config: dict, tool_dir: Path, null_stream_rows: int | None = None):
     from experiments.run_experiment import _build_adapter
     adapter = _build_adapter(dataset_config, tool_dir / "configs" / "datasets")
     train_values = np.asarray(adapter.train_split(), dtype=float)
-    val_values = np.asarray(adapter.val_split(), dtype=float) if hasattr(adapter, "val_split") else np.array([])
+    if null_stream_rows:
+        # first rows of the stream, before the first injected drift region
+        val_values = np.asarray([s.ground_truth for _, s in zip(range(null_stream_rows), adapter.stream())],
+                                dtype=float)
+    else:
+        val_values = np.asarray(adapter.val_split(), dtype=float) if hasattr(adapter, "val_split") else np.array([])
     return train_values, val_values
 
 
@@ -127,6 +168,7 @@ def calibrate(
     percentile: float,
     stride: int | None,
     tool_dir: Path,
+    null_stream_rows: int | None = None,
 ) -> dict:
     config_path = tool_dir / "configs" / "datasets" / f"{dataset_name}.json"
     if not config_path.exists():
@@ -138,7 +180,7 @@ def calibrate(
     if is_cv:
         train_values, val_values = _load_cv_luminance_values(dataset_config, tool_dir)
     else:
-        train_values, val_values = _load_regression_values(dataset_config, tool_dir)
+        train_values, val_values = _load_regression_values(dataset_config, tool_dir, null_stream_rows)
 
     if len(train_values) < window_size:
         raise ValueError(
@@ -157,7 +199,8 @@ def calibrate(
             len(val_values) if val_values is not None else 0,
         )
 
-    stride = stride or max(1, window_size // 2)
+    # small null pools: ~20 (overlapping) windows rather than 1-2
+    stride = stride or max(1, min(window_size // 2, (len(null_values) - window_size) // 20 or 1))
     tmp_ref_path = tool_dir / "runs" / f"_calibrate_tmp_ref_{dataset_name}.json"
     tmp_ref_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -208,13 +251,18 @@ def main() -> None:
                         help="Null-distribution percentile used as the threshold (default p99).")
     parser.add_argument("--stride", type=int, default=None,
                         help="Window stride for the null-score sweep (default window_size // 2).")
+    parser.add_argument("--null-stream-rows", type=int, default=None,
+                        help="Use the first N stream rows (pre-drift) as the null pool.")
+    parser.add_argument("--write", action="store_true",
+                        help="Write the kl_overflow threshold into the config as tau_drift.")
     parser.add_argument("--output", default=None,
                         help="Output JSON path (default: runs/calibration_<dataset>.json).")
     args = parser.parse_args()
 
     detector_names = [d.strip() for d in args.detectors.split(",") if d.strip()]
     report = calibrate(
-        args.dataset, detector_names, args.window_size, args.percentile, args.stride, _TOOL_DIR
+        args.dataset, detector_names, args.window_size, args.percentile, args.stride, _TOOL_DIR,
+        null_stream_rows=args.null_stream_rows,
     )
 
     out_path = Path(args.output) if args.output else _TOOL_DIR / "runs" / f"calibration_{args.dataset}.json"
@@ -222,8 +270,31 @@ def main() -> None:
     with open(out_path, "w") as f:
         json.dump(report, f, indent=2)
     print(f"\nSaved calibration report to {out_path}")
-    print("Copy the 'detection_threshold' value(s) you want into the dataset config's "
-          "tau_drift key(s) - this script never writes config files for you.")
+    if args.write:
+        _write_tau(args.dataset, report, args)
+    else:
+        print("Pass --write to store the kl_overflow threshold as tau_drift.")
+
+
+def _write_tau(dataset: str, report: dict, args) -> None:
+    """Edit only the tau_drift / tau_drift_source lines of the config."""
+    import re
+    entry = report["detectors"].get("kl_overflow")
+    if entry is None:
+        raise SystemExit("--write needs the kl_overflow detector in --detectors")
+    path = _TOOL_DIR / "configs" / "datasets" / f"{dataset}.json"
+    text = path.read_text()
+    tau = entry["detection_threshold"]
+    source = (f"calibrate_drift_threshold kl_overflow p{args.percentile:g} "
+              f"window={args.window_size} null={'stream[:%d]' % args.null_stream_rows if args.null_stream_rows else 'val_split'}")
+    for key, val in (("tau_drift", tau), ("tau_drift_source", source)):
+        pat = re.compile(rf'^(\s*)"{key}":\s*[^,\n]+(,?)$', re.M)
+        if not pat.search(text):
+            raise SystemExit(f'{path}: no "{key}" line')
+        text = pat.sub(lambda m: f'{m.group(1)}"{key}": {json.dumps(val)}{m.group(2)}', text, count=1)
+    json.loads(text)
+    path.write_text(text)
+    print(f"wrote tau_drift={tau} to {path.name}")
 
 
 if __name__ == "__main__":

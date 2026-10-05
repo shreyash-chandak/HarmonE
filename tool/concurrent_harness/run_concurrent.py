@@ -211,7 +211,7 @@ def main() -> None:
 
     from experiments.run_experiment import (
         _load_dataset_config, _build_adapter, _fit_scaler,
-        _train_regression_models, _train_cv_models_if_missing,
+        _train_regression_models, _train_cv_models_if_missing, _stale_regression_models,
     )
     import os as _os
 
@@ -239,19 +239,13 @@ def main() -> None:
     adapter = _build_adapter(dataset_config, Path(args.configs_dir))
     if not is_cv:
         train_values = adapter.train_split()
-        any_missing = any(
-            not _os.path.exists(
-                spec["weights_path"] if _os.path.isabs(spec["weights_path"])
-                else str(_TOOL_DIR / spec["weights_path"])
-            )
-            for spec in dataset_config.get("models", {}).values()
-        )
-        if any_missing:
-            logger.info("run_concurrent: some model weights missing for '%s' "
+        stale = _stale_regression_models(dataset_config, train_values)
+        if stale:
+            logger.info("run_concurrent: model weights missing or stale for '%s' %s "
                         "— training inline on training split (matches run_experiment.py) ...",
-                        args.dataset)
+                        args.dataset, stale)
             bootstrap_scaler = _fit_scaler(train_values)
-            _train_regression_models(dataset_config, train_values, bootstrap_scaler)
+            _train_regression_models(dataset_config, train_values, bootstrap_scaler, only=stale)
     else:
         train_paths = adapter.train_split()
         train_label_paths, train_inline_labels = adapter.train_labels()
