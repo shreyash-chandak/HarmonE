@@ -43,7 +43,7 @@ Output: data/acdc/acdc_manifest.csv with columns:
 
 Usage:
     cd tool/
-    python scripts/preprocess_acdc.py \\
+    python3 scripts/preprocess_acdc.py \\
         --acdc-root data/acdc \\
         --output    data/acdc/acdc_manifest.csv
 """

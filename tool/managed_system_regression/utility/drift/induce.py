@@ -16,7 +16,7 @@ Non-interactive by design (was originally an interactive input()-driven tool;
 revised so it can be invoked from a pipeline, e.g. run_regression.sh, with
 the dataset and drift regions passed as arguments):
 
-    python managed_system_regression/utility/drift/induce.py \\
+    python3 managed_system_regression/utility/drift/induce.py \\
         --dataset pems \\
         --region 1000 1500 1.5 50 \\
         --region 5000 5500 1.5 50

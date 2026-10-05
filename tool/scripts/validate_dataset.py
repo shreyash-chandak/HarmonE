@@ -2,9 +2,9 @@
 
 Usage:
     cd tool/
-    python scripts/validate_dataset.py --config pems_node1
-    python scripts/validate_dataset.py --config bdd100k
-    python scripts/validate_dataset.py --config /absolute/path/to/cfg.json
+    python3 scripts/validate_dataset.py --config pems_node1
+    python3 scripts/validate_dataset.py --config bdd100k
+    python3 scripts/validate_dataset.py --config /absolute/path/to/cfg.json
 """
 from __future__ import annotations
 

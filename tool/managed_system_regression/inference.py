@@ -48,7 +48,7 @@ scaler_path = "knowledge/scaler.pkl"
 if not os.path.exists(scaler_path):
     raise FileNotFoundError(
         "knowledge/scaler.pkl not found. "
-        "Run python scripts/init_regression.py to fit the scaler on training data."
+        "Run python3 scripts/init_regression.py to fit the scaler on training data."
     )
 with open(scaler_path, "rb") as _f:
     scaler = pickle.load(_f)

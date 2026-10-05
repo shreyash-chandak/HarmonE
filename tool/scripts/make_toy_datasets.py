@@ -10,7 +10,7 @@ can validate → init → run a short headless session without real data.
 
 Usage:
     cd tool/
-    python scripts/make_toy_datasets.py [--force]
+    python3 scripts/make_toy_datasets.py [--force]
 """
 from __future__ import annotations
 

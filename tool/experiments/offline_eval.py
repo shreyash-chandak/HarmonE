@@ -30,7 +30,7 @@ Results are written to two places:
      CV score is surfaced the same way a regression score already is.
 
 Usage (from inside tool/):
-    python experiments/offline_eval.py \\
+    python3 experiments/offline_eval.py \\
         --run-dir runs/bdd100k_harmone_original_s1 \\
         --dataset bdd100k \\
         [--interval 1000] \\
@@ -44,7 +44,7 @@ import json
 import sys
 from pathlib import Path
 
-# Invoked directly as `python experiments/offline_eval.py` (see this file's
+# Invoked directly as `python3 experiments/offline_eval.py` (see this file's
 # __main__ block / run_offline_eval.sh), Python puts experiments/ itself on
 # sys.path[0], not tool/ — so `experiments` isn't importable as a package yet
 # without this. Must run before the `from experiments....` imports below.

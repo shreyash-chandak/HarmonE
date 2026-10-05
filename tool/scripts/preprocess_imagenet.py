@@ -72,7 +72,7 @@ the shared validator or any other dataset's files.
 
 Usage:
     cd tool/
-    python scripts/preprocess_imagenet.py --imagenet-root data/imagenet
+    python3 scripts/preprocess_imagenet.py --imagenet-root data/imagenet
 """
 
 from __future__ import annotations

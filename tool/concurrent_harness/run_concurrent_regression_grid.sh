@@ -92,7 +92,7 @@ _run_one() {
     log "START | $run_id"
     if (
         cd "$TOOL_DIR"
-        python concurrent_harness/run_concurrent.py "$@" --run-id "$run_id" --runs-dir "$RUNS_DIR" --seed "$SEED"
+        python3 concurrent_harness/run_concurrent.py "$@" --run-id "$run_id" --runs-dir "$RUNS_DIR" --seed "$SEED"
     ) 2>&1 | tee "$run_log"; then
         log "DONE  | $run_id"
         PASS=$((PASS + 1))

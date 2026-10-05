@@ -38,7 +38,7 @@ Output: data/bdd100k/bdd100k_manifest.csv with columns:
 
 Usage:
     cd tool/
-    python scripts/preprocess_bdd100k.py \\
+    python3 scripts/preprocess_bdd100k.py \\
         --bdd-root data/bdd100k \\
         --output   data/bdd100k/bdd100k_manifest.csv \\
         [--yolo-labels-dir data/bdd100k/labels_yolo/]
@@ -212,7 +212,7 @@ def main() -> None:
 
     if args.yolo_labels_dir and not args.no_yolo:
         print("Note: YOLO label conversion requires bdd_to_yolo_labels.py.")
-        print("Run: python managed_system_cv/utility/bdd_to_yolo_labels.py --help")
+        print("Run: python3 managed_system_cv/utility/bdd_to_yolo_labels.py --help")
 
     build_manifest(args.bdd_root, args.output, args.yolo_labels_dir, tuple(args.splits))
 

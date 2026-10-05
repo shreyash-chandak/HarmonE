@@ -34,7 +34,7 @@ Output:
 
 Usage:
     cd tool/
-    python managed_system_cv/utility/drift/induce_imagenet_c.py \\
+    python3 managed_system_cv/utility/drift/induce_imagenet_c.py \\
         --manifest data/imagenet/imagenet_manifest.csv \\
         --output-dir data/imagenet_c \\
         --target-per-domain 500 --severity 3

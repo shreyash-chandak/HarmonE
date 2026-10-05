@@ -26,7 +26,7 @@ keeps kW as-is. To convert to kWh, divide by 4 (NOT done here).
 
 Usage:
     cd tool/
-    python scripts/preprocess_uci_electricity.py \\
+    python3 scripts/preprocess_uci_electricity.py \\
         --input  /path/to/LD2011_2014.txt \\
         --output data/uci_electricity/uci_electricity.csv \\
         [--meter MT_168]

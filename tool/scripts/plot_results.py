@@ -6,7 +6,7 @@ Each pin-model baseline is its own separate bar. Charts are styled for
 research-paper readability (white background, clean axes).
 
 Usage:
-    python scripts/plot_results.py [--runs-dir runs/] [--out runs/dashboard.html]
+    python3 scripts/plot_results.py [--runs-dir runs/] [--out runs/dashboard.html]
                                    [--plots-dir runs/plots/]
 """
 

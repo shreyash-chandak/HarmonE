@@ -8,7 +8,7 @@ that changes the training window.
 
 Usage:
     cd tool/
-    python scripts/init_regression.py [--config pems_node1] [--force]
+    python3 scripts/init_regression.py [--config pems_node1] [--force]
 
 Outputs (in managed_system_regression/knowledge/):
     scaler.pkl                    — MinMaxScaler fitted on train split only (B7 fix)

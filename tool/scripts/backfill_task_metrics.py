@@ -7,7 +7,7 @@ columns), computes RMSE and MAE and patches the manifest with a task_metrics
 block.  CV runs (proxy_acc column) are skipped.
 
 Usage (from tool/):
-    python scripts/backfill_task_metrics.py [--runs-dir runs] [--dry-run]
+    python3 scripts/backfill_task_metrics.py [--runs-dir runs] [--dry-run]
 """
 
 from __future__ import annotations

@@ -24,7 +24,7 @@
 #
 # Prerequisite: the three *_driftInduced.csv files must already exist (this
 # script does not generate them). Build them first, e.g.:
-#   python managed_system_regression/utility/drift/induce.py --dataset pems \
+#   python3 managed_system_regression/utility/drift/induce.py --dataset pems \
 #       --region START END SCALE SHIFT [--region START END SCALE SHIFT ...]
 #   (repeat for uci_electricity, spot_prices)
 #
@@ -96,7 +96,7 @@ _run_one() {
     log "START | $run_id"
     if (
         cd "$TOOL_DIR"
-        python experiments/run_experiment.py "$@" --run-dir "$run_dir" --verbose
+        python3 experiments/run_experiment.py "$@" --run-dir "$run_dir" --verbose
     ) 2>&1 | tee "$run_log"; then
         log "DONE  | $run_id"
         PASS=$((PASS + 1))

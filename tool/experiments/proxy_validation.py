@@ -6,10 +6,10 @@ monitoring intervals in a completed run. Produces per-proxy ρ so Table 3
 in the journal paper can compare: confidence vs calibrated_confidence vs agreement.
 
 Usage:
-    python experiments/proxy_validation.py --run <run_dir> [--output results/proxy_val.json]
+    python3 experiments/proxy_validation.py --run <run_dir> [--output results/proxy_val.json]
 
 Single-command smoke run (uses bundled predictions and labels):
-    python experiments/proxy_validation.py --run managed_system_cv/knowledge \
+    python3 experiments/proxy_validation.py --run managed_system_cv/knowledge \
         --labels-dir data/bdd100k/labels/val \
         --images-dir data/bdd100k/images/val \
         --smoke  # use only first 3 intervals

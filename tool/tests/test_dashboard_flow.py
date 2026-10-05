@@ -200,7 +200,7 @@ class TestStartupErrorSurfacing:
         """Simulate process exiting within grace period → endpoint must return 500."""
         startup_log = tmp_path / "startup.log"
         startup_log.write_text("FATAL: Required artifact missing: managed_system_cv/knowledge/model.csv\n"
-                               "Run: python scripts/init_cv.py --config toy_cv\nThen restart.")
+                               "Run: python3 scripts/init_cv.py --config toy_cv\nThen restart.")
 
         mock_proc = MagicMock()
         mock_proc.poll.return_value = 1  # exited with code 1

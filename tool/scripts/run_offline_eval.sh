@@ -85,7 +85,7 @@ _eval_one() {
     log "START | $run_id"
     if (
         cd "$TOOL_DIR"
-        python experiments/offline_eval.py \
+        python3 experiments/offline_eval.py \
             --run-dir "$run_dir" \
             --dataset "$dataset" \
             --interval "$INTERVAL"

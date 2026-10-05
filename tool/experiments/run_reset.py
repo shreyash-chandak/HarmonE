@@ -11,9 +11,9 @@ Does NOT touch:
 
 Usage:
     cd tool/
-    python experiments/run_reset.py --domain regression
-    python experiments/run_reset.py --domain cv
-    python experiments/run_reset.py --domain regression --dry-run
+    python3 experiments/run_reset.py --domain regression
+    python3 experiments/run_reset.py --domain cv
+    python3 experiments/run_reset.py --domain regression --dry-run
 """
 from __future__ import annotations
 

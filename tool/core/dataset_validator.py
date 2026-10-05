@@ -4,7 +4,7 @@
 contract documented in docs/DATA_CONTRACT.md. Called automatically by
 run_managed_system.py and both init scripts; also exposed as a CLI:
 
-    python scripts/validate_dataset.py --config pems_node1
+    python3 scripts/validate_dataset.py --config pems_node1
 
 A ValidationReport is a dataclass with:
   .passed  — bool; True if all checks pass

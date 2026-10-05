@@ -26,7 +26,7 @@ Structural break context:
 
 Usage:
     cd tool/
-    python scripts/preprocess_spot_prices.py \\
+    python3 scripts/preprocess_spot_prices.py \\
         --input  /path/to/ercot_prices.csv \\
         --output data/spot_prices/spot_prices.csv \\
         [--settlement-point HB_NORTH]     # ERCOT only

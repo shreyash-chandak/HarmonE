@@ -37,25 +37,25 @@ Usage:
     cd tool/
 
     # BDD100K — trim val to ~500 images per domain:
-    python scripts/trim_manifest.py \\
+    python3 scripts/trim_manifest.py \\
         --dataset bdd100k \\
         --manifest data/bdd100k/bdd100k_manifest.csv \\
         --target   3000
 
     # iWildCam — trim ood_test to ~3 000:
-    python scripts/trim_manifest.py \\
+    python3 scripts/trim_manifest.py \\
         --dataset iwildcam \\
         --manifest data/iwildcam/iwildcam_manifest.csv \\
         --target   3000
 
     # ImageNet — trim to 100 classes x 100 images/class (seed=42):
-    python scripts/trim_manifest.py \\
+    python3 scripts/trim_manifest.py \\
         --dataset imagenet \\
         --manifest data/imagenet/imagenet_manifest.csv \\
         --n-classes 100 --images-per-class 100 --seed 42
 
     # Check size without writing:
-    python scripts/trim_manifest.py --dataset bdd100k --manifest ... --dry-run
+    python3 scripts/trim_manifest.py --dataset bdd100k --manifest ... --dry-run
 """
 
 from __future__ import annotations

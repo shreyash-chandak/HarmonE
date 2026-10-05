@@ -25,7 +25,7 @@ Output: data/iwildcam/iwildcam_manifest.csv with columns:
 
 Usage:
     cd tool/
-    python scripts/preprocess_iwildcam.py \\
+    python3 scripts/preprocess_iwildcam.py \\
         --wilds-root /path/to/iwildcam_v2.0/ \\
         --output     data/iwildcam/iwildcam_manifest.csv
 """

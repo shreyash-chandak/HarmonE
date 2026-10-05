@@ -26,8 +26,8 @@ one of those five planners' runs is just picking the version with a complete
 log — not a different drift curve.
 
 Usage (from inside tool/):
-    python scripts/plot_drift.py
-    python scripts/plot_drift.py --runs-dir concurrent_harness/runs --out-dir concurrent_harness/runs/plots/drift
+    python3 scripts/plot_drift.py
+    python3 scripts/plot_drift.py --runs-dir concurrent_harness/runs --out-dir concurrent_harness/runs/plots/drift
 """
 
 from __future__ import annotations

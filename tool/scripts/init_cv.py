@@ -22,7 +22,7 @@ work fine via --skip-embeddings.
 
 Usage:
     cd tool/
-    python scripts/init_cv.py [--config bdd100k] [--force] [--skip-embeddings]
+    python3 scripts/init_cv.py [--config bdd100k] [--force] [--skip-embeddings]
 """
 from __future__ import annotations
 

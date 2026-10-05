@@ -8,10 +8,10 @@ different machine).
 Run once (or with --force to re-probe) before any live experiment:
 
     cd tool/
-    python scripts/probe_energy.py          # probe all
-    python scripts/probe_energy.py --cpu    # CPU RAPL only
-    python scripts/probe_energy.py --gpu    # GPU NVML only
-    python scripts/probe_energy.py --force  # ignore cached result
+    python3 scripts/probe_energy.py          # probe all
+    python3 scripts/probe_energy.py --cpu    # CPU RAPL only
+    python3 scripts/probe_energy.py --gpu    # GPU NVML only
+    python3 scripts/probe_energy.py --force  # ignore cached result
 
 The probe results are also printed so they can be manually recorded in
 DECISIONS_PENDING.md when an Outcome B (zeros/errors) occurs.

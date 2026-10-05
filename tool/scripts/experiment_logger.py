@@ -15,7 +15,7 @@ One row per polling tick (default: every 30 s).
 
 Usage:
     cd tool/managed_system_regression    # or managed_system_cv
-    python ../../scripts/experiment_logger.py \\
+    python3 ../../scripts/experiment_logger.py \\
         --knowledge knowledge/ \\
         --dataset pems_node2 \\
         [--domain regression|cv]  \\

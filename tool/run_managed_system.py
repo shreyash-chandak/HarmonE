@@ -367,9 +367,9 @@ if __name__ == '__main__':
     for artifact_path in _REQUIRED_ARTIFACTS.get(domain_key, []):
         if not os.path.exists(artifact_path):
             init_cmd = (
-                "python scripts/init_regression.py"
+                "python3 scripts/init_regression.py"
                 if domain_key == "regression"
-                else "python scripts/init_cv.py"
+                else "python3 scripts/init_cv.py"
             )
             logging.critical(
                 f"FATAL: Required artifact missing: {artifact_path}\n"

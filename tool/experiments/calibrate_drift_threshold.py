@@ -21,8 +21,8 @@ directly actionable without new infrastructure.
 
 Usage:
     cd tool/
-    python experiments/calibrate_drift_threshold.py --dataset pems
-    python experiments/calibrate_drift_threshold.py --dataset imagenet_c \\
+    python3 experiments/calibrate_drift_threshold.py --dataset pems
+    python3 experiments/calibrate_drift_threshold.py --dataset imagenet_c \\
         --detectors kl_fixed_ref,hellinger_fixed_ref --window-size 300
 """
 

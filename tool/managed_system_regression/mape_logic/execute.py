@@ -178,7 +178,7 @@ def execute_drift(trigger="local"):
             logging.info("🚀 EXECUTE (Drift): Triggering retraining...")
             try:
                 if os.path.exists("retrain.py"):
-                    os.system("python retrain.py")
+                    os.system("python3 retrain.py")
                     detail = "Model retrained due to drift"
                     logging.info("EXECUTE (Drift): Retraining script finished.")
                 else:

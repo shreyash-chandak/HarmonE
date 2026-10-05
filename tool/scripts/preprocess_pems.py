@@ -24,7 +24,7 @@ The output column is named "flow" so it is compatible with:
 
 Usage:
     cd tool/
-    python scripts/preprocess_pems.py \\
+    python3 scripts/preprocess_pems.py \\
         --input  /path/to/pems_raw.csv \\
         --output data/pems_node2/pems_node2.csv \\
         [--flow-col "Total Flow"]   # override detected column name
@@ -141,8 +141,8 @@ def preprocess(
     print(f"  Saved to: {output_path}")
     print()
     print("Next steps:")
-    print(f"  1. python scripts/init_regression.py --config pems_node2  (fit scaler + KL ref)")
-    print(f"  2. python scripts/validate_dataset.py configs/datasets/pems_node2.json")
+    print(f"  1. python3 scripts/init_regression.py --config pems_node2  (fit scaler + KL ref)")
+    print(f"  2. python3 scripts/validate_dataset.py configs/datasets/pems_node2.json")
 
 
 def main() -> None:

@@ -5,7 +5,7 @@ Loads a YAML grid config and runs all (dataset × planner × seed) combinations.
 Skips already-completed runs when --resume is set.
 
 Usage (CLI):
-    python experiments/run_grid.py configs/experiments/baseline.yaml
+    python3 experiments/run_grid.py configs/experiments/baseline.yaml
 
 Or from Python:
     from experiments.run_grid import run_grid

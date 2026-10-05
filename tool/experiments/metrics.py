@@ -10,8 +10,8 @@ Functions:
     wilcoxon_test(rows, baseline, treatment)  → dict
 
 CLI:
-    python experiments/metrics.py aggregate --grid-dir runs/my_grid --out metrics.csv
-    python experiments/metrics.py latex     --grid-dir runs/my_grid --out table.tex
+    python3 experiments/metrics.py aggregate --grid-dir runs/my_grid --out metrics.csv
+    python3 experiments/metrics.py latex     --grid-dir runs/my_grid --out table.tex
 """
 
 from __future__ import annotations

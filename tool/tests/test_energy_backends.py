@@ -10,7 +10,7 @@ Covers the exact failure modes that existed before the fix:
   G: Both available → components reported separately; total = sum
 
 Run from tool/:
-    python -m pytest tests/test_energy_backends.py -v
+    python3 -m pytest tests/test_energy_backends.py -v
 """
 
 from __future__ import annotations

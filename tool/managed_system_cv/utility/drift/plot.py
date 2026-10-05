@@ -11,7 +11,7 @@ Supports:
 - Luminance histogram (Y channel)
 
 Usage:
-    python plot_drift.py
+    python3 plot_drift.py
 """
 
 import os

@@ -6,7 +6,7 @@ core/scoring.py::normalize_energy() clamps to [0, 1] correctly, but the E_m/E_M
 bounds it's clamped against were hand-set, never validated against real measured
 energy, and referenced a calibration script (this one) that never existed —
 docs/datasets/uci_electricity.md and spot_prices.md both call
-`python experiments/calibrate_energy_bounds.py --config <dataset>` as a documented
+`python3 experiments/calibrate_energy_bounds.py --config <dataset>` as a documented
 setup step for a script that was, until now, missing.
 
 Consequence, found by inspecting logged runs (context, 2026-09-02): pems' E_M=12000
@@ -33,8 +33,8 @@ tracked as follow-up work, not built here).
 
 Usage:
     cd tool/
-    python experiments/calibrate_energy_bounds.py --dataset pems
-    python experiments/calibrate_energy_bounds.py --dataset uci_electricity \\
+    python3 experiments/calibrate_energy_bounds.py --dataset pems
+    python3 experiments/calibrate_energy_bounds.py --dataset uci_electricity \\
         --max-steps 8000 --e-M-percentile 99
 """
 

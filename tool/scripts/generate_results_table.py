@@ -30,8 +30,8 @@ failing, same as a clean run, but the row is marked FAILED so the numbers
 aren't mistaken for a clean result.
 
 Usage (from inside tool/):
-    python scripts/generate_results_table.py
-    python scripts/generate_results_table.py --logs-dir concurrent_harness/runs/logs --out ../context/results.md
+    python3 scripts/generate_results_table.py
+    python3 scripts/generate_results_table.py --logs-dir concurrent_harness/runs/logs --out ../context/results.md
 """
 
 from __future__ import annotations
