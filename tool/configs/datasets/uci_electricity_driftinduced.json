@@ -25,7 +25,7 @@
       "cost_class": "light",
       "hyperparams": {
         "train":   {"alpha": 500},
-        "retrain": {"alpha": 5}
+        "retrain": {}
       }
     },
     "svr": {
@@ -54,6 +54,7 @@
   "switch_hold_cycles": 3,
   "explore_prob": 0.05,
   "accuracy_signal": "window_r2",
+  "retrain_regularisation": "sample_scaled",
   "prt_interval": 3200,
   "energy_metering": "batch",
   "energy_budget_rho": 0.5,

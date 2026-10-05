@@ -107,6 +107,9 @@ def main() -> None:
         _build_cv_reference(train_paths, str(kp["reference_dist_file"]), n_bins=n_bins)
     else:
         train_values = adapter.train_split()
+        # training-set size, for sample-scaled retraining (audit N4)
+        local_dataset_config["_n_train_sequences"] = max(
+            len(train_values) - int(dataset_config.get("seq_length", 5)), 0)
         scaler = _fit_scaler(train_values)
         _build_reference_distribution(train_values, str(kp["reference_dist_file"]), n_bins=n_bins)
 

@@ -25,7 +25,7 @@
       "cost_class": "light",
       "hyperparams": {
         "train":   {"alpha": 1000},
-        "retrain": {"alpha": 750}
+        "retrain": {}
       }
     },
     "svr": {

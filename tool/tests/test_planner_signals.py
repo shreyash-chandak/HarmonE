@@ -143,3 +143,20 @@ def test_step_mode_keeps_per_step_meter():
     be = BatchEnergy("auto", enabled=False)
     be.open("b", first_row=0)  # no-op in step mode
     assert be._em is None
+
+
+# ── N4: sample-scaled retraining regularisation ──────────────────────────────
+
+def test_retrain_regularisation_scales_with_sample_count():
+    from sklearn.linear_model import Ridge
+    from sklearn.svm import SVR
+    from experiments.run_experiment import _sample_scaled_params
+    ridge = {"model": Ridge(alpha=1.0), "train_params": {"alpha": 65},
+             "n_train_sequences": 120000}
+    assert abs(_sample_scaled_params(ridge, 1200)["alpha"] - 0.65) < 1e-9
+    svr = {"model": SVR(C=1.0), "train_params": {"C": 0.015},
+           "n_train_sequences": 120000}          # SVR fit was capped at 8,000
+    assert abs(_sample_scaled_params(svr, 1200)["C"] - 0.1) < 1e-9
+    fixed = dict(ridge, retrain_regularisation="fixed")
+    assert _sample_scaled_params(fixed, 1200) == {}
+    assert _sample_scaled_params({"model": Ridge(), "train_params": {}}, 1200) == {}

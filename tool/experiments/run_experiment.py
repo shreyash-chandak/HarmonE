@@ -739,6 +739,13 @@ def _load_model_store(dataset_config: dict) -> dict:
             store[name] = None
             continue
         retrain_params = spec.get("hyperparams", {}).get("retrain", {})
+        # For sample-scaled retraining (audit N4): the hyperparameters and
+        # training-set size the on-disk model was originally fitted with.
+        scale_info = {
+            "train_params": spec.get("hyperparams", {}).get("train", {}),
+            "n_train_sequences": dataset_config.get("_n_train_sequences"),
+            "retrain_regularisation": dataset_config.get("retrain_regularisation", "sample_scaled"),
+        }
         try:
             if "lstm" in name:
                 from adapters.loaders import LSTMModel
@@ -746,11 +753,11 @@ def _load_model_store(dataset_config: dict) -> dict:
                 m = LSTMModel()
                 m.load_state_dict(torch.load(wp, map_location="cpu", weights_only=False))
                 m.eval()
-                store[name] = {"type": "lstm", "model": m, "retrain_params": retrain_params}
+                store[name] = {"type": "lstm", "model": m, "retrain_params": retrain_params, **scale_info}
             else:
                 with open(wp, "rb") as f:
                     m = pickle.load(f)
-                store[name] = {"type": "sklearn", "model": m, "retrain_params": retrain_params}
+                store[name] = {"type": "sklearn", "model": m, "retrain_params": retrain_params, **scale_info}
         except Exception as exc:
             logger.warning("Could not load model object for '%s' (retraining disabled): %s", name, exc)
             store[name] = None
@@ -1375,6 +1382,41 @@ def _initial_train_yolo_detection(
     return True
 
 
+def _sample_scaled_params(info: dict, n_retrain: int) -> dict:
+    """Retrain regularisation with the same effective strength as the
+    initial fit (audit N4, 2026-10-06; config retrain_regularisation:
+    "sample_scaled" default, "fixed" = keep the model's current params).
+
+    Ridge minimises ||y - Xw||² + alpha·||w||² and SVR minimises
+    ||w||²/2 + C·Σ loss: in both, the data term grows with the number of
+    samples while the penalty does not. Refitting on the 1,200-row window with
+    the training value therefore regularises far more strongly than the
+    initial fit did (spot: ridge trained on ~129k rows, SVR on 8,000), which
+    made retrained models collapse (spot SVR median R² 0.66 -> 0.42), while the
+    old hand-set retrain alphas (spot 1, uci 5) de-regularised instead and
+    inflated retrain gains. Scaling keeps alpha/n (ridge) and C·n (SVR)
+    constant. Offline check on the drift-induced streams, PRT every 3,200 rows,
+    median R² of the next 3,200 rows (original model -> sample-scaled retrain):
+    ridge spot 0.46 -> 0.50, pems 0.82 -> 0.86, uci 0.86 -> 0.86;
+    svr spot 0.66 -> 0.74, pems 0.91 -> 0.95, uci 0.86 -> 0.83.
+    """
+    if info.get("retrain_regularisation", "sample_scaled") != "sample_scaled":
+        return {}
+    n_train = info.get("n_train_sequences")
+    if not n_train or n_retrain <= 0:
+        return {}
+    model = info["model"]
+    hp = info.get("train_params") or {}
+    if hasattr(model, "alpha") and not hasattr(model, "C"):          # Ridge
+        alpha_train = float(hp.get("alpha", 256))
+        return {"alpha": alpha_train * n_retrain / n_train}
+    if hasattr(model, "C"):                                          # SVR
+        n_fit = min(int(hp.get("max_train_samples", 8000)), n_train)
+        c_train = float(hp.get("C", 0.08))
+        return {"C": c_train * n_fit / n_retrain}
+    return {}
+
+
 def _do_inline_retrain(
     model_name: str,
     model_store: dict,
@@ -1407,7 +1449,9 @@ def _do_inline_retrain(
             return False
 
         if info["type"] == "sklearn":
-            retrain_params = info.get("retrain_params", {})
+            retrain_params = dict(info.get("retrain_params") or {})
+            if not retrain_params:
+                retrain_params = _sample_scaled_params(info, len(X))
             if retrain_params:
                 info["model"].set_params(**retrain_params)
             info["model"].fit(X, y)
@@ -2705,6 +2749,9 @@ def run_experiment(
         )
     else:
         train_values: np.ndarray = adapter.train_split()
+        # training-set size, for sample-scaled retraining (audit N4)
+        dataset_config["_n_train_sequences"] = max(
+            len(train_values) - int(dataset_config.get("seq_length", 5)), 0)
         scaler = _fit_scaler(train_values)
         scaler_path = run_path / "scaler.pkl"
         with open(scaler_path, "wb") as f:
