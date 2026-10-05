@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 
-from .base import Planner, PlanningContext, PlanDecision, REGISTRY
+from .base import Planner, PlanningContext, PlanDecision, REGISTRY, is_observed
 from .hysteresis import should_switch
 from .exploration import maybe_explore
 
@@ -42,6 +42,33 @@ def _get_min_accuracy(thr: dict) -> float:
         "Add 'min_accuracy' to the dataset config to suppress this warning."
     )
     return _DEFAULT_MIN_ACCURACY
+
+
+_COST_RANK = {"light": 0, "medium": 1, "heavy": 2}
+
+
+def _cost_rank(thr: dict, model: str) -> int:
+    return _COST_RANK.get(thr.get("models", {}).get(model, {}).get("cost_class", "medium"), 1)
+
+
+def _try_unobserved(ctx: PlanningContext, want_cheaper: bool, label: str) -> PlanDecision | None:
+    """Audit A5: when no observed model improves on the current one, try a
+    never-observed model whose configured cost_class points in the needed
+    direction (cheaper on an energy violation, costlier on a score violation),
+    instead of judging it by its 0.5 placeholder estimates."""
+    cur = _cost_rank(ctx.thresholds, ctx.current_model)
+    options = [
+        m for m in ctx.available_models
+        if m != ctx.current_model and not is_observed(ctx, m)
+        and (_cost_rank(ctx.thresholds, m) < cur if want_cheaper else _cost_rank(ctx.thresholds, m) > cur)
+    ]
+    if not options:
+        return None
+    pick = (min if want_cheaper else max)(options, key=lambda m: _cost_rank(ctx.thresholds, m))
+    return PlanDecision(
+        action="switch", model=pick,
+        reason=f"S5 violation_aware: {label} — no observed alternative; trying never-observed '{pick}'",
+    )
 
 
 class ViolationAwarePlanner(Planner):
@@ -91,15 +118,22 @@ class ViolationAwarePlanner(Planner):
         ema_acc = ctx.ema_accuracy
         ema_eng = ctx.ema_energy
 
+        # Only models with real estimates are compared (audit A5); the
+        # current model is always observed by the time a violation fires.
+        known = [m for m in all_models if m == ctx.current_model or is_observed(ctx, m)]
+
         # Candidates meeting accuracy requirement (Fix 2.1: min_accuracy not min_score)
-        candidates = [m for m in all_models if ema_acc.get(m, 0.0) >= min_acc]
-        pool = candidates if candidates else all_models  # Fix 2.5: fallback = all models
+        candidates = [m for m in known if ema_acc.get(m, 0.0) >= min_acc]
+        pool = candidates if candidates else known  # Fix 2.5: fallback = all known models
 
         # Among pool, find the one with minimum energy
         chosen = min(pool, key=lambda m: ema_eng.get(m, float("inf")))
 
         # Fix 2.3: if that's the current model, noop
         if chosen == ctx.current_model:
+            trial = _try_unobserved(ctx, want_cheaper=True, label="energy violation")
+            if trial is not None:
+                return trial
             return PlanDecision(
                 action="noop",
                 reason=(
@@ -152,15 +186,20 @@ class ViolationAwarePlanner(Planner):
         ema_acc = ctx.ema_accuracy
         ema_eng = ctx.ema_energy
 
+        known = [m for m in all_models if m == ctx.current_model or is_observed(ctx, m)]  # audit A5
+
         # Candidates within energy budget (Fix 2.2: live threshold)
-        candidates = [m for m in all_models if ema_eng.get(m, 1.0) <= e_threshold]
-        pool = candidates if candidates else all_models  # Fix 2.5: fallback = all models
+        candidates = [m for m in known if ema_eng.get(m, 1.0) <= e_threshold]
+        pool = candidates if candidates else known  # Fix 2.5: fallback = all known models
 
         # Among pool, find the one with highest accuracy
         chosen = max(pool, key=lambda m: ema_acc.get(m, 0.0))
 
         # Fix 2.3: if that's the current model, noop
         if chosen == ctx.current_model:
+            trial = _try_unobserved(ctx, want_cheaper=False, label="score violation")
+            if trial is not None:
+                return trial
             return PlanDecision(
                 action="noop",
                 reason=(

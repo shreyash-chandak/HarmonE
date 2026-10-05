@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import logging
 
-from .base import Planner, PlanningContext, PlanDecision, REGISTRY
+from .base import Planner, PlanningContext, PlanDecision, REGISTRY, is_observed
 from .hysteresis import should_switch
 from .exploration import maybe_explore
 
@@ -184,6 +184,17 @@ class ParetoPlanner(Planner):
         chosen_score = score(chosen)
         curr_score = score(ctx.current_model) if ctx.current_model in known else float("inf")
 
+        # Audit A7: if the known front would keep the current model while it
+        # violates, try an unknown (never-observed or stale) model first, so
+        # unknowns can enter the front instead of waiting for a random probe.
+        if chosen == ctx.current_model and unknown:
+            target = unknown[0]
+            return PlanDecision(
+                action="switch", model=target,
+                reason=f"S6 pareto: violation={ctx.violation}, current model is the known optimum; "
+                       f"exploring unknown '{target}'",
+            )
+
         # Phase 3.4: hysteresis guard
         if not should_switch(d_current=curr_score, d_candidate=chosen_score, margin=margin):
             return PlanDecision(
@@ -242,7 +253,7 @@ def _split_known_unknown(
     """Separate models into 'known' (observed, non-stale) and 'unknown'.
 
     A model is unknown if:
-      - Its accuracy OR energy EMA is at the 0.5 sentinel (never observed), OR
+      - It has never been observed (ctx.observed, audit A5), OR
       - Its last_observed_step is more than staleness_window steps ago.
     """
     known, unknown = [], []
@@ -251,9 +262,9 @@ def _split_known_unknown(
     last_seen = ctx.last_observed_step
 
     for m in models:
-        acc_val = ema_acc.get(m, _SENTINEL_EMA)
-        eng_val = ema_eng.get(m, _SENTINEL_EMA)
-        sentinel = _is_sentinel(acc_val) or _is_sentinel(eng_val)
+        # Audit A5: the harness's explicit observed flag (legacy callers fall
+        # back to the 0.5-sentinel test inside is_observed).
+        sentinel = m != ctx.current_model and not is_observed(ctx, m)
 
         stale = False
         if m in last_seen and staleness_window > 0:

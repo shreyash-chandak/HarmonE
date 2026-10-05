@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 
 _MONITOR_FIELDS = (
     "ema_scores", "ema_accuracy", "ema_energy", "current_energy_threshold",
-    "last_observed_step", "steps_since_last_switch",
+    "last_observed_step", "steps_since_last_switch", "observed",
 )
 
 
@@ -63,16 +63,14 @@ def _head_start(decision: PlanDecision, is_cv: bool, thresholds: dict,
                 available_models: list[str], current_model: str, mape_info: dict) -> PlanDecision:
     """Verbatim port of run_experiment.py's ema_head_start block (audit D7):
     in CV runs, if the planner no-ops while some model has never been
-    observed (EMA exactly at the 0.5 initialisation), force a trial of it."""
+    observed (mape_info["observed"], audit A5), force a trial of it."""
     if decision.action != "noop" or not is_cv:
         return decision
     head_start = thresholds.get("ema_head_start", 0.0)
     if head_start <= 0.0:
         return decision
-    unobserved = [
-        m for m in available_models
-        if m != current_model and abs(mape_info["ema_scores"].get(m, 0.5) - 0.5) < 1e-9
-    ]
+    observed = mape_info.get("observed", {})  # audit A5: explicit flag, not the 0.5 seed
+    unobserved = [m for m in available_models if m != current_model and not observed.get(m, False)]
     if not unobserved:
         return decision
     trial = unobserved[0]
@@ -116,7 +114,7 @@ def run_cycle(
 
                 # ── Monitor ──────────────────────────────────────────────
                 telemetry: dict = {
-                    "r2": None, "avg_energy_uJ": None,
+                    "r2": None, "accuracy": None, "avg_energy_uJ": None,
                     "ema_score": mape_info["ema_scores"].get(current_model),
                 }
                 violation = None
@@ -131,6 +129,7 @@ def run_cycle(
                             [float(r["y_true"]) for r in monitor_rows],
                             [float(r["y_pred"]) for r in monitor_rows],
                             energies, monitor_model, mape_info, thresholds,
+                            reference_values=value_history,  # last drift_window values (audit A1)
                         )
                     # ── Analyse (before the boundary update, as single-threaded)
                     if monitor_model == current_model:
@@ -215,6 +214,7 @@ def run_cycle(
                 "model_before": current_model,
                 "model_after": new_model,
                 "r2": telemetry.get("r2"),
+                "accuracy": telemetry.get("accuracy"),
                 "ema_score": telemetry.get("ema_score"),
                 "avg_energy_uJ": telemetry.get("avg_energy_uJ"),
                 "energy_threshold": round(mape_info.get("current_energy_threshold", 0.6), 6),
@@ -235,8 +235,9 @@ def run_cycle(
             _flags += "  drift=yes"
         if monitor_model and monitor_model != current_model:
             _flags += f"  (batch served by {monitor_model})"
-        _metric_label = "conf" if is_cv else "R²  "
-        _r2_str = "n/a" if telemetry.get("r2") is None else f"{telemetry['r2']:.4f}"
+        _metric_label = "conf" if is_cv else "acc "
+        _acc = telemetry.get("accuracy", telemetry.get("r2"))
+        _r2_str = "n/a" if _acc is None else f"{_acc:.4f}"
         _energy_str = "n/a" if telemetry.get("avg_energy_uJ") is None else f"{telemetry['avg_energy_uJ']:.1f}"
         _ema = telemetry.get("ema_score")
         _ema_str = "n/a" if _ema is None else f"{_ema:.4f}"

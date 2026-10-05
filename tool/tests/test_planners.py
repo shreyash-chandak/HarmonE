@@ -300,6 +300,8 @@ class TestParetoPlanner:
             violation="score", ema_scores=EMA_SCORES, ema_accuracy=acc,
             ema_energy=eng, current_model="lstm", available_models=MODELS,
             thresholds=BASE_THRESHOLDS, drift_result=None,
+            # all observed: 0.5 here is a real estimate, not the seed (audit A5)
+            observed={m: True for m in MODELS},
         )
         d = ParetoPlanner().plan(ctx)
         assert d.action == "noop"

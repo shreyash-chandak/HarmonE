@@ -37,6 +37,7 @@ single-threaded harness's files.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
 import pickle
 import random
@@ -213,6 +214,47 @@ def main() -> None:
             time.sleep(0.005)
         return True
 
+    # Batch-level energy metering (audit C1, 2026-10-06) — see
+    # experiments/run_experiment.BatchEnergy. One EnergyMeter spans each
+    # monitor_interval batch, held under the cross-process energy lock so no
+    # MAPE-side meter overlaps it; the batch's prediction rows are buffered
+    # and written when it closes, each charged total / n. The batch is closed
+    # (rows written, lock released) BEFORE waiting on the manager, which
+    # needs those rows and the lock to process it.
+    batch_mode = str(dataset_config.get("energy_metering", "batch")) == "batch"
+    pred_fields = kio.PREDICTION_FIELDS_CV if is_cv else kio.PREDICTION_FIELDS_REGRESSION
+    batch_rows: list[dict] = []
+    batch_lock = contextlib.ExitStack()
+    batch_em = None
+
+    def _open_batch(step_: int) -> None:
+        nonlocal batch_em
+        batch_lock.enter_context(kio.energy_lock(knowledge_dir, blocking=True))
+        batch_em = EnergyMeter(f"inference_batch_{step_}", backend=energy_backend)
+        batch_em.__enter__()
+
+    def _close_batch() -> None:
+        nonlocal batch_em
+        if batch_em is None:
+            return
+        em_, batch_em = batch_em, None
+        em_.__exit__(None, None, None)
+        batch_lock.close()
+        valid = em_.total_uJ is not None
+        per_step = (em_.total_uJ / len(batch_rows)) if (valid and batch_rows) else 0.0
+        for r in batch_rows:
+            r["energy_uJ"] = round(per_step, 4)
+            r["energy_valid"] = valid
+            kio.append_row(kp["predictions_file"], r, pred_fields)
+        batch_rows.clear()
+
+    def _emit(row: dict) -> None:
+        """Batch mode: buffer until the batch closes; step mode: write now."""
+        if batch_mode:
+            batch_rows.append(row)
+        else:
+            kio.append_row(kp["predictions_file"], row, pred_fields)
+
     step = 0
     reload_attempts: dict[str, int] = {}
     current_model = kio.read_current_model(kp["model_file"], default=initial_model)
@@ -222,6 +264,7 @@ def main() -> None:
         # batch is served by a single model — t1's batches are never mixed
         # (audit D1: previously 267 of 466 batches mixed 2-3 models).
         if step % monitor_interval == 0:
+            _close_batch()
             if step > 0 and max_ahead >= 0 and not _wait_for_manager(step):
                 logger.error("inference_proc: manager aborted — stopping stream at step %d.", step)
                 break
@@ -245,6 +288,9 @@ def main() -> None:
                         reload_attempts.pop(current_model, None)
                         logger.error("inference_proc: giving up reloading %r after %d attempts.",
                                      current_model, n)
+
+        if batch_mode and batch_em is None:
+            _open_batch(step)
 
         predict_fn = models.get(current_model)
         if predict_fn is None:
@@ -273,28 +319,32 @@ def main() -> None:
             # Blocking cross-process lock (audit C3): every step is measured,
             # like single-threaded; the lock only keeps this meter's window
             # from overlapping a MAPE-side meter.
-            with kio.energy_lock(knowledge_dir, blocking=True):
-                em = EnergyMeter(f"inference_step_{step}", backend=energy_backend)
-                em.__enter__()
+            energy_uJ, energy_valid = 0.0, True  # batch mode: set by _close_batch
+            if batch_mode:
                 try:
                     raw_pred = predict_fn(image_path)
                 except Exception as exc:
                     logger.warning("CV prediction failed at step %d: %s", step, exc)
                     raw_pred = None
-                finally:
-                    em.__exit__(None, None, None)
-            energy_uJ = em.total_uJ if em.total_uJ is not None else 0.0
-            energy_valid = em.valid
+            else:
+                with kio.energy_lock(knowledge_dir, blocking=True):
+                    em = EnergyMeter(f"inference_step_{step}", backend=energy_backend)
+                    em.__enter__()
+                    try:
+                        raw_pred = predict_fn(image_path)
+                    except Exception as exc:
+                        logger.warning("CV prediction failed at step %d: %s", step, exc)
+                        raw_pred = None
+                    finally:
+                        em.__exit__(None, None, None)
+                energy_uJ = em.total_uJ if em.total_uJ is not None else 0.0
+                energy_valid = em.valid
             proxy_acc = _extract_cv_proxy(raw_pred)
-            kio.append_row(
-                kp["predictions_file"],
-                {
-                    "step": step, "proxy_acc": round(proxy_acc, 6),
-                    "active_model": current_model, "planner": args.planner,
-                    "energy_uJ": round(energy_uJ, 4), "energy_valid": energy_valid,
-                },
-                kio.PREDICTION_FIELDS_CV,
-            )
+            _emit({
+                "step": step, "proxy_acc": round(proxy_acc, 6),
+                "active_model": current_model, "planner": args.planner,
+                "energy_uJ": round(energy_uJ, 4), "energy_valid": energy_valid,
+            })
             if raw_pred is not None and pred_dir is not None:
                 _save_cv_prediction(raw_pred, step, pred_dir, cv_task)
             # Exact same line/format as experiments/run_experiment.py:2645-2647 —
@@ -302,35 +352,40 @@ def main() -> None:
             # the way regression's monitor_interval batching does, so
             # single-threaded logs one of these per step.
             logger.info(
-                "stream  step=%-5d  model=%-12s  conf=%.4f  energy=%.1f µJ",
-                step, current_model, proxy_acc, energy_uJ,
+                "stream  step=%-5d  model=%-12s  conf=%.4f  energy=%s",
+                step, current_model, proxy_acc,
+                "per-batch" if batch_mode else f"{energy_uJ:.1f} µJ",
             )
         else:
             scaled_inputs = scaler.transform(sample.inputs.reshape(-1, 1)).flatten()
             # Blocking cross-process lock — see the CV branch above.
-            with kio.energy_lock(knowledge_dir, blocking=True):
-                em = EnergyMeter(f"inference_step_{step}", backend=energy_backend)
-                em.__enter__()
+            energy_uJ, energy_valid = 0.0, True  # batch mode: set by _close_batch
+            if batch_mode:
                 try:
                     raw_pred = predict_fn(scaled_inputs)
                 except Exception as exc:
                     logger.warning("Prediction failed at step %d: %s", step, exc)
                     raw_pred = 0.0
-                finally:
-                    em.__exit__(None, None, None)
-            energy_uJ = em.total_uJ if em.total_uJ is not None else 0.0
-            energy_valid = em.valid
+            else:
+                with kio.energy_lock(knowledge_dir, blocking=True):
+                    em = EnergyMeter(f"inference_step_{step}", backend=energy_backend)
+                    em.__enter__()
+                    try:
+                        raw_pred = predict_fn(scaled_inputs)
+                    except Exception as exc:
+                        logger.warning("Prediction failed at step %d: %s", step, exc)
+                        raw_pred = 0.0
+                    finally:
+                        em.__exit__(None, None, None)
+                energy_uJ = em.total_uJ if em.total_uJ is not None else 0.0
+                energy_valid = em.valid
             y_pred = float(scaler.inverse_transform([[raw_pred]])[0][0])
             y_true = float(sample.ground_truth)
-            kio.append_row(
-                kp["predictions_file"],
-                {
-                    "step": step, "y_true": round(y_true, 6), "y_pred": round(y_pred, 6),
-                    "active_model": current_model,
-                    "energy_uJ": round(energy_uJ, 4), "energy_valid": energy_valid,
-                },
-                kio.PREDICTION_FIELDS_REGRESSION,
-            )
+            _emit({
+                "step": step, "y_true": round(y_true, 6), "y_pred": round(y_pred, 6),
+                "active_model": current_model,
+                "energy_uJ": round(energy_uJ, 4), "energy_valid": energy_valid,
+            })
             # Regression has no per-step log line in single-threaded either
             # (relies on the periodic "MAPE[...]" cycle line instead — see
             # mape/mape_cycle.py) — matching that means NOT adding one here.
@@ -339,6 +394,7 @@ def main() -> None:
             time.sleep(stream_delay_s)
         step += 1
 
+    _close_batch()  # trailing partial batch
     kio.touch(kp["stream_done"])
     logger.info("inference_proc: stream complete, %d steps.", step)
 

@@ -79,7 +79,7 @@ MAPE_EVENT_FIELDS = [
     "step", "violation", "drift_detected", "kl_div",
     "decision_action", "decision_model", "decision_reason",
     "model_before", "model_after",
-    "r2", "ema_score", "avg_energy_uJ", "energy_threshold",
+    "r2", "accuracy", "ema_score", "avg_energy_uJ", "energy_threshold",
 ]
 
 # Serializes all core.energy.EnergyMeter usage *within mape/manage.py's process*

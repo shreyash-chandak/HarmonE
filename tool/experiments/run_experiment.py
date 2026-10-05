@@ -408,6 +408,11 @@ def _initial_mape_info(models: dict[str, Any]) -> dict:
         "ema_scores": {m: 0.5 for m in models},
         "ema_accuracy": {m: 0.5 for m in models},
         "ema_energy": {m: 0.5 for m in models},
+        # Audit A5 (2026-10-06): explicit "has this model been monitored yet".
+        # The 0.5 EMA seeds above are placeholders only; planners must check
+        # this flag instead of comparing against 0.5, and a model's first
+        # observation replaces the placeholder outright (no EMA drag from 0.5).
+        "observed": {m: False for m in models},
         # Phase 1.4: step each model was last active (for staleness detection)
         "last_observed_step": {},
         # Phase 1: violation-aware noop counter and switch tracking
@@ -427,6 +432,65 @@ def _initial_mape_info(models: dict[str, Any]) -> dict:
     }
 
 
+# ── Batch-level inference energy (audit C1) ──────────────────────────────────
+
+class _NoStepMeter:
+    """Stand-in for a per-step EnergyMeter when energy is metered per batch:
+    the step's energy is filled in when its batch closes (BatchEnergy.close)."""
+    total_uJ = 0.0
+    valid = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+
+class BatchEnergy:
+    """One EnergyMeter per monitor_interval batch of inference (audit C1, 2026-10-06).
+
+    A regression prediction takes ~0.03-0.15 ms, shorter than RAPL's ~1 ms
+    counter update, so per-step readings were 48-95 % exact zeros plus
+    single-tick spikes — totals were right on average, but per-batch energy
+    (which drives energy violations and the energy EMAs) was noise. Metering
+    the whole batch spans many counter updates; each step is then charged
+    total / n. Selected by the config key energy_metering: "batch" (default)
+    or "step" (the previous per-step meter).
+    """
+
+    def __init__(self, backend: str, enabled: bool) -> None:
+        self.backend = backend
+        self.enabled = enabled
+        self._em: Any = None
+        self._first_row = 0
+
+    def step_meter(self, label: str):
+        return _NoStepMeter() if self.enabled else EnergyMeter(label, backend=self.backend)
+
+    def open(self, label: str, first_row: int) -> None:
+        if self.enabled and self._em is None:
+            self._em = EnergyMeter(label, backend=self.backend)
+            self._em.__enter__()
+            self._first_row = first_row
+
+    def close(self, rows: list[dict], batch_energy_uJ: list[float]) -> None:
+        """Stop the batch meter and charge total/n to the batch's rows."""
+        if self._em is None:
+            return
+        em, self._em = self._em, None
+        em.__exit__(None, None, None)
+        batch_rows = rows[self._first_row:]
+        if not batch_rows:
+            return
+        valid = em.total_uJ is not None
+        per_step = (em.total_uJ / len(batch_rows)) if valid else 0.0
+        for r in batch_rows:
+            r["energy_uJ"] = round(per_step, 4)
+            r["energy_valid"] = valid
+        batch_energy_uJ[:] = [per_step] * len(batch_energy_uJ) if valid else []
+
+
 # ── MAPE logic (inline) ───────────────────────────────────────────────────────
 
 def _monitor_batch(
@@ -437,28 +501,43 @@ def _monitor_batch(
     mape_info: dict,
     thresholds: dict,
     accuracy: float | None = None,
+    reference_values: list[float] | None = None,
 ) -> dict:
     """Inline monitor: compute accuracy, energy, EMA; return telemetry dict.
 
-    For regression, accuracy is computed as R²(y_true, y_pred).
     For CV, pass accuracy=<mean_confidence_proxy> directly (y_true/y_pred unused).
 
-    R² is mathematically unbounded below (a batch with low true-value variance can
-    send it to large negative numbers even for a decent model — this is exactly
-    what was observed with monitor_interval=50 batches in practice). Both branches
-    clip to [0, 1] so the result honors the contract compute_harmone_score() and
-    update_separated_emas() both document ("accuracy ... in [0, 1]") — previously
-    only the CV branch did this, letting an unbounded R² poison a model's EMA score
-    (and its ema_accuracy used by violation_aware/pareto's min_accuracy gate) after
-    a single noisy window, effectively locking switching-based planners onto
-    whichever model wasn't just hit by a bad batch.
+    Regression accuracy depends on thresholds["accuracy_signal"]:
+      - "batch_r2" (default, the paper's signal): R² of the batch, i.e.
+        1 - MSE / Var(batch y_true), clipped to [0, 1].
+      - "window_r2" (audit A1, 2026-10-06): 1 - MSE_batch / Var(reference_values),
+        clipped to [0, 1], where reference_values are the last drift_window true
+        values (including this batch). Batch R² divides by the variance of only
+        monitor_interval=50 rows, so a calm window sends it to 0 even when the
+        predictions are good: median batch R² of ridge/svr was 0.00 on pems and
+        spot although their stream R² is 0.81-0.89, which locked every
+        accuracy-aware planner out of the cheap models. Normalising by a longer
+        window keeps the model ranking (stored naive runs: pems 0.88/0.90/1.00,
+        spot 0.44/0.64/0.91, uci 0.87/0.87/0.87 median, 0.75/0.81/0.86 mean, for
+        ridge/svr/lstm) and adapts to regime changes in the series' variability,
+        which a fixed training variance does not (spot's training sd is 21.9 vs
+        crisis-period sd up to ~159).
+    The raw batch R² is always reported as telemetry["r2"]; telemetry["accuracy"]
+    is the value that drives the EMAs, scores and violations.
     """
     if accuracy is not None:
-        r2 = max(0.0, min(1.0, accuracy))
+        acc = max(0.0, min(1.0, accuracy))
+        r2 = acc
     else:
-        from sklearn.metrics import r2_score as _r2
-        raw_r2 = float(_r2(y_true, y_pred)) if len(y_true) > 1 else 0.0
-        r2 = max(0.0, min(1.0, raw_r2))
+        yt = np.asarray(y_true, dtype=float)
+        yp = np.asarray(y_pred, dtype=float)
+        mse = float(np.mean((yt - yp) ** 2)) if len(yt) else 0.0
+        batch_var = float(np.var(yt)) if len(yt) > 1 else 0.0
+        r2 = max(0.0, min(1.0, 1.0 - mse / batch_var)) if batch_var > 0 else 0.0
+        acc = r2
+        if thresholds.get("accuracy_signal", "batch_r2") == "window_r2" and reference_values is not None:
+            ref_var = float(np.var(np.asarray(reference_values, dtype=float))) if len(reference_values) > 1 else 0.0
+            acc = max(0.0, min(1.0, 1.0 - mse / ref_var)) if ref_var > 0 else r2
 
     avg_energy_uJ = float(np.mean(energies_uJ)) if energies_uJ else 0.0
     e_min = thresholds.get("E_m", 0.0)
@@ -468,15 +547,24 @@ def _monitor_batch(
     beta = thresholds.get("beta", 0.95)
     gamma = thresholds.get("gamma", 0.8)
 
-    raw_score = compute_harmone_score(r2, e_norm, beta)
-    prev_score = mape_info["ema_scores"].get(current_model, 0.5)
-    ema = update_ema(prev_score, raw_score, gamma)
-
-    mape_info["ema_scores"][current_model] = ema
-    update_separated_emas(mape_info, current_model, r2, e_norm, gamma)
+    raw_score = compute_harmone_score(acc, e_norm, beta)
+    observed = mape_info.setdefault("observed", {})
+    if not observed.get(current_model, False):
+        # Audit A5: the first observation replaces the 0.5 placeholders.
+        mape_info["ema_scores"][current_model] = raw_score
+        mape_info.setdefault("ema_accuracy", {})[current_model] = acc
+        mape_info.setdefault("ema_energy", {})[current_model] = e_norm
+        observed[current_model] = True
+        ema = raw_score
+    else:
+        prev_score = mape_info["ema_scores"].get(current_model, raw_score)
+        ema = update_ema(prev_score, raw_score, gamma)
+        mape_info["ema_scores"][current_model] = ema
+        update_separated_emas(mape_info, current_model, acc, e_norm, gamma)
 
     return {
         "r2": round(r2, 6),
+        "accuracy": round(acc, 6),
         "avg_energy_uJ": round(avg_energy_uJ, 4),
         "normalized_energy": round(e_norm, 6),
         "ema_score": round(ema, 6),
@@ -588,6 +676,7 @@ def _plan(
         current_energy_threshold=float(mape_info.get("current_energy_threshold", 0.6)),
         last_observed_step=dict(mape_info.get("last_observed_step", {})),
         staleness_window=int(thresholds.get("staleness_window", 500)),
+        observed=dict(mape_info.get("observed", {})),
     )
     decision = planner.plan(ctx)
 
@@ -2734,10 +2823,14 @@ def run_experiment(
     )
 
     # ── Stream loop ───────────────────────────────────────────────────────────
+    batch_energy = BatchEnergy(
+        energy_backend, str(thresholds.get("energy_metering", "batch")) == "batch"
+    )
     step = 0
     for sample in adapter.stream():
         if max_steps is not None and step >= max_steps:
             break
+        batch_energy.open(f"inference_batch_{step}", len(prediction_rows))
 
         # Resolve active predict_fn (same for both domains)
         predict_fn = models.get(current_model)
@@ -2752,7 +2845,7 @@ def run_experiment(
             # ── CV: image path → YOLO → confidence proxy ──────────────────
             image_path = str(sample.inputs)
 
-            with EnergyMeter(f"step_{step}", backend=energy_backend) as _em:
+            with batch_energy.step_meter(f"step_{step}") as _em:
                 try:
                     raw_pred = predict_fn(image_path)
                 except Exception as exc:
@@ -2784,15 +2877,16 @@ def run_experiment(
                 "energy_valid": _em.valid,
             })
             logger.info(
-                "stream  step=%-5d  model=%-12s  conf=%.4f  energy=%.1f µJ",
-                step, current_model, proxy_acc, energy_uJ,
+                "stream  step=%-5d  model=%-12s  conf=%.4f  energy=%s",
+                step, current_model, proxy_acc,
+                "per-batch" if batch_energy.enabled else f"{energy_uJ:.1f} µJ",
             )
 
         else:
             # ── Regression: scalar inputs → scale → predict → inverse scale ─
             scaled_inputs = scaler.transform(sample.inputs.reshape(-1, 1)).flatten()
 
-            with EnergyMeter(f"step_{step}", backend=energy_backend) as _em:
+            with batch_energy.step_meter(f"step_{step}") as _em:
                 try:
                     raw_pred = predict_fn(scaled_inputs)
                 except Exception as exc:
@@ -2822,6 +2916,8 @@ def run_experiment(
 
         # ── MAPE cycle ────────────────────────────────────────────────────────
         step += 1
+        if step % monitor_interval == 0:
+            batch_energy.close(prediction_rows, batch_energy_uJ)  # audit C1
         if step % monitor_interval == 0 and batch_y_true:
             # Wrap the full MAPE cycle so that retrain, VMR restore, and heavy
             # planner computation are attributed to mape_k_energy_uJ instead of
@@ -2841,6 +2937,7 @@ def run_experiment(
                     telemetry = _monitor_batch(
                         batch_y_true, batch_y_pred, batch_energy_uJ,
                         current_model, mape_info, thresholds,
+                        reference_values=value_history[-int(thresholds.get("drift_window_size", _DRIFT_WINDOW_SIZE)):],
                     )
 
                 # Analyse: violation?
@@ -2891,10 +2988,10 @@ def run_experiment(
                 if decision.action == "noop" and is_cv:
                     _head_start = thresholds.get("ema_head_start", 0.0)
                     if _head_start > 0.0:
+                        _observed = mape_info.get("observed", {})  # audit A5
                         _unobserved = [
                             m for m in available_models
-                            if m != current_model
-                            and abs(mape_info["ema_scores"].get(m, 0.5) - 0.5) < 1e-9
+                            if m != current_model and not _observed.get(m, False)
                         ]
                         if _unobserved:
                             _trial = _unobserved[0]
@@ -3024,6 +3121,7 @@ def run_experiment(
                 "model_before": old_model,
                 "model_after": current_model,
                 "r2": telemetry["r2"],
+                "accuracy": telemetry.get("accuracy"),
                 "ema_score": telemetry["ema_score"],
                 "avg_energy_uJ": telemetry["avg_energy_uJ"],
                 "energy_threshold": round(mape_info["current_energy_threshold"], 6),
@@ -3042,7 +3140,7 @@ def run_experiment(
             logger.info(
                 "MAPE[%d] model=%-8s  action=%-16s  %s=%.4f  energy=%.1f µJ/step  ema=%.4f%s",
                 len(mape_events), old_model, _action_str, _metric_label,
-                telemetry["r2"], telemetry["avg_energy_uJ"],
+                telemetry.get("accuracy", telemetry["r2"]), telemetry["avg_energy_uJ"],
                 telemetry["ema_score"], _flags,
             )
 
@@ -3050,6 +3148,8 @@ def run_experiment(
             batch_y_true = []
             batch_y_pred = []
             batch_energy_uJ = []
+
+    batch_energy.close(prediction_rows, batch_energy_uJ)  # trailing partial batch (audit C1)
 
     # ── Task metrics (regression: R², RMSE, MAE, energy; CV: none yet) ─────────
     task_metrics: dict = {}
