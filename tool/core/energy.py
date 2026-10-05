@@ -333,6 +333,17 @@ class _PyJoulesRaplBackend:
         self._PyEM = _PyEM
         self._meter: Any = None
 
+    @staticmethod
+    def _max_range_uj() -> float | None:
+        path = _rapl_sysfs_path()
+        if path is None:
+            return None
+        try:
+            from pathlib import Path as _P
+            return float((_P(path).parent / "max_energy_range_uj").read_text().strip())
+        except Exception:
+            return None
+
     def start(self) -> None:
         self._meter = self._PyEM(devices=[self._device])
         self._meter.start(tag="measure")
@@ -344,9 +355,16 @@ class _PyJoulesRaplBackend:
         try:
             for sample in self._meter.get_trace():
                 if sample.energy:
-                    total = sum(sample.energy.values())
+                    # Per-domain wraparound correction (audit C6), mirroring
+                    # _SysfsRaplBackend: a negative delta straddled one
+                    # counter wrap, so add the counter range back.
+                    wrap = self._max_range_uj()
+                    vals = [v + wrap if v < 0 and wrap else v for v in sample.energy.values()]
+                    if any(v < 0 for v in vals):
+                        logger.warning("pyJoules RAPL: negative energy delta after wrap correction — reading dropped.")
+                        return None
                     # RAPL values are µJ; total may be 0 (valid, counter resolution)
-                    return float(total) if total >= 0 else None
+                    return float(sum(vals))
         except Exception as exc:
             logger.debug("pyJoules RAPL stop error: %s", exc)
         return None
@@ -382,7 +400,10 @@ class _SysfsRaplBackend:
             if delta < 0 and self._max_path:
                 from pathlib import Path as _P
                 delta += float(_P(self._max_path).read_text().strip())
-            return float(delta) if delta >= 0 else None
+            if delta < 0:
+                logger.warning("SysfsRaplBackend: negative energy delta after wrap correction — reading dropped.")
+                return None
+            return float(delta)
         except Exception as exc:
             logger.debug("SysfsRaplBackend stop error: %s", exc)
             return None
@@ -454,6 +475,17 @@ class _PyJoulesNvmlBackend:
         self._device.configure(domains=domains)
         self._PyEM = _PyEM
         self._meter: Any = None
+
+    @staticmethod
+    def _max_range_uj() -> float | None:
+        path = _rapl_sysfs_path()
+        if path is None:
+            return None
+        try:
+            from pathlib import Path as _P
+            return float((_P(path).parent / "max_energy_range_uj").read_text().strip())
+        except Exception:
+            return None
 
     def start(self) -> None:
         self._meter = self._PyEM(devices=[self._device])

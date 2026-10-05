@@ -20,13 +20,14 @@ documented in the approved plan — no file under experiments/ is modified.
 Retrained/fine-tuned weights are never written back to the shared
 configs/datasets/*.json weights_path — only to this run's own
 knowledge_dir/models/ copy (see knowledge_io.localize_dataset_config). VMR
-archives go to the SHARED tool/knowledge/vmr/<dataset>/<planner>/ tree, the
-same one the single-threaded harness uses (see mape/manage.py).
+archives go to this run's own knowledge_dir/vmr/ (audit E3), same layout as
+the single-threaded harness (see mape/manage.py).
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import pickle
 from pathlib import Path
 
@@ -46,17 +47,23 @@ logger = logging.getLogger(__name__)
 
 
 def _persist_local(info: dict, local_path: Path) -> None:
-    """Save a retrained/fine-tuned model object to its per-run local copy."""
+    """Save a retrained/fine-tuned model object to its per-run local copy.
+
+    Atomic (audit D6): written to a temp file in the same directory, then
+    os.replace()d, so inference.py can never load a half-written file.
+    """
     local_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = local_path.with_name(f".{local_path.stem}.tmp{local_path.suffix}")
     t = info["type"]
     if t in ("lstm", "torchvision_classifier", "segformer_segmentation"):
         import torch
-        torch.save(info["model"].state_dict(), str(local_path))
+        torch.save(info["model"].state_dict(), str(tmp_path))
     elif t == "yolo_detection":
-        info["model"].save(str(local_path))
+        info["model"].save(str(tmp_path))
     else:
-        with open(local_path, "wb") as f:
+        with open(tmp_path, "wb") as f:
             pickle.dump(info["model"], f)
+    os.replace(tmp_path, local_path)
 
 
 def do_regression_retrain(

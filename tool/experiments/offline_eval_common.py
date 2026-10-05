@@ -80,10 +80,11 @@ def build_stream_index(
         with open(manifest_path, newline="") as f:
             reader = csv.DictReader(f)
             for row in reader:
-                img = row.get("input_path", row.get("image_path", ""))
+                # "\\" -> "/": manifests generated on Windows (audit N5)
+                img = row.get("input_path", row.get("image_path", "")).replace("\\", "/")
                 image_paths.append(str(data_root / img) if img else "")
 
-                label_file = row.get("label_path", "")
+                label_file = row.get("label_path", "").replace("\\", "/")
                 label_paths.append(str(data_root / label_file) if label_file else None)
 
                 raw_label = row.get("label", "")

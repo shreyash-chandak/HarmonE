@@ -60,10 +60,11 @@ PROCESSED_FILE = "_processed"
 # result here; t1 is the only thread that plans/executes.
 DRIFT_STATE_FILE = "drift_state.json"
 PLANNER_DECISIONS_FILE = "planner_decisions.csv"
+# inference.py logs every failed weight reload here (audit D6); the count
+# goes into run_manifest.json as "reload_failures".
+RELOAD_FAILURES_FILE = "reload_failures.csv"
 MODELS_SUBDIR = "models"                            # per-run copies of live weights
-# No per-run VMR subdir — VMR now lives at the shared tool/knowledge/vmr/
-# path, same as experiments/run_experiment.py, scoped by dataset+planner
-# (see mape/manage.py's VMR construction).
+VMR_SUBDIR = "vmr"                                  # per-run VMR (audit E3)
 
 PREDICTION_FIELDS_REGRESSION = [
     "step", "y_true", "y_pred", "active_model", "energy_uJ", "energy_valid",
@@ -150,7 +151,7 @@ def energy_lock(knowledge_dir: Path, blocking: bool = True):
         fd.close()
 
 
-def add_mape_energy(mape_store: "MapeInfoStore", energy_uJ: float) -> None:
+def add_mape_energy(mape_store: "MapeInfoStore", energy_uJ: float | None) -> None:
     """Add a MAPE-side EnergyMeter reading to event_counters.mape_k_energy_uJ.
 
     2026-09-28 (audit C3): energy is now split exactly like the
@@ -162,8 +163,13 @@ def add_mape_energy(mape_store: "MapeInfoStore", energy_uJ: float) -> None:
     totals never overlap in time, so run_concurrent.py can also report their
     sum (event_counters.energy_used_uJ) without double counting.
     """
-    mape_store.update(lambda d: d["event_counters"].__setitem__(
-        "mape_k_energy_uJ", d["event_counters"].get("mape_k_energy_uJ", 0.0) + energy_uJ))
+    def _add(d: dict) -> None:
+        ec = d["event_counters"]
+        if energy_uJ is None:  # unavailable reading (audit C6) — count, don't add 0
+            ec["mape_energy_invalid_cycles"] = ec.get("mape_energy_invalid_cycles", 0) + 1
+        else:
+            ec["mape_k_energy_uJ"] = ec.get("mape_k_energy_uJ", 0.0) + energy_uJ
+    mape_store.update(_add)
 
 
 def build_initial_mape_info(model_names) -> dict:
@@ -279,59 +285,6 @@ def append_row(csv_path: Path, row: dict, fieldnames: list[str]) -> None:
         writer.writerow(row)
 
 
-def _read_complete_rows(csv_path: Path) -> list[dict]:
-    """Read every row of csv_path, dropping a torn trailing row if present.
-
-    inference.py (a separate OS process) keeps appending to this file with no
-    locking or fsync coordination with the reader side (plan_thread.py /
-    drift_thread.py). A read that lands mid-append can catch the writer's
-    latest row before all of it has landed on disk — csv.DictReader then
-    fills whatever columns are missing with its `restval` default (None)
-    rather than raising, so e.g. `row["y_true"]` silently comes back None
-    instead of a number. Only the single most-recently-appended row can ever
-    be torn (the writer commits one row at a time, open+write+close), so it's
-    safe to just drop trailing rows that are missing a column and let the
-    next poll pick them up once fully written.
-
-    Also drops a trailing row with *too many* fields (csv.DictReader parks
-    the overflow under the `None` restkey) — a shape the missing-column check
-    above can't see. Note this pair of checks is necessarily incomplete: a
-    torn write that happens to still land on the exact right column count
-    (2026-09-06: one observed case had "True" — content that belongs in
-    energy_valid — appear in the y_true column, with 6/6 fields intact) can't
-    be detected by shape alone. Callers (plan_thread.py / drift_thread.py)
-    guard against that residual case by catching per-cycle exceptions instead
-    of relying on this function to filter every possible corruption shape.
-    """
-    with open(csv_path, "r", newline="") as f:
-        rows = list(csv.DictReader(f))
-    while rows and (any(v is None for v in rows[-1].values()) or None in rows[-1]):
-        rows.pop()
-    return rows
-
-
-def read_new_rows(csv_path: Path, last_line: int) -> tuple[list[dict], int]:
-    """Read rows appended since `last_line` (0-indexed data rows, header excluded).
-
-    Returns (rows, new_last_line). Mirrors the original HarmonE's
-    mape_info["last_line"] incremental-read pattern.
-    """
-    if not csv_path.exists():
-        return [], last_line
-    reader = _read_complete_rows(csv_path)
-    new_rows = reader[last_line:]
-    return new_rows, len(reader)
-
-
-def read_tail(csv_path: Path, n: int) -> list[dict]:
-    """Last n rows of csv_path (or all rows if fewer exist). Empty list if
-    the file doesn't exist yet."""
-    if not csv_path.exists():
-        return []
-    reader = _read_complete_rows(csv_path)
-    return reader[-n:] if n > 0 else reader
-
-
 class RowBuffer:
     """Incrementally stages new CSV rows so a caller can drain them in fixed
     chunks without re-reading the file's live tail on every drain.
@@ -354,15 +307,47 @@ class RowBuffer:
 
     def __init__(self, path: Path):
         self._path = path
-        self._last_line = 0
+        self._offset = 0                      # bytes consumed so far
+        self._fields: list[str] | None = None  # header, parsed on first read
+        self._rows_seen = 0
         self._staging: list[dict] = []
 
     def poll(self) -> None:
-        """Pull any rows written since the last poll() into staging."""
-        rows, new_last_line = read_new_rows(self._path, self._last_line)
-        self._last_line = new_last_line
-        if rows:
-            self._staging.extend(rows)
+        """Pull any rows written since the last poll() into staging.
+
+        Incremental (audit D5, 2026-10-04): reads only the bytes appended
+        since the previous poll instead of re-parsing the whole file every
+        tick (O(N^2) over a run; on uci that is 126k rows re-read every
+        20 ms per thread, and the CPU time was charged to inference energy,
+        audit C2). Only bytes up to the last newline are consumed; a trailing
+        partial row (inference.py mid-append) stays unread until its newline
+        lands, so torn rows cannot be parsed by construction.
+        """
+        try:
+            with open(self._path, "rb") as f:
+                f.seek(self._offset)
+                data = f.read()
+        except FileNotFoundError:
+            return
+        end = data.rfind(b"\n")
+        if end < 0:
+            return
+        complete = data[: end + 1]
+        self._offset += len(complete)
+        lines = complete.decode("utf-8").splitlines()
+        for values in csv.reader(lines):
+            if self._fields is None:
+                self._fields = values
+                continue
+            # Counted even if malformed, so committed_count stays aligned
+            # with inference.py's step numbers (it drives the barrier).
+            self._rows_seen += 1
+            if len(values) != len(self._fields):
+                logging.getLogger(__name__).warning(
+                    "RowBuffer %s: skipping malformed row (%d fields, expected %d)",
+                    self._path.name, len(values), len(self._fields))
+                continue
+            self._staging.append(dict(zip(self._fields, values)))
 
     def drain_chunk(self, n: int) -> list[dict] | None:
         """Pop exactly n staged rows (oldest first), or None if fewer than
@@ -376,7 +361,7 @@ class RowBuffer:
     def committed_count(self) -> int:
         """Rows actually drained via drain_chunk() so far (i.e. total rows
         seen minus whatever's still sitting in staging)."""
-        return self._last_line - len(self._staging)
+        return self._rows_seen - len(self._staging)
 
 
 # ── mape_info.json (event counters / EMA state) ────────────────────────────────

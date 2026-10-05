@@ -161,8 +161,8 @@ def run(
                     energy_backend=energy_backend,
                 )
             except Exception:
-                # A torn/malformed row from the unlocked cross-process CSV read
-                # must not kill the thread (see knowledge_io._read_complete_rows).
+                # A failed cycle must not kill the thread (torn rows can no
+                # longer be read, see knowledge_io.RowBuffer.poll).
                 logger.exception(
                     "plan_thread: cycle at committed_count=%d failed — skipping this cycle; "
                     "the next batch is unaffected.", current_step,

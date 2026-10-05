@@ -131,11 +131,11 @@ class TestFinetuneTorchvisionClassifierTent:
         """Everything except BatchNorm weight/bias must stay bit-identical —
         TENT's whole point is <1% of parameters move. BN running_mean/var/
         num_batches_tracked are excluded from the "must be identical" check
-        for a different reason: on a successful (non-rejected) adaptation,
-        configure_model() permanently discards them (paper: "statistics from
-        the source data are discarded") — they're gone from the state_dict
-        entirely, not merely changed, which is the intended/correct outcome,
-        not something to assert equality against."""
+        for a different reason: the source statistics are discarded (paper:
+        "statistics from the source data are discarded") and replaced by
+        statistics estimated on the adaptation window (audit N7), so they
+        change by design. They must still be present, so the state_dict loads
+        strictly into a fresh model (the concurrent harness's reload path)."""
         model = _tiny_bn_classifier()
         images = _make_test_images(tmp_path, n=20)
         pre = {k: v.detach().clone() for k, v in model.state_dict().items()}
@@ -155,10 +155,7 @@ class TestFinetuneTorchvisionClassifierTent:
             name for name, m in model.named_modules() if isinstance(m, nn.BatchNorm2d)
         ]
         bn_affine_keys = {f"{n}.weight" for n in bn_names} | {f"{n}.bias" for n in bn_names}
-        # configure_model() only discards running_mean/running_var (the
-        # normalization statistics) — num_batches_tracked is untouched, so
-        # it's excluded from the "must be identical" check (nothing trains
-        # it either way) but NOT expected absent from post like the other two.
+        # Re-estimated on the adaptation window (audit N7).
         bn_discarded_keys = {
             f"{n}.{suffix}" for n in bn_names for suffix in ("running_mean", "running_var")
         }
@@ -172,8 +169,11 @@ class TestFinetuneTorchvisionClassifierTent:
 
         # BN affine params must actually have moved (confirms adaptation ran).
         assert any(not torch.equal(pre[k], post[k]) for k in bn_affine_keys)
-        # BN running stats (mean/var, not the batch counter) must be gone.
-        assert not (bn_discarded_keys & set(post.keys()))
+        # BN running stats are present again (re-estimated, not the source
+        # ones), so a fresh model loads the adapted weights strictly.
+        assert bn_discarded_keys <= set(post.keys())
+        assert any(not torch.equal(pre[k], post[k]) for k in bn_discarded_keys)
+        _tiny_bn_classifier().load_state_dict(post, strict=True)
 
     def test_entropy_decreases_after_adaptation(self, tmp_path):
         model = _tiny_bn_classifier()

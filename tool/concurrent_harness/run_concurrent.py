@@ -18,6 +18,7 @@ run_experiment.py (audit C3, 2026-09-28).
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
 import subprocess
@@ -65,6 +66,14 @@ def _read_csv_column(path: Path, col: str) -> list[float]:
         return [float(r[col]) for r in csv.DictReader(f)]
 
 
+def _count_csv_rows(path: Path) -> int:
+    """Data rows in a headed CSV; 0 if the file doesn't exist."""
+    if not path.exists():
+        return 0
+    with open(path, newline="") as f:
+        return max(sum(1 for _ in csv.reader(f)) - 1, 0)
+
+
 def _build_task_metrics_and_energy_by_model(predictions_file: Path, is_cv: bool) -> tuple[dict, dict]:
     import csv
     if not predictions_file.exists():
@@ -110,6 +119,8 @@ def _build_task_metrics_and_energy_by_model(predictions_file: Path, is_cv: bool)
     _energy_fields = {
         "total_inference_energy_uJ": round(_total_e_uJ, 2),
         "total_inference_energy_mJ": round(_total_e_uJ / 1000.0, 4),
+        # Steps with no energy reading (audit C6); excluded from the total.
+        "energy_invalid_steps": sum(1 for r in rows if r.get("energy_valid") != "True"),
     }
 
     if is_cv:
@@ -366,6 +377,7 @@ def main() -> None:
     event_counters = mape_info.get("event_counters", {
         "model_switches": 0, "retrains": 0, "retrain_skipped": 0,
         "vmr_events": 0, "noops": 0, "noop_on_violation": 0, "mape_k_energy_uJ": 0.0,
+        "mape_energy_invalid_cycles": 0,
     })
 
     total_steps = len(_read_csv_column(kp["predictions_file"], "step"))
@@ -408,6 +420,9 @@ def main() -> None:
         "mape_cycles": mape_info.get("cycles", 0),
         "drift_checks": mape_info.get("drift_checks", 0),
         "final_model": kio.read_current_model(kp["model_file"]),
+        # Failed cross-process weight reloads (audit D6); > 0 means some
+        # counted adaptations never reached the stream.
+        "reload_failures": _count_csv_rows(knowledge_dir / kio.RELOAD_FAILURES_FILE),
         "event_counters": event_counters,
         "final_ema_scores": mape_info.get("ema_scores", {}),
         "task_metrics": task_metrics,

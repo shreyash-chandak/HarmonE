@@ -200,7 +200,7 @@ def run_cycle(
                     mape_store.update(_on_switch)
             finally:
                 em.__exit__(None, None, None)
-            kio.add_mape_energy(mape_store, em.total_uJ or 0.0)
+            kio.add_mape_energy(mape_store, em.total_uJ)
 
         kio.append_row(
             kp["mape_events_file"],

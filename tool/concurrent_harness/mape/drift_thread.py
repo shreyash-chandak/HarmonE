@@ -129,7 +129,7 @@ def run(
                             )
                         finally:
                             em.__exit__(None, None, None)
-                        kio.add_mape_energy(mape_store, em.total_uJ or 0.0)
+                        kio.add_mape_energy(mape_store, em.total_uJ)
 
                 kio.write_drift_state(kp["drift_state"], {
                     "step": current_step,

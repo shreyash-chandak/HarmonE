@@ -132,6 +132,13 @@ class CVImageDirAdapter(DatasetAdapter):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def _portable(path: str | None) -> str:
+    """Manifest path with Windows separators normalised to "/" (audit N5:
+    the imagenet_c manifest was generated on Windows, so every image path
+    failed to open on Linux). "/" works on both platforms."""
+    return (path or "").replace("\\", "/")
+
+
 def _load_manifest(
     manifest_path: Path, data_root: Path
 ) -> tuple[list[str], list[str | None], list[int | None]]:
@@ -151,11 +158,11 @@ def _load_manifest(
         reader = csv.DictReader(f)
         for row in reader:
             # preprocess scripts write "input_path"; fall back to legacy "image_path"
-            img = row.get("input_path", row.get("image_path", ""))
+            img = _portable(row.get("input_path", row.get("image_path", "")))
             # pathlib: absolute img overrides data_root, relative is joined
             image_paths.append(str(Path(data_root) / img) if img else "")
 
-            label = row.get("label_path", "")
+            label = _portable(row.get("label_path", ""))
             label_paths.append(str(Path(data_root) / label) if label else None)
 
             raw_label = row.get("label", "")

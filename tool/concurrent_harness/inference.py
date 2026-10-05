@@ -80,18 +80,24 @@ def _seed_local_weights(dataset_config: dict, knowledge_dir: Path) -> None:
             shutil.copy2(src, dst)
 
 
-def _reload_one_model(models: dict, name: str, local_config: dict) -> None:
+_MAX_RELOAD_ATTEMPTS = 3
+_last_reload_error: dict[str, str] = {}
+
+
+def _reload_one_model(models: dict, name: str, local_config: dict) -> bool:
     """Reload a single model's weights from its (local) weights_path.
 
     Mirrors _load_models()'s per-entry logic exactly (same loader dispatch,
     same kwargs) so a reloaded model behaves identically to one loaded at
     startup — this only exists because retrain/replace runs in a separate
     process here; keeps the old predict_fn cached on failure rather than
-    dropping the model entirely.
+    dropping the model entirely. Returns False on failure, which is logged
+    (audit D6: failures used to be swallowed silently, so an adaptation could
+    be counted while the old model kept serving).
     """
     spec = local_config["models"].get(name)
     if spec is None:
-        return
+        return True
     try:
         loader_fn = get_loader(spec["loader"])
         models[name] = loader_fn(
@@ -99,8 +105,12 @@ def _reload_one_model(models: dict, name: str, local_config: dict) -> None:
             seq_length=local_config.get("seq_length", 5),
             num_classes=local_config.get("num_classes", 1000),
         )
-    except Exception:
-        pass
+        return True
+    except Exception as exc:
+        logger.exception("inference_proc: reload of %r from %s failed — old weights keep serving.",
+                         name, spec.get("weights_path"))
+        _last_reload_error[name] = f"{type(exc).__name__}: {exc}"
+        return False
 
 
 def main() -> None:
@@ -204,6 +214,7 @@ def main() -> None:
         return True
 
     step = 0
+    reload_attempts: dict[str, int] = {}
     current_model = kio.read_current_model(kp["model_file"], default=initial_model)
     for sample in adapter.stream():
         # Model changes (switch, or new weights after retrain/replace) are
@@ -217,7 +228,23 @@ def main() -> None:
             current_model = kio.read_current_model(kp["model_file"], default=initial_model)
             # Cross-process retrain/replace signal — see _reload_one_model's docstring.
             if kio.consume_reload_flag(knowledge_dir, current_model):
-                _reload_one_model(models, current_model, local_config)
+                if _reload_one_model(models, current_model, local_config):
+                    reload_attempts.pop(current_model, None)
+                else:
+                    n = reload_attempts.get(current_model, 0) + 1
+                    reload_attempts[current_model] = n
+                    kio.append_row(
+                        knowledge_dir / kio.RELOAD_FAILURES_FILE,
+                        {"step": step, "model": current_model, "attempt": n,
+                         "error": _last_reload_error.get(current_model, "")[:300]},
+                        ["step", "model", "attempt", "error"],
+                    )
+                    if n < _MAX_RELOAD_ATTEMPTS:
+                        kio.write_reload_flag(knowledge_dir, current_model)  # retry next batch
+                    else:
+                        reload_attempts.pop(current_model, None)
+                        logger.error("inference_proc: giving up reloading %r after %d attempts.",
+                                     current_model, n)
 
         predict_fn = models.get(current_model)
         if predict_fn is None:

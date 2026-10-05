@@ -6,7 +6,7 @@ Reads model weights from the paths in the dataset config; scales inputs with a
 MinMaxScaler fitted on the training split; runs the MAPE loop inline.
 
 Usage (CLI):
-    python experiments/run_experiment.py \\
+    python3 experiments/run_experiment.py \\
         --dataset pems_node1 --planner harmone_original --seed 42 \\
         --run-dir runs/my_run
 
@@ -420,6 +420,9 @@ def _initial_mape_info(models: dict[str, Any]) -> dict:
             "noops": 0,
             "noop_on_violation": 0,
             "mape_k_energy_uJ": 0.0,
+            # MAPE cycles whose energy reading was unavailable (audit C6) —
+            # counted here instead of being added to mape_k_energy_uJ as 0.
+            "mape_energy_invalid_cycles": 0,
         },
     }
 
@@ -1608,6 +1611,39 @@ def _restore_bn_tracking(model, pre_state: dict) -> None:
                 m.num_batches_tracked = pre_state[nbt_key].clone()
 
 
+def _freeze_bn_statistics(model, batches) -> None:
+    """Re-enable BatchNorm running statistics after TENT, estimated on the
+    adaptation window (audit N7, 2026-10-04).
+
+    configure_model() de-registers running_mean/running_var, so the adapted
+    model (a) normalises every single-image inference with that one image's
+    own statistics and (b) saves a state_dict without those buffers, which a
+    fresh model cannot load strictly — the concurrent harness's reload failed
+    and the old weights kept serving. This re-registers the buffers as a
+    cumulative average (momentum=None) over the adaptation batches, i.e. the
+    target-domain statistics TENT normalises with, keeping the adapted affine
+    parameters. The resulting state_dict has the standard keys.
+    """
+    import torch
+    import torch.nn as nn
+    bns = [m for m in model.modules() if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d))]
+    saved_momentum = []
+    for m in bns:
+        m.track_running_stats = True
+        m.register_buffer("running_mean", torch.zeros(m.num_features, device=m.weight.device))
+        m.register_buffer("running_var", torch.ones(m.num_features, device=m.weight.device))
+        m.register_buffer("num_batches_tracked", torch.tensor(0, dtype=torch.long, device=m.weight.device))
+        saved_momentum.append(m.momentum)
+        m.momentum = None
+    model.train()
+    with torch.no_grad():
+        for x in batches:
+            model(x)
+    for m, mom in zip(bns, saved_momentum):
+        m.momentum = mom
+    model.eval()
+
+
 def _finetune_torchvision_classifier_tent(
     model_name: str,
     model_store: dict,
@@ -1718,6 +1754,7 @@ def _finetune_torchvision_classifier_tent(
         optimizer = torch.optim.SGD(params, lr=lr, momentum=0.9)
 
         adapted_batches = 0
+        adapt_batches: list = []
         for start in range(0, len(adapt_paths), batch_size):
             batch_paths = adapt_paths[start : start + batch_size]
             try:
@@ -1731,13 +1768,18 @@ def _finetune_torchvision_classifier_tent(
             for _step in range(steps):
                 forward_and_adapt(x, model, optimizer)
             adapted_batches += 1
+            adapt_batches.append(x)
 
         if adapted_batches == 0:
             _restore_bn_tracking(model, pre_state)
             model.load_state_dict(pre_state, strict=False)
             return False
 
-        model.eval()
+        # Audit N7: give BN real running stats again (target-domain, from the
+        # adaptation window) so single-image inference and strict reloading
+        # both work; the safety valve below evaluates this final model.
+        _freeze_bn_statistics(model, adapt_batches)
+        del adapt_batches
 
         post_tune_conf = _mean_confidence(holdout_paths)
 
@@ -2623,20 +2665,11 @@ def run_experiment(
     seq_length: int = int(dataset_config.get("seq_length", 5))
 
     # ── VMR ───────────────────────────────────────────────────────────────────
-    # Scoped per dataset AND per planner (knowledge/vmr/<dataset>/<planner>/<model>/
-    # <version>/) so that pems/lstm and uci_electricity/lstm are independent
-    # namespaces, AND so that e.g. naive_prt's retrains can't be silently reused
-    # by a later harmone_original/violation_aware/pareto run in the same grid —
-    # confirmed happening in practice (2026-09-03): naive_prt's retrain-archived
-    # versions were being picked up via VMR "replace" by every switching planner
-    # that ran afterward in the same dataset's grid, since the old path was only
-    # keyed by dataset_name. Different seeds of the SAME planner still share this
-    # pool deliberately (not scoped further) — only cross-planner leakage is
-    # closed here. Pre-existing dataset-only VMR trees (accumulated since
-    # 2026-08-30) are NOT migrated by this change — they're simply orphaned under
-    # the old `knowledge/vmr/<dataset>/<model>/` path; a cleanup/migration pass
-    # is tracked as separate follow-up work, not done here.
-    _vmr_dir = _TOOL_DIR / "knowledge" / "vmr" / dataset_name / planner_name
+    # Per-run (audit E3, 2026-10-04): <run_dir>/vmr/<model>/<version>/. Every
+    # run starts from the seeded initial versions only, so results no longer
+    # depend on grid order, earlier seeds, or the other harness. (Previously
+    # shared at tool/knowledge/vmr/<dataset>/<planner>/ across runs and seeds.)
+    _vmr_dir = run_path / "vmr"
     _vmr_dir.mkdir(parents=True, exist_ok=True)
     vmr = VMR(base_dir=str(_vmr_dir))
 
@@ -2665,9 +2698,10 @@ def run_experiment(
     # ── Planner ───────────────────────────────────────────────────────────────
     if planner_name == "bandit":
         from core.planners.bandit import load_or_create_bandit, set_bandit_instance
-        _knowledge_dir = _TOOL_DIR / "knowledge"
-        _knowledge_dir.mkdir(parents=True, exist_ok=True)
-        _bandit = load_or_create_bandit(thresholds, available_models, _knowledge_dir, dataset_name)
+        # Per-run state (audit B7): bandit_state.json + bandit_pending.json
+        # live in run_dir, so every run starts untrained and runs are
+        # independent of order and seed.
+        _bandit = load_or_create_bandit(thresholds, available_models, run_path, dataset_name)
         set_bandit_instance(_bandit)
     planner = get_planner(planner_name)
 
@@ -2794,179 +2828,185 @@ def run_experiment(
             # bleeding into the adjacent inference step RAPL readings.
             _mape_em = EnergyMeter("mape_cycle", backend=energy_backend)
             _mape_em.__enter__()
-            # Monitor
-            if is_cv:
-                batch_proxy = float(np.mean(batch_y_true))
-                telemetry = _monitor_batch(
-                    batch_y_true, batch_y_pred, batch_energy_uJ,
-                    current_model, mape_info, thresholds,
-                    accuracy=batch_proxy,
-                )
-            else:
-                telemetry = _monitor_batch(
-                    batch_y_true, batch_y_pred, batch_energy_uJ,
-                    current_model, mape_info, thresholds,
-                )
-
-            # Analyse: violation?
-            violation = _analyse_violation(telemetry, mape_info, thresholds)
-
-            # Analyse: drift? Build distribution snapshot for VMR matching first.
-            # Works identically for both domains — value_history holds true
-            # values for regression, luminance for CV, and drift_detector.window_size
-            # already reflects each domain's own configured window.
-            current_dist: dict | None = None
-            if drift_detector._bin_edges is not None:
-                _window = value_history[-drift_detector.window_size:]
-                if len(_window) >= drift_detector.window_size:
-                    _hist, _ = np.histogram(_window, bins=drift_detector._bin_edges)
-                    current_dist = {
-                        "type": "histogram",
-                        "data": _hist.tolist(),
-                        "raw": _subsample_raw(_window),  # VMR raw-vs-raw matching (audit E2)
-                    }
-            drift_result = _analyse_drift(
-                value_history, drift_detector, thresholds,
-                vmr=vmr,
-                current_model=current_model,
-                current_distribution=current_dist,
-            )
-
-            # Update energy boundary (B1 fix)
-            _update_energy_boundary(mape_info, telemetry, thresholds)
-
-            # Phase 1.4: record that current_model was active at this step
-            mape_info["last_observed_step"][current_model] = step
-            mape_info["steps_since_last_switch"] = (
-                mape_info.get("steps_since_last_switch", 0) + 1
-            )
-
-            # Plan (runs inside the outer mape_cycle EnergyMeter — nesting forbidden)
-            decision = _plan(
-                violation, drift_result, current_model,
-                available_models, mape_info, thresholds, planner,
-                current_step=step,
-            )
-
-            # EMA head-start: if the planner noops while some models have never
-            # been observed (EMA still exactly at the 0.5 initialisation value),
-            # force a round-robin trial so every model accumulates at least one
-            # monitoring window before the planner makes exploitative comparisons.
-            # Only applies on CV runs where ema_head_start > 0 in the config.
-            if decision.action == "noop" and is_cv:
-                _head_start = thresholds.get("ema_head_start", 0.0)
-                if _head_start > 0.0:
-                    _unobserved = [
-                        m for m in available_models
-                        if m != current_model
-                        and abs(mape_info["ema_scores"].get(m, 0.5) - 0.5) < 1e-9
-                    ]
-                    if _unobserved:
-                        _trial = _unobserved[0]
-                        decision = PlanDecision(
-                            action="switch",
-                            model=_trial,
-                            reason=f"ema_head_start: bootstrap {_trial} (never observed)",
-                        )
-                        logger.info("ema_head_start: forcing trial of %s", _trial)
-
-            # Phase 0.1: per-decision log with EMA snapshots captured at decision time
-            planner_decisions.append({
-                "step": step,
-                "violation": violation,
-                "drift_detected": drift_result["drift_detected"],
-                "decision_action": decision.action,
-                "decision_model": decision.model,
-                "decision_reason": decision.reason,
-                "current_model": current_model,
-                **{f"ema_score_{m}": round(mape_info["ema_scores"].get(m, 0.5), 6)
-                   for m in available_models},
-                **{f"ema_acc_{m}": round(mape_info["ema_accuracy"].get(m, 0.5), 6)
-                   for m in available_models},
-                **{f"ema_eng_{m}": round(mape_info["ema_energy"].get(m, 0.5), 6)
-                   for m in available_models},
-            })
-
-            # Phase 1: count noops that occur despite a violation being active
-            if violation is not None and decision.action == "noop":
-                mape_info["event_counters"]["noop_on_violation"] = (
-                    mape_info["event_counters"].get("noop_on_violation", 0) + 1
-                )
-
-            # Execute — VMR restore or inline retrain/fine-tune for drift; switch for score/energy
-            if decision.action in ("retrain", "replace"):
-                vmr_done = False
-
-                if decision.action == "replace" and decision.version_path:
-                    if is_cv:
-                        vmr_done = _do_cv_vmr_restore(
-                            decision.version_path, current_model, models, model_store,
-                        )
-                    else:
-                        vmr_done = _do_vmr_restore(
-                            decision.version_path, current_model, models, model_store,
-                        )
-                    if vmr_done:
-                        mape_info["event_counters"]["vmr_events"] += 1
-                        logger.info(
-                            "VMR restore: %s ← %s", current_model, decision.version_path,
-                        )
-                    else:
-                        logger.warning(
-                            "VMR restore failed for '%s'; falling back to retrain.", current_model,
-                        )
-
-                if not vmr_done:
-                    # Snapshot current weights before overwriting — enables recovery
-                    # if retrain degrades the model, and gives VMR a pre-retrain
-                    # checkpoint for future closest_distribution matching.
-                    _archive_in_vmr(
-                        current_model, model_store, vmr,
-                        value_history, drift_result, run_path,
-                        tag="pre_retrain",
-                        proxy_score=mape_info["ema_scores"].get(current_model),
+            try:  # audit C6: never leave the EnergyMeter re-entrancy guard stuck
+                # Monitor
+                if is_cv:
+                    batch_proxy = float(np.mean(batch_y_true))
+                    telemetry = _monitor_batch(
+                        batch_y_true, batch_y_pred, batch_energy_uJ,
+                        current_model, mape_info, thresholds,
+                        accuracy=batch_proxy,
                     )
-                    if is_cv:
-                        # PRT fine-tune: last finetune_n_layers layers only,
-                        # pseudo-labeled (label-free, invariant I4). Covers
-                        # all three CV task types (classification/segmentation/
-                        # detection — see _do_cv_inline_finetune's docstring).
-                        # No-ops cleanly (False) when a model failed to load
-                        # or too few confident pseudo-labels exist in the window.
-                        retrained = _do_cv_inline_finetune(
-                            current_model, model_store, models, image_path_history,
-                            thresholds=thresholds,
-                            drift_window=int(thresholds.get("drift_window_size", _DRIFT_WINDOW_SIZE)),
-                            run_path=run_path,
-                        )
-                    else:
-                        retrained = _do_inline_retrain(
-                            current_model, model_store, models, value_history,
-                            scaler=scaler,
-                            seq_length=seq_length,
-                            drift_window=_DRIFT_WINDOW_SIZE,
-                        )
-                    if retrained:
-                        mape_info["event_counters"]["retrains"] += 1
-                        logger.debug("Inline retrain: %s  (%s)", current_model, decision.reason)
+                else:
+                    telemetry = _monitor_batch(
+                        batch_y_true, batch_y_pred, batch_energy_uJ,
+                        current_model, mape_info, thresholds,
+                    )
+
+                # Analyse: violation?
+                violation = _analyse_violation(telemetry, mape_info, thresholds)
+
+                # Analyse: drift? Build distribution snapshot for VMR matching first.
+                # Works identically for both domains — value_history holds true
+                # values for regression, luminance for CV, and drift_detector.window_size
+                # already reflects each domain's own configured window.
+                current_dist: dict | None = None
+                if drift_detector._bin_edges is not None:
+                    _window = value_history[-drift_detector.window_size:]
+                    if len(_window) >= drift_detector.window_size:
+                        _hist, _ = np.histogram(_window, bins=drift_detector._bin_edges)
+                        current_dist = {
+                            "type": "histogram",
+                            "data": _hist.tolist(),
+                            "raw": _subsample_raw(_window),  # VMR raw-vs-raw matching (audit E2)
+                        }
+                drift_result = _analyse_drift(
+                    value_history, drift_detector, thresholds,
+                    vmr=vmr,
+                    current_model=current_model,
+                    current_distribution=current_dist,
+                )
+
+                # Update energy boundary (B1 fix)
+                _update_energy_boundary(mape_info, telemetry, thresholds)
+
+                # Phase 1.4: record that current_model was active at this step
+                mape_info["last_observed_step"][current_model] = step
+                mape_info["steps_since_last_switch"] = (
+                    mape_info.get("steps_since_last_switch", 0) + 1
+                )
+
+                # Plan (runs inside the outer mape_cycle EnergyMeter — nesting forbidden)
+                decision = _plan(
+                    violation, drift_result, current_model,
+                    available_models, mape_info, thresholds, planner,
+                    current_step=step,
+                )
+
+                # EMA head-start: if the planner noops while some models have never
+                # been observed (EMA still exactly at the 0.5 initialisation value),
+                # force a round-robin trial so every model accumulates at least one
+                # monitoring window before the planner makes exploitative comparisons.
+                # Only applies on CV runs where ema_head_start > 0 in the config.
+                if decision.action == "noop" and is_cv:
+                    _head_start = thresholds.get("ema_head_start", 0.0)
+                    if _head_start > 0.0:
+                        _unobserved = [
+                            m for m in available_models
+                            if m != current_model
+                            and abs(mape_info["ema_scores"].get(m, 0.5) - 0.5) < 1e-9
+                        ]
+                        if _unobserved:
+                            _trial = _unobserved[0]
+                            decision = PlanDecision(
+                                action="switch",
+                                model=_trial,
+                                reason=f"ema_head_start: bootstrap {_trial} (never observed)",
+                            )
+                            logger.info("ema_head_start: forcing trial of %s", _trial)
+
+                # Phase 0.1: per-decision log with EMA snapshots captured at decision time
+                planner_decisions.append({
+                    "step": step,
+                    "violation": violation,
+                    "drift_detected": drift_result["drift_detected"],
+                    "decision_action": decision.action,
+                    "decision_model": decision.model,
+                    "decision_reason": decision.reason,
+                    "current_model": current_model,
+                    **{f"ema_score_{m}": round(mape_info["ema_scores"].get(m, 0.5), 6)
+                       for m in available_models},
+                    **{f"ema_acc_{m}": round(mape_info["ema_accuracy"].get(m, 0.5), 6)
+                       for m in available_models},
+                    **{f"ema_eng_{m}": round(mape_info["ema_energy"].get(m, 0.5), 6)
+                       for m in available_models},
+                })
+
+                # Phase 1: count noops that occur despite a violation being active
+                if violation is not None and decision.action == "noop":
+                    mape_info["event_counters"]["noop_on_violation"] = (
+                        mape_info["event_counters"].get("noop_on_violation", 0) + 1
+                    )
+
+                # Execute — VMR restore or inline retrain/fine-tune for drift; switch for score/energy
+                if decision.action in ("retrain", "replace"):
+                    vmr_done = False
+
+                    if decision.action == "replace" and decision.version_path:
+                        if is_cv:
+                            vmr_done = _do_cv_vmr_restore(
+                                decision.version_path, current_model, models, model_store,
+                            )
+                        else:
+                            vmr_done = _do_vmr_restore(
+                                decision.version_path, current_model, models, model_store,
+                            )
+                        if vmr_done:
+                            mape_info["event_counters"]["vmr_events"] += 1
+                            logger.info(
+                                "VMR restore: %s ← %s", current_model, decision.version_path,
+                            )
+                        else:
+                            logger.warning(
+                                "VMR restore failed for '%s'; falling back to retrain.", current_model,
+                            )
+
+                    if not vmr_done:
+                        # Snapshot current weights before overwriting — enables recovery
+                        # if retrain degrades the model, and gives VMR a pre-retrain
+                        # checkpoint for future closest_distribution matching.
                         _archive_in_vmr(
                             current_model, model_store, vmr,
                             value_history, drift_result, run_path,
-                            tag="retrain",
+                            tag="pre_retrain",
                             proxy_score=mape_info["ema_scores"].get(current_model),
                         )
-                    else:
-                        mape_info["event_counters"]["retrain_skipped"] += 1
-                        logger.debug("Retrain skipped: %s", decision.reason)
+                        if is_cv:
+                            # PRT fine-tune: last finetune_n_layers layers only,
+                            # pseudo-labeled (label-free, invariant I4). Covers
+                            # all three CV task types (classification/segmentation/
+                            # detection — see _do_cv_inline_finetune's docstring).
+                            # No-ops cleanly (False) when a model failed to load
+                            # or too few confident pseudo-labels exist in the window.
+                            retrained = _do_cv_inline_finetune(
+                                current_model, model_store, models, image_path_history,
+                                thresholds=thresholds,
+                                drift_window=int(thresholds.get("drift_window_size", _DRIFT_WINDOW_SIZE)),
+                                run_path=run_path,
+                            )
+                        else:
+                            retrained = _do_inline_retrain(
+                                current_model, model_store, models, value_history,
+                                scaler=scaler,
+                                seq_length=seq_length,
+                                drift_window=_DRIFT_WINDOW_SIZE,
+                            )
+                        if retrained:
+                            mape_info["event_counters"]["retrains"] += 1
+                            logger.debug("Inline retrain: %s  (%s)", current_model, decision.reason)
+                            _archive_in_vmr(
+                                current_model, model_store, vmr,
+                                value_history, drift_result, run_path,
+                                tag="retrain",
+                                proxy_score=mape_info["ema_scores"].get(current_model),
+                            )
+                        else:
+                            mape_info["event_counters"]["retrain_skipped"] += 1
+                            logger.debug("Retrain skipped: %s", decision.reason)
 
-                new_model = current_model
+                    new_model = current_model
+                else:
+                    new_model = _execute(
+                        decision, current_model, mape_info,
+                        energy_uJ=0.0,
+                    )
+            finally:
+                _mape_em.__exit__(None, None, None)
+            if _mape_em.total_uJ is None:
+                mape_info["event_counters"]["mape_energy_invalid_cycles"] = (
+                    mape_info["event_counters"].get("mape_energy_invalid_cycles", 0) + 1)
             else:
-                new_model = _execute(
-                    decision, current_model, mape_info,
-                    energy_uJ=0.0,
-                )
-            _mape_em.__exit__(None, None, None)
-            mape_info["event_counters"]["mape_k_energy_uJ"] += (_mape_em.total_uJ or 0.0)
+                mape_info["event_counters"]["mape_k_energy_uJ"] += _mape_em.total_uJ
             old_model = current_model
             current_model = new_model
             if current_model != old_model:
@@ -3042,6 +3082,8 @@ def run_experiment(
             "n_samples": _n,
             "total_inference_energy_uJ": round(_total_e_uJ, 2),
             "total_inference_energy_mJ": round(_total_e_uJ / 1000.0, 4),
+            # Steps with no energy reading (audit C6); excluded from the total.
+            "energy_invalid_steps": sum(1 for r in prediction_rows if not r["energy_valid"]),
         }
 
     if is_cv and prediction_rows:
@@ -3065,6 +3107,8 @@ def run_experiment(
             },
             "total_inference_energy_uJ": round(_total_e_uJ, 2),
             "total_inference_energy_mJ": round(_total_e_uJ / 1000.0, 4),
+            # Steps with no energy reading (audit C6); excluded from the total.
+            "energy_invalid_steps": sum(1 for r in prediction_rows if not r["energy_valid"]),
         }
 
     # ── Write artifacts ───────────────────────────────────────────────────────

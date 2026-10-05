@@ -110,11 +110,9 @@ def main() -> None:
         scaler = _fit_scaler(train_values)
         _build_reference_distribution(train_values, str(kp["reference_dist_file"]), n_bins=n_bins)
 
-    # Shared VMR path — identical construction to experiments/run_experiment.py
-    # (_TOOL_DIR/knowledge/vmr/<dataset>/<planner>/). Shared with the
-    # single-threaded harness; never run both grids for the same
-    # dataset+planner at the same moment (core/vmr.py has no file locking).
-    _vmr_dir = _TOOL_DIR / "knowledge" / "vmr" / args.dataset / args.planner
+    # Per-run VMR (audit E3, 2026-10-04): <run_dir>/vmr/, same layout as
+    # experiments/run_experiment.py. Runs are independent of order and seed.
+    _vmr_dir = knowledge_dir / kio.VMR_SUBDIR
     _vmr_dir.mkdir(parents=True, exist_ok=True)
     vmr = VMR(str(_vmr_dir))
     import json
@@ -126,13 +124,11 @@ def main() -> None:
     _seed_vmr_initial(model_names, dataset_config, vmr, training_distribution)
 
     if args.planner == "bandit":
-        # Shared tool/knowledge/ path, identical to run_experiment.py. Only t1
-        # ever calls the planner, so the module-level singleton is used from
-        # one thread.
+        # Per-run state in run_dir (audit B7), identical to run_experiment.py.
+        # Only t1 ever calls the planner, so the module-level singleton is
+        # used from one thread.
         from core.planners.bandit import load_or_create_bandit, set_bandit_instance
-        _shared_knowledge_dir = _TOOL_DIR / "knowledge"
-        _shared_knowledge_dir.mkdir(parents=True, exist_ok=True)
-        bandit_obj = load_or_create_bandit(dataset_config, model_names, _shared_knowledge_dir, args.dataset)
+        bandit_obj = load_or_create_bandit(dataset_config, model_names, knowledge_dir, args.dataset)
         set_bandit_instance(bandit_obj)
 
     mape_store = kio.MapeInfoStore(kp["mape_info_file"], kio.build_initial_mape_info(model_names))
