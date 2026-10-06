@@ -15,7 +15,7 @@
       "loader": "adapters.loaders.lstm_loader",
       "cost_class": "heavy",
       "hyperparams": {
-        "train":   {"epochs": 50, "lr": 0.001, "batch_size": 16},
+        "train":   {"epochs": 4, "lr": 0.0003, "batch_size": 16},
         "retrain": {}
       }
     },

@@ -72,3 +72,15 @@ def test_retrain_window_rows_used(tmp_path):
             "retrain_window_rows": 3000, "train_params": {"alpha": 1.0}, "n_train_sequences": 3000}
     assert _do_inline_retrain("ridge", {"ridge": info}, {}, hist, scaler, seq_length=5, drift_window=1200)
     assert seen["n"] == 3000 - 5
+
+
+def test_regularisation_factor_damps_retrains():
+    from sklearn.linear_model import Ridge
+    from sklearn.svm import SVR
+    from experiments.run_experiment import _sample_scaled_params
+    r = {"model": Ridge(), "train_params": {"alpha": 10}, "n_train_sequences": 1000,
+         "retrain_regularisation_factor": 4}
+    assert abs(_sample_scaled_params(r, 100)["alpha"] - 4.0) < 1e-9
+    v = {"model": SVR(), "train_params": {"C": 0.1}, "n_train_sequences": 1000,
+         "retrain_regularisation_factor": 4}
+    assert abs(_sample_scaled_params(v, 100)["C"] - 0.25) < 1e-9

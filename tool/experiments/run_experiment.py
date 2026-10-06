@@ -173,6 +173,7 @@ def _weights_meta(dataset_config: dict, name: str, n_train_values: int) -> dict:
         "train_hyperparams": spec.get("hyperparams", {}).get("train", {}),
         "seq_length": int(dataset_config.get("seq_length", 5)),
         "n_train_values": int(n_train_values),
+        "train_seed": int(dataset_config.get("train_seed", 0)),
         # Not data_path: the clean and *_driftinduced configs share weights
         # and have identical training rows (drift is only induced in the stream).
         "split": {k: dataset_config.get(k) for k in
@@ -260,6 +261,10 @@ def _train_regression_models(
                         name, n_epochs, len(X))
             X_t = torch.tensor(X, dtype=torch.float32).unsqueeze(-1)
             y_t = torch.tensor(y, dtype=torch.float32).unsqueeze(-1)
+            # Seeded (2026-10-06): initial weights and batch order were unseeded,
+            # so the same config trained to different accuracies on different
+            # machines (spot lstm 0.969 on the laptop vs 0.947 on the remote).
+            torch.manual_seed(int(dataset_config.get("train_seed", 0)))
             model = LSTMModel()
             opt = optim.Adam(model.parameters(), lr=lr)
             loss_fn = nn.MSELoss()
@@ -804,6 +809,10 @@ def _load_model_store(dataset_config: dict) -> dict:
         # training cap, otherwise a 1,200-row refit leaves it with at most
         # 1,200 support vectors and moves it on the energy axis.
         window_rows = retrain_params.pop("window_rows", None)
+        # Per-model retrain damping (overrides the dataset-level
+        # retrain_regularisation_factor), see _sample_scaled_params.
+        reg_factor = retrain_params.pop(
+            "regularisation_factor", dataset_config.get("retrain_regularisation_factor", 1.0))
         # For sample-scaled retraining (audit N4): the hyperparameters and
         # training-set size the on-disk model was originally fitted with.
         scale_info = {
@@ -811,6 +820,7 @@ def _load_model_store(dataset_config: dict) -> dict:
             "train_params": spec.get("hyperparams", {}).get("train", {}),
             "n_train_sequences": dataset_config.get("_n_train_sequences"),
             "retrain_regularisation": dataset_config.get("retrain_regularisation", "sample_scaled"),
+            "retrain_regularisation_factor": reg_factor,
         }
         try:
             if "lstm" in name:
@@ -1468,6 +1478,15 @@ def _sample_scaled_params(info: dict, n_retrain: int) -> dict:
     """
     if info.get("retrain_regularisation", "sample_scaled") != "sample_scaled":
         return {}
+    # k > 1 regularises retrains k times more strongly than the initial fit,
+    # damping how far a refit on recent data moves the model (per-model
+    # hyperparams.retrain.regularisation_factor, else the dataset-level
+    # retrain_regularisation_factor; default 1). 2026-10-06 values target a
+    # periodic-retrain gain of ~+0.03-0.05 stream R² (offline simulation,
+    # PRT every 3,200 rows): spot ridge 60 (+0.040; k=1 gave +0.181), spot
+    # svr 10 (+0.032; +0.098), uci ridge 2 (+0.037; +0.080), uci svr 3
+    # (+0.043; +0.090); pems keeps 1 (+0.04 already).
+    k = float(info.get("retrain_regularisation_factor", 1.0))
     n_train = info.get("n_train_sequences")
     if not n_train or n_retrain <= 0:
         return {}
@@ -1475,11 +1494,11 @@ def _sample_scaled_params(info: dict, n_retrain: int) -> dict:
     hp = info.get("train_params") or {}
     if hasattr(model, "alpha") and not hasattr(model, "C"):          # Ridge
         alpha_train = float(hp.get("alpha", 256))
-        return {"alpha": alpha_train * n_retrain / n_train}
+        return {"alpha": alpha_train * n_retrain / n_train * k}
     if hasattr(model, "C"):                                          # SVR
         n_fit = min(int(hp.get("max_train_samples", 8000)), n_train)
         c_train = float(hp.get("C", 0.08))
-        return {"C": c_train * n_fit / n_retrain}
+        return {"C": c_train * n_fit / n_retrain / k}
     return {}
 
 
