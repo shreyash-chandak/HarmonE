@@ -138,7 +138,7 @@ def write_config(dataset: str, configs_dir: Path, result: dict) -> None:
     updates["accuracy_gate_source"] = result["source"] + " (min_accuracy = accuracy_budget_rho rule)"
     missing = []
     for key, val in updates.items():
-        pat = re.compile(rf'^(\s*)"{re.escape(key)}":\s*[^,\n]+(,?)$', re.M)
+        pat = re.compile(rf'^(\s*)"{re.escape(key)}":\s*(?:"(?:[^"\\]|\\.)*"|[^,\n]+)(,?)$', re.M)
         if pat.search(text):
             text = pat.sub(lambda m: f'{m.group(1)}"{key}": {json.dumps(val)}{m.group(2)}', text, count=1)
         else:

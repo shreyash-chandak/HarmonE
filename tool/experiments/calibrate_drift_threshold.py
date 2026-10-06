@@ -133,13 +133,16 @@ def _null_window_scores(
     return scores
 
 
-def _load_regression_values(dataset_config: dict, tool_dir: Path, null_stream_rows: int | None = None):
+def _load_regression_values(dataset_config: dict, tool_dir: Path, null_stream_rows: int | None = None,
+                            null_config: dict | None = None):
     from experiments.run_experiment import _build_adapter
     adapter = _build_adapter(dataset_config, tool_dir / "configs" / "datasets")
     train_values = np.asarray(adapter.train_split(), dtype=float)
     if null_stream_rows:
-        # first rows of the stream, before the first injected drift region
-        val_values = np.asarray([s.ground_truth for _, s in zip(range(null_stream_rows), adapter.stream())],
+        # first rows of the stream: before the first injected drift region,
+        # or (null_config) of a sibling config's stream without injected drift
+        src = _build_adapter(null_config, tool_dir / "configs" / "datasets") if null_config else adapter
+        val_values = np.asarray([s.ground_truth for _, s in zip(range(null_stream_rows), src.stream())],
                                 dtype=float)
     else:
         val_values = np.asarray(adapter.val_split(), dtype=float) if hasattr(adapter, "val_split") else np.array([])
@@ -169,6 +172,7 @@ def calibrate(
     stride: int | None,
     tool_dir: Path,
     null_stream_rows: int | None = None,
+    null_config_name: str | None = None,
 ) -> dict:
     config_path = tool_dir / "configs" / "datasets" / f"{dataset_name}.json"
     if not config_path.exists():
@@ -180,7 +184,11 @@ def calibrate(
     if is_cv:
         train_values, val_values = _load_cv_luminance_values(dataset_config, tool_dir)
     else:
-        train_values, val_values = _load_regression_values(dataset_config, tool_dir, null_stream_rows)
+        null_config = None
+        if null_config_name:
+            with open(tool_dir / "configs" / "datasets" / f"{null_config_name}.json") as f:
+                null_config = json.load(f)
+        train_values, val_values = _load_regression_values(dataset_config, tool_dir, null_stream_rows, null_config)
 
     if len(train_values) < window_size:
         raise ValueError(
@@ -253,6 +261,9 @@ def main() -> None:
                         help="Window stride for the null-score sweep (default window_size // 2).")
     parser.add_argument("--null-stream-rows", type=int, default=None,
                         help="Use the first N stream rows (pre-drift) as the null pool.")
+    parser.add_argument("--null-config", default=None,
+                        help="Take the --null-stream-rows null pool from this config's stream "
+                             "(e.g. the clean sibling of a *_driftinduced config).")
     parser.add_argument("--write", action="store_true",
                         help="Write the kl_overflow threshold into the config as tau_drift.")
     parser.add_argument("--output", default=None,
@@ -263,6 +274,7 @@ def main() -> None:
     report = calibrate(
         args.dataset, detector_names, args.window_size, args.percentile, args.stride, _TOOL_DIR,
         null_stream_rows=args.null_stream_rows,
+        null_config_name=args.null_config,
     )
 
     out_path = Path(args.output) if args.output else _TOOL_DIR / "runs" / f"calibration_{args.dataset}.json"
@@ -286,9 +298,9 @@ def _write_tau(dataset: str, report: dict, args) -> None:
     text = path.read_text()
     tau = entry["detection_threshold"]
     source = (f"calibrate_drift_threshold kl_overflow p{args.percentile:g} "
-              f"window={args.window_size} null={'stream[:%d]' % args.null_stream_rows if args.null_stream_rows else 'val_split'}")
+              f"window={args.window_size} null={(args.null_config + ':' if args.null_config else '') + 'stream[:%d]' % args.null_stream_rows if args.null_stream_rows else 'val_split'}")
     for key, val in (("tau_drift", tau), ("tau_drift_source", source)):
-        pat = re.compile(rf'^(\s*)"{key}":\s*[^,\n]+(,?)$', re.M)
+        pat = re.compile(rf'^(\s*)"{key}":\s*(?:"(?:[^"\\]|\\.)*"|[^,\n]+)(,?)$', re.M)
         if not pat.search(text):
             raise SystemExit(f'{path}: no "{key}" line')
         text = pat.sub(lambda m: f'{m.group(1)}"{key}": {json.dumps(val)}{m.group(2)}', text, count=1)

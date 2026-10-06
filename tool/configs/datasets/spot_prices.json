@@ -26,7 +26,7 @@
       "cost_class": "light",
       "hyperparams": {
         "train":   {"alpha": 5},
-        "retrain": {"regularisation_factor": 60}
+        "retrain": {"regularisation_factor": 45}
       }
     },
     "svr": {
