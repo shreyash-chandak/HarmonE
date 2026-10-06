@@ -255,6 +255,13 @@ def main() -> None:
         else:
             kio.append_row(kp["predictions_file"], row, pred_fields)
 
+    # Whole-stream package energy: start reading (see kio.PKG_START_FILE).
+    from core.energy import read_package_counter
+    import json as _json
+    (knowledge_dir / kio.PKG_START_FILE).write_text(_json.dumps({
+        "counter": read_package_counter(), "t": time.time(),
+    }))
+
     step = 0
     reload_attempts: dict[str, int] = {}
     current_model = kio.read_current_model(kp["model_file"], default=initial_model)

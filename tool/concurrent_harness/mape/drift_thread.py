@@ -47,6 +47,7 @@ logger = logging.getLogger(__name__)
 # Purely a responsiveness tick (how often to check for a full batch / for
 # shutdown) — NOT a decision-cadence parameter.
 _POLL_TICK_S = 0.02
+_FLUSH_EVERY = 20
 
 
 def run(
@@ -78,6 +79,23 @@ def run(
     # Trailing window, capped to drift_window, extended by exactly
     # monitor_interval values per batch (see RowBuffer's docstring).
     window: list[float] = []
+
+    # Drift-check energy and the check counter are accumulated in memory and
+    # written to mape_info every _FLUSH_EVERY checks (and at shutdown) instead
+    # of two locked JSON read-modify-writes per check (2026-10-07).
+    pending = {"uJ": 0.0, "invalid": 0, "checks": 0}
+
+    def _flush() -> None:
+        if not pending["checks"]:
+            return
+        def _upd(d: dict) -> None:
+            ec = d["event_counters"]
+            ec["mape_k_energy_uJ"] = ec.get("mape_k_energy_uJ", 0.0) + pending["uJ"]
+            if pending["invalid"]:
+                ec["mape_energy_invalid_cycles"] = ec.get("mape_energy_invalid_cycles", 0) + pending["invalid"]
+            d["drift_checks"] = d.get("drift_checks", 0) + pending["checks"]
+        mape_store.update(_upd)
+        pending.update(uJ=0.0, invalid=0, checks=0)
 
     running = True
     while running:
@@ -129,7 +147,10 @@ def run(
                             )
                         finally:
                             em.__exit__(None, None, None)
-                        kio.add_mape_energy(mape_store, em.total_uJ)
+                        if em.total_uJ is None:
+                            pending["invalid"] += 1
+                        else:
+                            pending["uJ"] += em.total_uJ
 
                 kio.write_drift_state(kp["drift_state"], {
                     "step": current_step,
@@ -141,7 +162,9 @@ def run(
                     "adaptation_seen": ref._seen_adaptation.get(current_model, -1),
                     "drift_result": drift_result,
                 })
-                mape_store.update(lambda d: d.__setitem__("drift_checks", d.get("drift_checks", 0) + 1))
+                pending["checks"] += 1
+                if pending["checks"] >= _FLUSH_EVERY:
+                    _flush()
             except Exception:
                 logger.exception(
                     "drift_thread: drift check at committed_count=%d failed — "
@@ -149,4 +172,5 @@ def run(
                     pred_buf.committed_count,
                 )
 
+    _flush()
     logger.info("drift_thread: shutdown")

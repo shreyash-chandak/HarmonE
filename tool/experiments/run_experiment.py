@@ -630,6 +630,12 @@ def _monitor_batch(
         mape_info["ema_scores"][current_model] = ema
         update_separated_emas(mape_info, current_model, acc, e_norm, gamma)
 
+    # Running mean of this model's batch accuracy since its last adaptation
+    # (or first observation) — the baseline for accuracy-confirmed drift.
+    since = mape_info.setdefault("acc_since_adapt", {}).setdefault(current_model, [0.0, 0])
+    since[0] += acc
+    since[1] += 1
+
     return {
         "r2": round(r2, 6),
         "accuracy": round(acc, 6),
@@ -717,6 +723,38 @@ def _analyse_drift(
     return {"drift_detected": True, "action": "retrain", "version": None, "kl_div": kl}
 
 
+def note_adaptation(mape_info: dict, model: str, version_path: str | None = None) -> None:
+    """Bookkeeping after a model was adapted (retrain / VMR restore / no-op
+    restore): restart its accuracy baseline for drift confirmation and record
+    which VMR version it now serves (for no-op restore detection)."""
+    mape_info.setdefault("acc_since_adapt", {})[model] = [0.0, 0]
+    if version_path:
+        mape_info.setdefault("serving_version", {})[model] = version_path
+
+
+def drift_confirmed(mape_info: dict, model: str, thresholds: dict) -> tuple[bool, str]:
+    """Accuracy-confirmed drift (2026-10-07; config drift_confirmation:
+    "accuracy", default "none" = paper behaviour).
+
+    The KL detector reacts to ANY change in the input distribution, including
+    changes the serving model handles fine; acting on those spends adaptation
+    energy for nothing. Drift is confirmed only when the serving model's
+    accuracy EMA has fallen by at least drift_accuracy_drop (default 0.05)
+    below its own mean batch accuracy since its last adaptation.
+    """
+    if thresholds.get("drift_confirmation", "none") != "accuracy":
+        return True, "confirmation off"
+    since = mape_info.get("acc_since_adapt", {}).get(model)
+    ema = mape_info.get("ema_accuracy", {}).get(model)
+    if not since or since[1] < 2 or ema is None:
+        return False, "no accuracy baseline yet"
+    baseline = since[0] / since[1]
+    drop = float(thresholds.get("drift_accuracy_drop", 0.05))
+    if ema < baseline - drop:
+        return True, f"accuracy {ema:.3f} < baseline {baseline:.3f} - {drop}"
+    return False, f"accuracy {ema:.3f} within {drop} of baseline {baseline:.3f}"
+
+
 def _plan(
     violation: str | None,
     drift_result: dict,
@@ -730,6 +768,14 @@ def _plan(
     served_model: str | None = None,
 ) -> PlanDecision:
     effective_violation = violation
+    if drift_result["drift_detected"]:
+        ok, why = drift_confirmed(mape_info, current_model, thresholds)
+        drift_result["drift_confirmed"] = ok
+        if not ok:
+            # detected but not confirmed by an accuracy drop: not acted on
+            ec = mape_info.setdefault("event_counters", {})
+            ec["drift_unconfirmed"] = ec.get("drift_unconfirmed", 0) + 1
+            drift_result = dict(drift_result, drift_detected=False, unconfirmed_reason=why)
     if drift_result["drift_detected"] and violation is None:
         effective_violation = "drift"
 
@@ -786,7 +832,7 @@ def _plan(
     return decision
 
 
-def _load_model_store(dataset_config: dict) -> dict:
+def _load_model_store(dataset_config: dict, only: list[str] | None = None) -> dict:
     """Load raw model objects for inline retraining (parallel to the predict closures).
 
     Returns {name: {"type": "sklearn"|"lstm", "model": obj} | None}.
@@ -797,6 +843,11 @@ def _load_model_store(dataset_config: dict) -> dict:
     import pickle
     store: dict = {}
     for name, spec in dataset_config.get("models", {}).items():
+        # `only` (2026-10-07): a retrain needs just the model being retrained;
+        # loading all three (incl. torch.load of the LSTM) on every retrain
+        # was pure overhead inside the metered MAPE-K window.
+        if only is not None and name not in only:
+            continue
         wp = spec["weights_path"]
         if not os.path.isabs(wp):
             wp = os.path.join(str(_TOOL_DIR), wp)
@@ -934,7 +985,7 @@ def _build_yolo_model(weights_path: str):
     return model
 
 
-def _load_cv_model_store(dataset_config: dict, cv_task: str) -> dict:
+def _load_cv_model_store(dataset_config: dict, cv_task: str, only: list[str] | None = None) -> dict:
     """Load raw CV model objects for inline periodic fine-tuning (PRT+VMR, CV).
 
     Covers all three CV task families:
@@ -952,6 +1003,8 @@ def _load_cv_model_store(dataset_config: dict, cv_task: str) -> dict:
     """
     store: dict = {}
     for name, spec in dataset_config.get("models", {}).items():
+        if only is not None and name not in only:  # see _load_model_store
+            continue
         wp = spec["weights_path"]
         if not os.path.isabs(wp):
             wp = os.path.join(str(_TOOL_DIR), wp)
@@ -2421,7 +2474,10 @@ def _do_vmr_restore(
             m = LSTMModel()
             m.load_state_dict(torch.load(version_path, map_location="cpu", weights_only=False))
             m.eval()
-            model_store[model_name] = {"type": "lstm", "model": m, "retrain_params": retrain_params}
+            # keep the scale/window/damping info (_sample_scaled_params);
+            # previously a restore dropped it and later retrains ran unscaled
+            model_store[model_name] = {**existing, "type": "lstm", "model": m,
+                                       "retrain_params": retrain_params}
             _m = m
             def _new_predict(inputs: np.ndarray, m=_m) -> float:
                 import torch as _t
@@ -2431,7 +2487,8 @@ def _do_vmr_restore(
         else:
             with open(version_path, "rb") as f:
                 m = pickle.load(f)
-            model_store[model_name] = {"type": "sklearn", "model": m, "retrain_params": retrain_params}
+            model_store[model_name] = {**existing, "type": "sklearn", "model": m,
+                                       "retrain_params": retrain_params}
             _m = m
             def _new_predict(inputs: np.ndarray, m=_m) -> float:
                 return float(m.predict(inputs.reshape(1, -1))[0])
@@ -2630,8 +2687,9 @@ def _archive_in_vmr(
     n_bins: int = _DRIFT_N_BINS,
     tag: str = "retrain",
     proxy_score: float | None = None,
-) -> None:
-    """Atomically save model weights to the VMR.
+) -> str | None:
+    """Atomically save model weights to the VMR; return the stored weights path
+    (None on failure).
 
     Writes weights to a temp file, hands it to vmr.store() (which copies it),
     then removes the temp file.  Fire-and-forget: logs a warning on failure.
@@ -2658,7 +2716,7 @@ def _archive_in_vmr(
     import pickle
     info = model_store.get(model_name)
     if info is None:
-        return
+        return None
 
     try:
         if info["type"] in ("lstm", "torchvision_classifier", "segformer_segmentation"):
@@ -2677,7 +2735,7 @@ def _archive_in_vmr(
                 pickle.dump(info["model"], f)
     except Exception as exc:
         logger.warning("VMR archive: could not save weights for '%s': %s", model_name, exc)
-        return
+        return None
 
     try:
         window = value_history[-drift_window:]
@@ -2697,7 +2755,7 @@ def _archive_in_vmr(
             }
         else:
             distribution = {"type": "histogram", "data": []}
-        vmr.store(
+        version = vmr.store(
             model_name, tmp_path, distribution,
             tag=tag,
             proxy_score=proxy_score,
@@ -2705,8 +2763,10 @@ def _archive_in_vmr(
         )
         logger.debug("VMR archive: stored '%s' tag=%s (kl=%.4f)", model_name, tag,
                      drift_result.get("kl_div") or 0.0)
+        return version.weights_path
     except Exception as exc:
         logger.warning("VMR archive failed for '%s': %s", model_name, exc)
+        return None
     finally:
         try:
             os.unlink(tmp_path)
@@ -2962,6 +3022,18 @@ def run_experiment(
         dataset_name, planner_name, seed, monitor_interval,
     )
 
+    # Which VMR version each model serves (no-op restore detection): the
+    # initial seed until it is retrained or restored.
+    for _m in available_models:
+        _init = [v for v in vmr.list_versions(_m) if v.tag == "initial"]
+        if _init:
+            mape_info.setdefault("serving_version", {})[_m] = _init[0].weights_path
+
+    # Whole-stream CPU package energy (2026-10-07): one passive counter read
+    # before the stream and one after; overlap- and gap-free total.
+    from core.energy import read_package_counter, package_energy_between
+    _pkg_start, _pkg_t0 = read_package_counter(), time.monotonic()
+
     # ── Stream loop ───────────────────────────────────────────────────────────
     batch_energy = BatchEnergy(
         energy_backend, str(thresholds.get("energy_metering", "batch")) == "batch"
@@ -3170,7 +3242,16 @@ def run_experiment(
                 if decision.action in ("retrain", "replace"):
                     vmr_done = False
 
-                    if decision.action == "replace" and decision.version_path:
+                    serving = mape_info.get("serving_version", {}).get(current_model)
+                    if (decision.action == "replace" and decision.version_path
+                            and decision.version_path == serving):
+                        # no-op restore (2026-10-07): the matched version is
+                        # the one already serving — only reset the baseline
+                        vmr_done = True
+                        mape_info["event_counters"]["vmr_noop"] = (
+                            mape_info["event_counters"].get("vmr_noop", 0) + 1)
+                        note_adaptation(mape_info, current_model)
+                    elif decision.action == "replace" and decision.version_path:
                         if is_cv:
                             vmr_done = _do_cv_vmr_restore(
                                 decision.version_path, current_model, models, model_store,
@@ -3181,6 +3262,7 @@ def run_experiment(
                             )
                         if vmr_done:
                             mape_info["event_counters"]["vmr_events"] += 1
+                            note_adaptation(mape_info, current_model, decision.version_path)
                             logger.info(
                                 "VMR restore: %s ← %s", current_model, decision.version_path,
                             )
@@ -3190,15 +3272,20 @@ def run_experiment(
                             )
 
                     if not vmr_done:
-                        # Snapshot current weights before overwriting — enables recovery
-                        # if retrain degrades the model, and gives VMR a pre-retrain
-                        # checkpoint for future closest_distribution matching.
-                        _archive_in_vmr(
-                            current_model, model_store, vmr,
-                            value_history, drift_result, run_path,
-                            tag="pre_retrain",
-                            proxy_score=mape_info["ema_scores"].get(current_model),
-                        )
+                        # CV only: snapshot current weights before a fine-tune
+                        # (YOLO fine-tunes mutate weights in place; this is the
+                        # recovery copy). Regression skips it (2026-10-07): the
+                        # serving version is already in the VMR (initial seed,
+                        # an earlier retrain or a restored version), so the
+                        # snapshot only duplicated it — under the drifted
+                        # window's distribution, which mislabelled it for matching.
+                        if is_cv:
+                            _archive_in_vmr(
+                                current_model, model_store, vmr,
+                                value_history, drift_result, run_path,
+                                tag="pre_retrain",
+                                proxy_score=mape_info["ema_scores"].get(current_model),
+                            )
                         if is_cv:
                             # PRT fine-tune: last finetune_n_layers layers only,
                             # pseudo-labeled (label-free, invariant I4). Covers
@@ -3222,12 +3309,13 @@ def run_experiment(
                         if retrained:
                             mape_info["event_counters"]["retrains"] += 1
                             logger.debug("Inline retrain: %s  (%s)", current_model, decision.reason)
-                            _archive_in_vmr(
+                            archived = _archive_in_vmr(
                                 current_model, model_store, vmr,
                                 value_history, drift_result, run_path,
                                 tag="retrain",
                                 proxy_score=mape_info["ema_scores"].get(current_model),
                             )
+                            note_adaptation(mape_info, current_model, archived)
                         else:
                             mape_info["event_counters"]["retrain_skipped"] += 1
                             logger.debug("Retrain skipped: %s", decision.reason)
@@ -3255,6 +3343,7 @@ def run_experiment(
                 "step": step,
                 "violation": violation,
                 "drift_detected": drift_result["drift_detected"],
+                "drift_confirmed": drift_result.get("drift_confirmed"),
                 "kl_div": drift_result.get("kl_div"),
                 "decision_action": decision.action,
                 "decision_model": decision.model,
@@ -3291,6 +3380,8 @@ def run_experiment(
             batch_energy_uJ = []
 
     batch_energy.close(prediction_rows, batch_energy_uJ)  # trailing partial batch (audit C1)
+    stream_package_energy_uJ = package_energy_between(_pkg_start, read_package_counter())
+    stream_package_window_s = time.monotonic() - _pkg_t0
 
     # ── Task metrics (regression: R², RMSE, MAE, energy; CV: none yet) ─────────
     task_metrics: dict = {}
@@ -3413,6 +3504,11 @@ def run_experiment(
         "final_model": current_model,
         "event_counters": dict(mape_info["event_counters"]),
         "final_ema_scores": dict(mape_info["ema_scores"]),
+        # Whole-stream CPU package energy (one counter read before and after
+        # the stream): the single overlap-free total. None without RAPL.
+        "stream_package_energy_uJ": (None if stream_package_energy_uJ is None
+                                     else round(stream_package_energy_uJ, 1)),
+        "stream_package_window_s": round(stream_package_window_s, 3),
         "task_metrics": task_metrics,
         "energy_by_model": energy_by_model,
         "artifacts": {

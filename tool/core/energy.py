@@ -77,6 +77,40 @@ def _read_rapl_sysfs_uj() -> float | None:
     return None
 
 
+def read_package_counter() -> dict | None:
+    """Passive read of the CPU package RAPL counter (sysfs): {"uJ", "max_range_uJ"}.
+
+    Used for the whole-stream package energy (2026-10-07): read once when the
+    stream starts and once when the run ends, outside any EnergyMeter (so it
+    never conflicts with the meter re-entrancy guard or the energy lock).
+    Returns None when RAPL is not readable.
+    """
+    from pathlib import Path as _P
+    path = _rapl_sysfs_path()
+    if path is None:
+        return None
+    try:
+        val = float(_P(path).read_text().strip())
+    except (OSError, ValueError):
+        return None
+    try:
+        max_range = float((_P(path).parent / "max_energy_range_uj").read_text().strip())
+    except (OSError, ValueError):
+        max_range = None
+    return {"uJ": val, "max_range_uJ": max_range}
+
+
+def package_energy_between(start: dict | None, end: dict | None) -> float | None:
+    """Energy (µJ) between two read_package_counter() readings, correcting one
+    counter wrap. None if either reading is missing."""
+    if not start or not end:
+        return None
+    delta = end["uJ"] - start["uJ"]
+    if delta < 0 and start.get("max_range_uJ"):
+        delta += start["max_range_uJ"]
+    return delta if delta >= 0 else None
+
+
 def _rapl_sysfs_path() -> str | None:
     from pathlib import Path as _P
     for p in _RAPL_SYSFS_CANDIDATES:

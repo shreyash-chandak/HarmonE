@@ -16,7 +16,7 @@ from pathlib import Path
 from core.planners.base import PlanDecision
 from core.vmr import VMR
 
-from experiments.run_experiment import _do_vmr_restore, _do_cv_vmr_restore
+from experiments.run_experiment import _do_vmr_restore, _do_cv_vmr_restore, note_adaptation
 
 import knowledge_io as kio
 import retrain
@@ -52,8 +52,9 @@ def execute_decision(
     kp = kio.knowledge_paths(knowledge_dir)
     new_model = current_model
 
-    def _record_adaptation(d: dict) -> None:
+    def _record_adaptation(d: dict, version_path: str | None = None) -> None:
         d.setdefault("last_adaptation", {})[current_model] = current_step
+        note_adaptation(d, current_model, version_path)
 
     if decision.action == "switch":
         if decision.model and decision.model != current_model:
@@ -66,11 +67,22 @@ def execute_decision(
             mape_store.update(lambda d: d["event_counters"].__setitem__(
                 "noops", d["event_counters"]["noops"] + 1))
 
+    elif (decision.action == "replace" and decision.version_path
+          and decision.version_path == mape_store.load().get("serving_version", {}).get(current_model)):
+        # No-op restore (2026-10-07): the matched version is the one already
+        # serving (e.g. the initial weights of a never-retrained model) —
+        # reloading it changes nothing. Only re-base drift and the accuracy
+        # baseline, as a restore would.
+        mape_store.update(lambda d: d["event_counters"].__setitem__(
+            "vmr_noop", d["event_counters"].get("vmr_noop", 0) + 1))
+        mape_store.update(_record_adaptation)
+        logger.info("replace skipped (already serving): %s <- %s", current_model, decision.version_path)
+
     elif decision.action == "replace" and decision.version_path:
         models: dict = {}
         if is_cv:
             from experiments.run_experiment import _load_cv_model_store
-            model_store = _load_cv_model_store(local_dataset_config, cv_task)
+            model_store = _load_cv_model_store(local_dataset_config, cv_task, only=[current_model])
             ok = _do_cv_vmr_restore(decision.version_path, current_model, models, model_store)
         else:
             model_store: dict = {}
@@ -85,7 +97,7 @@ def execute_decision(
             kio.write_reload_flag(knowledge_dir, current_model)
             mape_store.update(lambda d: d["event_counters"].__setitem__(
                 "vmr_events", d["event_counters"]["vmr_events"] + 1))
-            mape_store.update(_record_adaptation)
+            mape_store.update(lambda d: _record_adaptation(d, decision.version_path))
             logger.info("replace: %s <- %s", current_model, decision.version_path)
         else:
             mape_store.update(lambda d: d["event_counters"].__setitem__(
@@ -95,13 +107,13 @@ def execute_decision(
         mape_info = mape_store.load()
         proxy_score = mape_info["ema_scores"].get(current_model)
         if is_cv:
-            ok = retrain.do_cv_retrain(
+            ok, archived = retrain.do_cv_retrain(
                 local_dataset_config, knowledge_dir, current_model, cv_task,
                 image_path_history or [], luminance_history or [],
                 local_dataset_config, vmr, drift_result, proxy_score,
             )
         else:
-            ok = retrain.do_regression_retrain(
+            ok, archived = retrain.do_regression_retrain(
                 local_dataset_config, knowledge_dir, current_model, scaler,
                 value_history or [], seq_length, vmr, drift_result, proxy_score,
             )
@@ -109,7 +121,7 @@ def execute_decision(
         mape_store.update(lambda d: d["event_counters"].__setitem__(
             key, d["event_counters"][key] + 1))
         if ok:
-            mape_store.update(_record_adaptation)
+            mape_store.update(lambda d: _record_adaptation(d, archived))
         logger.info("retrain %s: %s (%s)", "ok" if ok else "skipped", current_model, decision.reason)
 
     else:

@@ -364,6 +364,19 @@ def main() -> None:
     elapsed_s = time.monotonic() - start_wall
     end_ts = datetime.now(timezone.utc).isoformat()
 
+    # Whole-stream CPU package energy (2026-10-07): RAPL counter read by
+    # inference.py just before its first prediction vs now (both processes
+    # have exited). One overlap- and gap-free total covering inference,
+    # MAPE-K and everything in between; None without RAPL.
+    from core.energy import read_package_counter, package_energy_between
+    stream_pkg_uJ, stream_pkg_s = None, None
+    try:
+        _start = json.loads((knowledge_dir / kio.PKG_START_FILE).read_text())
+        stream_pkg_uJ = package_energy_between(_start.get("counter"), read_package_counter())
+        stream_pkg_s = round(time.time() - float(_start["t"]), 3)
+    except (OSError, ValueError, KeyError):
+        pass
+
     mape_info = {}
     if kp["mape_info_file"].exists():
         with open(kp["mape_info_file"]) as f:
@@ -414,6 +427,8 @@ def main() -> None:
         "mape_cycles": mape_info.get("cycles", 0),
         "drift_checks": mape_info.get("drift_checks", 0),
         "final_model": kio.read_current_model(kp["model_file"]),
+        "stream_package_energy_uJ": None if stream_pkg_uJ is None else round(stream_pkg_uJ, 1),
+        "stream_package_window_s": stream_pkg_s,
         # Failed cross-process weight reloads (audit D6); > 0 means some
         # counted adaptations never reached the stream.
         "reload_failures": _count_csv_rows(knowledge_dir / kio.RELOAD_FAILURES_FILE),

@@ -76,6 +76,7 @@ context/
 HarmonE/
 # Concurrent-harness run outputs and archives (runs/, runs_5.9/, runs_old/, ...)
 tool/concurrent_harness/runs*/
+tool/concurrent_harness/old/
 # Local package mirrors / lockfiles used to ship a venv to the remote machine
 tool/linux_pkgs/
 tool/resolved.txt

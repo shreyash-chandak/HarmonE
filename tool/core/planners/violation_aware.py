@@ -242,6 +242,28 @@ class ViolationAwarePlanner(Planner):
         dr = ctx.drift_result
         if dr is None:
             return PlanDecision(action="noop", reason="S5 violation_aware: drift signalled but no drift_result")
+        # 2026-10-07 (config s5_drift_prefers_switch, default true): switching
+        # costs nothing, retraining / restoring costs a metered adaptation.
+        # If another already-observed model meets the accuracy gate within
+        # the live energy budget, switch to the most accurate such model and
+        # leave adaptation to the case where no model is acceptable.
+        if bool(ctx.thresholds.get("s5_drift_prefers_switch", True)):
+            min_acc = _get_min_accuracy(ctx.thresholds)
+            ok = [
+                m for m in ctx.available_models
+                if m != ctx.current_model and is_observed(ctx, m)
+                and ctx.ema_accuracy.get(m, 0.0) >= min_acc
+                and ctx.ema_energy.get(m, 1.0) <= ctx.current_energy_threshold
+            ]
+            if ok:
+                best = max(ok, key=lambda m: ctx.ema_accuracy.get(m, 0.0))
+                return PlanDecision(
+                    action="switch", model=best,
+                    reason=(f"S5 violation_aware: drift on {ctx.current_model} — switching to "
+                            f"{best} (ema_A={ctx.ema_accuracy.get(best, 0.0):.4f} >= {min_acc}, "
+                            f"ema_E={ctx.ema_energy.get(best, 1.0):.4f} <= "
+                            f"{ctx.current_energy_threshold:.4f}) instead of adapting"),
+                )
         if dr.get("action") in ("replace", "switch_version"):
             path = dr.get("version")
             return PlanDecision(

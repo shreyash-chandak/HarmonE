@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 
 _MONITOR_FIELDS = (
     "ema_scores", "ema_accuracy", "ema_energy", "current_energy_threshold",
-    "last_observed_step", "steps_since_last_switch", "observed",
+    "last_observed_step", "steps_since_last_switch", "observed", "acc_since_adapt",
 )
 
 
@@ -171,11 +171,13 @@ def run_cycle(
                 # does its own counter updates through mape_store, and this
                 # must not overwrite them (only fields this cycle owns).
                 noop_on_violation = mape_info["event_counters"].get("noop_on_violation", 0)
-                owned = {k: mape_info[k] for k in _MONITOR_FIELDS}
+                drift_unconfirmed = mape_info["event_counters"].get("drift_unconfirmed", 0)
+                owned = {k: mape_info[k] for k in _MONITOR_FIELDS if k in mape_info}
 
                 def _merge(d: dict) -> None:
                     d.update(owned)
                     d["event_counters"]["noop_on_violation"] = noop_on_violation
+                    d["event_counters"]["drift_unconfirmed"] = drift_unconfirmed
                 mape_store.update(_merge)
 
                 # ── Execute ──────────────────────────────────────────────
@@ -209,6 +211,7 @@ def run_cycle(
                 "step": current_step,
                 "violation": violation,
                 "drift_detected": drift_result.get("drift_detected", False),
+                "drift_confirmed": drift_result.get("drift_confirmed"),
                 "kl_div": drift_result.get("kl_div"),
                 "decision_action": decision.action,
                 "decision_model": decision.model,

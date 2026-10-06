@@ -7,6 +7,8 @@ the exact PlanDecision returned. Tests are pure (no file I/O).
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 from core.planners.base import PlanningContext, PlanDecision, get_planner, REGISTRY, _register
 from core.planners.naive import NaivePlanner
@@ -216,12 +218,25 @@ class TestViolationAwarePlanner:
         assert d.model == "svm"
 
     def test_drift_replace(self):
-        d = ViolationAwarePlanner().plan(DRIFT_REPLACE)
+        ctx = dataclasses.replace(DRIFT_REPLACE, thresholds={**BASE_THRESHOLDS, "s5_drift_prefers_switch": False})
+        d = ViolationAwarePlanner().plan(ctx)
         assert d.action == "replace"
 
     def test_drift_retrain(self):
-        d = ViolationAwarePlanner().plan(DRIFT_RETRAIN)
+        ctx = dataclasses.replace(DRIFT_RETRAIN, thresholds={**BASE_THRESHOLDS, "s5_drift_prefers_switch": False})
+        d = ViolationAwarePlanner().plan(ctx)
         assert d.action == "retrain"
+
+    def test_drift_prefers_switch_to_acceptable_model(self):
+        # 2026-10-07: an observed model meeting the accuracy gate within the
+        # energy budget is switched to instead of adapting the current one
+        d = ViolationAwarePlanner().plan(DRIFT_RETRAIN)
+        assert d.action == "switch" and d.model != "svm"
+
+    def test_drift_adapts_when_no_acceptable_alternative(self):
+        thr = {**BASE_THRESHOLDS, "min_accuracy": 0.999}
+        ctx = dataclasses.replace(DRIFT_RETRAIN, thresholds=thr)
+        assert ViolationAwarePlanner().plan(ctx).action == "retrain"
 
 
 # ---------------------------------------------------------------------------

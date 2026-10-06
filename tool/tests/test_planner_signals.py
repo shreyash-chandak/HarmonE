@@ -160,3 +160,42 @@ def test_retrain_regularisation_scales_with_sample_count():
     fixed = dict(ridge, retrain_regularisation="fixed")
     assert _sample_scaled_params(fixed, 1200) == {}
     assert _sample_scaled_params({"model": Ridge(), "train_params": {}}, 1200) == {}
+
+
+# ── 2026-10-07: accuracy-confirmed drift, adaptation bookkeeping, package energy
+
+def test_drift_confirmation_needs_accuracy_drop():
+    from experiments.run_experiment import drift_confirmed, note_adaptation
+    thr = {"drift_confirmation": "accuracy", "drift_accuracy_drop": 0.05}
+    info = _initial_mape_info(MODELS)
+    for acc in (0.90, 0.92, 0.91):
+        _monitor_batch([], [], [0.0], "svr", info, {"E_m": 0, "E_M": 1}, accuracy=acc)
+    assert drift_confirmed(info, "svr", thr)[0] is False          # ema ~0.91, baseline ~0.91
+    _monitor_batch([], [], [0.0], "svr", info, {"E_m": 0, "E_M": 1, "gamma": 0.8}, accuracy=0.70)
+    assert drift_confirmed(info, "svr", thr)[0] is True           # ema dropped ~0.17
+    note_adaptation(info, "svr", "vmr/svr/v2/weights.pkl")
+    assert info["acc_since_adapt"]["svr"] == [0.0, 0]
+    assert info["serving_version"]["svr"] == "vmr/svr/v2/weights.pkl"
+    assert drift_confirmed(info, "svr", thr)[0] is False          # baseline restarts
+    assert drift_confirmed(info, "svr", {})[0] is True            # confirmation off = paper
+
+
+def test_unconfirmed_drift_is_not_acted_on():
+    from core.planners.violation_aware import ViolationAwarePlanner
+    from experiments.run_experiment import _plan
+    info = _initial_mape_info(MODELS)
+    for acc in (0.9, 0.9, 0.9):
+        _monitor_batch([], [], [0.0], "svr", info, {"E_m": 0, "E_M": 1}, accuracy=acc)
+    thr = {"drift_confirmation": "accuracy", "min_accuracy": 0.5, "models": COST}
+    dr = {"drift_detected": True, "action": "retrain", "version": None, "kl_div": 2.0}
+    d = _plan(None, dr, "svr", MODELS, info, thr, ViolationAwarePlanner())
+    assert d.action == "noop"
+    assert info["event_counters"]["drift_unconfirmed"] == 1
+    assert dr["drift_confirmed"] is False
+
+
+def test_package_energy_between_handles_wrap():
+    from core.energy import package_energy_between
+    assert package_energy_between({"uJ": 100.0, "max_range_uJ": 1000.0}, {"uJ": 400.0}) == 300.0
+    assert package_energy_between({"uJ": 900.0, "max_range_uJ": 1000.0}, {"uJ": 100.0}) == 200.0
+    assert package_energy_between(None, {"uJ": 1.0}) is None

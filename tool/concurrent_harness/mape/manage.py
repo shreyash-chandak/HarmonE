@@ -135,6 +135,14 @@ def main() -> None:
         set_bandit_instance(bandit_obj)
 
     mape_store = kio.MapeInfoStore(kp["mape_info_file"], kio.build_initial_mape_info(model_names))
+    # Which VMR version each model serves (no-op restore detection, execute.py):
+    # the initial seed until it is retrained or restored.
+    _serving = {}
+    for _m in model_names:
+        _init = [v for v in vmr.list_versions(_m) if v.tag == "initial"]
+        if _init:
+            _serving[_m] = _init[0].weights_path
+    mape_store.update(lambda d: d.__setitem__("serving_version", _serving))
 
     # Thread-death detection: threading.Thread.join() returns normally even
     # if the target raised, so record deaths and exit non-zero (run_concurrent

@@ -60,6 +60,10 @@ PROCESSED_FILE = "_processed"
 # result here; t1 is the only thread that plans/executes.
 DRIFT_STATE_FILE = "drift_state.json"
 PLANNER_DECISIONS_FILE = "planner_decisions.csv"
+# CPU package counter reading taken by inference.py just before its first
+# prediction; run_concurrent.py reads the counter again once both processes
+# have exited -> stream_package_energy_uJ in the manifest (2026-10-07).
+PKG_START_FILE = "_pkg_energy_start.json"
 # inference.py logs every failed weight reload here (audit D6); the count
 # goes into run_manifest.json as "reload_failures".
 RELOAD_FAILURES_FILE = "reload_failures.csv"
@@ -76,7 +80,7 @@ PREDICTION_FIELDS_CV = [
 # writes, so scripts/plot_results.py's chart_ema_timeseries() (which reads
 # step/ema_score from this file) works unmodified against a concurrent run.
 MAPE_EVENT_FIELDS = [
-    "step", "violation", "drift_detected", "kl_div",
+    "step", "violation", "drift_detected", "drift_confirmed", "kl_div",
     "decision_action", "decision_model", "decision_reason",
     "model_before", "model_after",
     "r2", "accuracy", "ema_score", "avg_energy_uJ", "energy_threshold",
