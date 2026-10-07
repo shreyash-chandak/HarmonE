@@ -767,6 +767,23 @@ def _plan(
     telemetry: dict | None = None,
     served_model: str | None = None,
 ) -> PlanDecision:
+    # Original HarmonE recovery mode (2026-10-07; switch_hold_mode
+    # "after_energy_violation"): HarmonE/mape/analyse.py sets recovery_cycles=3
+    # when an ENERGY violation is detected and, while it is > 0, flags no
+    # score/energy violation at all ("No switching allowed"). Exploration and
+    # drift handling are unaffected (they are not violation-driven there).
+    hold_mode = thresholds.get("switch_hold_mode", "after_any_switch")
+    if hold_mode == "after_energy_violation":
+        recovery = int(mape_info.get("recovery_cycles", 0))
+        if recovery > 0:
+            mape_info["recovery_cycles"] = recovery - 1
+            if violation is not None:
+                ec = mape_info.setdefault("event_counters", {})
+                ec["violations_in_recovery"] = ec.get("violations_in_recovery", 0) + 1
+            violation = None
+        elif violation == "energy":
+            mape_info["recovery_cycles"] = int(thresholds.get("switch_hold_cycles", 3))
+
     effective_violation = violation
     if drift_result["drift_detected"]:
         ok, why = drift_confirmed(mape_info, current_model, thresholds)
@@ -815,7 +832,8 @@ def _plan(
     # switch_hold_cycles=0 (the default) disables it.
     hold = int(thresholds.get("switch_hold_cycles", 0))
     if (
-        hold > 0
+        hold_mode == "after_any_switch"
+        and hold > 0
         and decision.action == "switch"
         and decision.model
         and decision.model != current_model

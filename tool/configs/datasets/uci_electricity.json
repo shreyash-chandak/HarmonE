@@ -34,7 +34,7 @@
       "cost_class": "medium",
       "hyperparams": {
         "train":   {"kernel": "linear", "C": 0.00035, "tol": 0.001, "epsilon": 0.0005, "max_train_samples": 8000},
-        "retrain": {"window_rows": 8000, "regularisation_factor": 3}
+        "retrain": {"regularisation_factor": 3}
       }
     }
   },

@@ -199,3 +199,27 @@ def test_package_energy_between_handles_wrap():
     assert package_energy_between({"uJ": 100.0, "max_range_uJ": 1000.0}, {"uJ": 400.0}) == 300.0
     assert package_energy_between({"uJ": 900.0, "max_range_uJ": 1000.0}, {"uJ": 100.0}) == 200.0
     assert package_energy_between(None, {"uJ": 1.0}) is None
+
+
+def test_recovery_mode_after_energy_violation():
+    """Original HarmonE recovery: 3 cycles without score/energy violations
+    after an energy violation; other switches are not held."""
+    from core.planners.base import PlanDecision
+    from experiments.run_experiment import _plan
+
+    class _Always:
+        def plan(self, ctx):
+            if ctx.violation:
+                return PlanDecision(action="switch", model="ridge", reason=f"v={ctx.violation}")
+            return PlanDecision(action="noop", reason="none")
+
+    info = _initial_mape_info(MODELS)
+    thr = {"switch_hold_mode": "after_energy_violation", "switch_hold_cycles": 3}
+    nod = {"drift_detected": False}
+    assert _plan("energy", dict(nod), "lstm", MODELS, info, thr, _Always()).action == "switch"
+    for _ in range(3):   # recovery: violations not flagged
+        assert _plan("score", dict(nod), "ridge", MODELS, info, thr, _Always()).action == "noop"
+    assert _plan("score", dict(nod), "ridge", MODELS, info, thr, _Always()).action == "switch"
+    assert info["event_counters"]["violations_in_recovery"] == 3
+    # a score violation does not start a recovery period
+    assert _plan("score", dict(nod), "ridge", MODELS, info, thr, _Always()).action == "switch"

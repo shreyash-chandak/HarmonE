@@ -58,6 +58,7 @@
   "gamma": 0.8,
   "alpha": 0.15,
   "switch_hold_cycles": 3,
+  "switch_hold_mode": "after_energy_violation",
   "explore_prob": 0.05,
   "drift_confirmation": "accuracy",
   "drift_accuracy_drop": 0.05,

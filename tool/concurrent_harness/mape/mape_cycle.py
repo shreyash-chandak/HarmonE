@@ -56,6 +56,7 @@ logger = logging.getLogger(__name__)
 _MONITOR_FIELDS = (
     "ema_scores", "ema_accuracy", "ema_energy", "current_energy_threshold",
     "last_observed_step", "steps_since_last_switch", "observed", "acc_since_adapt",
+    "recovery_cycles",
 )
 
 
@@ -172,12 +173,14 @@ def run_cycle(
                 # must not overwrite them (only fields this cycle owns).
                 noop_on_violation = mape_info["event_counters"].get("noop_on_violation", 0)
                 drift_unconfirmed = mape_info["event_counters"].get("drift_unconfirmed", 0)
+                in_recovery = mape_info["event_counters"].get("violations_in_recovery", 0)
                 owned = {k: mape_info[k] for k in _MONITOR_FIELDS if k in mape_info}
 
                 def _merge(d: dict) -> None:
                     d.update(owned)
                     d["event_counters"]["noop_on_violation"] = noop_on_violation
                     d["event_counters"]["drift_unconfirmed"] = drift_unconfirmed
+                    d["event_counters"]["violations_in_recovery"] = in_recovery
                 mape_store.update(_merge)
 
                 # ── Execute ──────────────────────────────────────────────

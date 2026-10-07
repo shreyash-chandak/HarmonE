@@ -34,7 +34,7 @@
       "cost_class": "medium",
       "hyperparams": {
         "train":   {"kernel": "linear", "C": 0.00035, "tol": 0.001, "epsilon": 0.0005, "max_train_samples": 8000},
-        "retrain": {"window_rows": 8000, "regularisation_factor": 3}
+        "retrain": {"regularisation_factor": 3}
       }
     }
   },
@@ -53,6 +53,7 @@
   "gamma": 0.8,
   "alpha": 0.1,
   "switch_hold_cycles": 3,
+  "switch_hold_mode": "after_energy_violation",
   "explore_prob": 0.05,
   "drift_confirmation": "accuracy",
   "drift_accuracy_drop": 0.05,
