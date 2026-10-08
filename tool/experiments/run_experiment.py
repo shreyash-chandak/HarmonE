@@ -890,6 +890,7 @@ def _load_model_store(dataset_config: dict, only: list[str] | None = None) -> di
             "n_train_sequences": dataset_config.get("_n_train_sequences"),
             "retrain_regularisation": dataset_config.get("retrain_regularisation", "sample_scaled"),
             "retrain_regularisation_factor": reg_factor,
+            "train_seed": int(dataset_config.get("train_seed", 0)),
         }
         try:
             if "lstm" in name:
@@ -1619,20 +1620,33 @@ def _do_inline_retrain(
             return True
 
         elif info["type"] == "lstm":
+            # Full retrain from scratch on the retrain window, like the original
+            # HarmonE retrain.py (50-epoch LSTM retrain). 2026-10-08: replaces a
+            # 5-step fine-tune of the existing weights.
             import torch
             import torch.nn as nn
             import torch.optim as optim
-            model_obj = info["model"]
-            model_obj.train()
-            opt = optim.Adam(model_obj.parameters(), lr=5e-4)
+            from torch.utils.data import DataLoader, TensorDataset
+            from adapters.loaders import LSTMModel
+            # recipe: hyperparams.retrain (e.g. the original's 50 epochs /
+            # lr 0.001 / batch 16) over hyperparams.train
+            hp = {**(info.get("train_params") or {}), **(info.get("retrain_params") or {})}
+            torch.manual_seed(int(info.get("train_seed", 0)))
+            model_obj = LSTMModel()
+            opt = optim.Adam(model_obj.parameters(), lr=float(hp.get("lr", 0.001)))
             loss_fn = nn.MSELoss()
             X_t = torch.tensor(X, dtype=torch.float32).unsqueeze(-1)
             y_t = torch.tensor(y, dtype=torch.float32).unsqueeze(-1)
-            for _ in range(5):  # brief fine-tuning, not full re-training
-                opt.zero_grad()
-                loss_fn(model_obj(X_t), y_t).backward()
-                opt.step()
+            loader = DataLoader(TensorDataset(X_t, y_t),
+                                batch_size=int(hp.get("batch_size", 16)), shuffle=True)
+            model_obj.train()
+            for _ in range(int(hp.get("epochs", 50))):
+                for xb, yb in loader:
+                    opt.zero_grad()
+                    loss_fn(model_obj(xb), yb).backward()
+                    opt.step()
             model_obj.eval()
+            info["model"] = model_obj
             _m = model_obj
             def _new_predict(inputs: np.ndarray, m=_m) -> float:
                 import torch as _t

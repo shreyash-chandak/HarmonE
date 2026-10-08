@@ -223,3 +223,33 @@ def test_recovery_mode_after_energy_violation():
     assert info["event_counters"]["violations_in_recovery"] == 3
     # a score violation does not start a recovery period
     assert _plan("score", dict(nod), "ridge", MODELS, info, thr, _Always()).action == "switch"
+
+
+def test_s4_score_violation_keeps_best_current_model():
+    """Original plan_mape: score violation -> best EMA over ALL models (no
+    switch if the current one is best); energy violation -> best other."""
+    from core.planners.harmone_original import HarmonEOriginalPlanner
+    scores = {"ridge": 0.6, "svr": 0.7, "lstm": 0.9}
+    base = dict(ema_scores=scores, ema_accuracy=scores, ema_energy={m: 0.5 for m in MODELS},
+                current_model="lstm", available_models=MODELS, thresholds={"alpha": 0.0},
+                drift_result=None)
+    d = HarmonEOriginalPlanner().plan(PlanningContext(violation="score", **base))
+    assert d.action == "noop"
+    d = HarmonEOriginalPlanner().plan(PlanningContext(violation="energy", **base))
+    assert d.action == "switch" and d.model == "svr"
+
+
+def test_lstm_retrain_is_full_retrain():
+    import torch
+    from sklearn.preprocessing import MinMaxScaler
+    from adapters.loaders import LSTMModel
+    from experiments.run_experiment import _do_inline_retrain
+    hist = list(np.sin(np.arange(400) / 5.0))
+    scaler = MinMaxScaler().fit(np.array(hist).reshape(-1, 1))
+    old = LSTMModel()
+    info = {"type": "lstm", "model": old, "retrain_params": {},
+            "train_params": {"epochs": 2, "lr": 0.01, "batch_size": 32}, "train_seed": 0}
+    store, models = {"lstm": info}, {}
+    assert _do_inline_retrain("lstm", store, models, hist, scaler, seq_length=5, drift_window=1200)
+    assert store["lstm"]["model"] is not old          # a new model, trained from scratch
+    assert "lstm" in models

@@ -17,7 +17,7 @@
       "cost_class": "medium",
       "hyperparams": {
         "train":   {"epochs": 45, "lr": 0.0005, "batch_size": 8},
-        "retrain": {}
+        "retrain": {"epochs": 50, "lr": 0.001, "batch_size": 16}
       }
     },
     "ridge": {

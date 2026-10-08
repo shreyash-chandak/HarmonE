@@ -262,6 +262,15 @@ def main() -> None:
         "counter": read_package_counter(), "t": time.time(),
     }))
 
+    # Per-step model loading (2026-10-08; config reload_model_per_step), as
+    # in the original HarmonE inference.py: every prediction re-reads which
+    # model is active (model.txt, written by the managing system) and loads
+    # that model's weights from its file (rewritten by retrain/restore). The
+    # loading cost is part of the measured energy. Model switches can then
+    # land mid-batch, as in the original; the monitor scores the batch's
+    # majority model and only judges batches served by the current model.
+    per_step_reload = bool(dataset_config.get("reload_model_per_step", False))
+
     step = 0
     reload_attempts: dict[str, int] = {}
     current_model = kio.read_current_model(kp["model_file"], default=initial_model)
@@ -277,7 +286,7 @@ def main() -> None:
                 break
             current_model = kio.read_current_model(kp["model_file"], default=initial_model)
             # Cross-process retrain/replace signal — see _reload_one_model's docstring.
-            if kio.consume_reload_flag(knowledge_dir, current_model):
+            if not per_step_reload and kio.consume_reload_flag(knowledge_dir, current_model):
                 if _reload_one_model(models, current_model, local_config):
                     reload_attempts.pop(current_model, None)
                 else:
@@ -298,6 +307,10 @@ def main() -> None:
 
         if batch_mode and batch_em is None:
             _open_batch(step)
+
+        if per_step_reload:
+            current_model = kio.read_current_model(kp["model_file"], default=initial_model)
+            _reload_one_model(models, current_model, local_config)
 
         predict_fn = models.get(current_model)
         if predict_fn is None:

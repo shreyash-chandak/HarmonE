@@ -50,14 +50,25 @@ class HarmonEOriginalPlanner(Planner):
         if ctx.violation is None:
             return PlanDecision(action="noop", reason="S4 harmone_original: no violation")
 
-        # Score/energy violation: exploit
-        alternatives = [m for m in ctx.available_models if m != ctx.current_model]
-        if not alternatives:
+        # Score/energy violation: exploit, as HarmonE/mape/plan.py::plan_mape():
+        #   energy violation -> best EMA among the OTHER models;
+        #   score violation  -> best EMA among ALL models, so if the current
+        #   model is already the best, no switch (2026-10-08: previously the
+        #   current model was excluded for both, always forcing a switch).
+        if ctx.violation == "energy":
+            pool = [m for m in ctx.available_models if m != ctx.current_model]
+        else:
+            pool = list(ctx.available_models)
+        if not pool:
             return PlanDecision(action="noop", reason="S4 harmone_original: no alternatives")
 
-        # Exploit
-        chosen = max(alternatives, key=lambda m: ctx.ema_scores.get(m, 0.0))
+        chosen = max(pool, key=lambda m: ctx.ema_scores.get(m, 0.0))
         score = ctx.ema_scores.get(chosen, 0.0)
+        if chosen == ctx.current_model:
+            return PlanDecision(
+                action="noop",
+                reason=f"S4 harmone_original: score violation, current model is best (ema={score:.4f})",
+            )
         return PlanDecision(
             action="switch",
             model=chosen,

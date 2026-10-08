@@ -16,7 +16,7 @@
       "cost_class": "medium",
       "hyperparams": {
         "train":   {"epochs": 4, "lr": 0.0005, "batch_size": 8},
-        "retrain": {}
+        "retrain": {"epochs": 50, "lr": 0.001, "batch_size": 16}
       }
     },
     "ridge": {
@@ -62,6 +62,7 @@
   "retrain_regularisation": "sample_scaled",
   "prt_interval": 3200,
   "energy_metering": "batch",
+  "reload_model_per_step": true,
   "energy_budget_rho": 0.5,
   "accuracy_budget_rho": 0.5,
   "staleness_window": 500,
