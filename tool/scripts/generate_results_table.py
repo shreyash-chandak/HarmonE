@@ -2,7 +2,7 @@
 scripts/generate_results_table.py — build context/results.md from the
 concurrent harness's own per-run logs.
 
-Reads directly from concurrent_harness/runs/logs/<run_id>_conc.log — NOT from
+Reads directly from runs/logs/<run_id>_conc.log — NOT from
 run_manifest.json on disk — because run_concurrent.py prints the exact same
 manifest dict as indented JSON as the last thing it does (mirroring
 run_experiment.py:3166's own behavior), so every completed run's full result
@@ -31,7 +31,7 @@ aren't mistaken for a clean result.
 
 Usage (from inside tool/):
     python3 scripts/generate_results_table.py
-    python3 scripts/generate_results_table.py --logs-dir concurrent_harness/runs/logs --out ../context/results.md
+    python3 scripts/generate_results_table.py --logs-dir runs/logs --out ../context/results.md
 """
 
 from __future__ import annotations
@@ -164,7 +164,7 @@ def build_cv_table(runs: list[dict], logs_dir: Path) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--logs-dir", default="concurrent_harness/runs/logs")
+    parser.add_argument("--logs-dir", default="runs/logs")
     parser.add_argument("--out", default="../context/results.md")
     args = parser.parse_args()
 
@@ -183,7 +183,7 @@ def main() -> None:
     content = f"""# Concurrent Harness Results
 
 Generated {ts} by `scripts/generate_results_table.py` from
-`concurrent_harness/runs/logs/*_conc.log` (each run's full manifest is printed
+`runs/logs/*_conc.log` (each run's full manifest is printed
 as JSON at the end of its own log — see `run_concurrent.py`). Not sourced
 from `run_manifest.json` files on disk.
 

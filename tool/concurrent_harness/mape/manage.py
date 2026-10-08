@@ -113,18 +113,19 @@ def main() -> None:
         scaler = _fit_scaler(train_values)
         _build_reference_distribution(train_values, str(kp["reference_dist_file"]), n_bins=n_bins)
 
-    # Per-run VMR (audit E3, 2026-10-04): <run_dir>/vmr/, same layout as
-    # experiments/run_experiment.py. Runs are independent of order and seed.
-    _vmr_dir = knowledge_dir / kio.VMR_SUBDIR
-    _vmr_dir.mkdir(parents=True, exist_ok=True)
-    vmr = VMR(str(_vmr_dir))
+    # Central VMR, cleared per run (experiments.run_experiment.prepare_central_vmr):
+    # tool/knowledge/vmr/<dataset>/<planner>/<model>/ — never inside the run dir.
+    from experiments.run_experiment import prepare_central_vmr
+    vmr = VMR(str(prepare_central_vmr(args.dataset, args.planner, args.pin_model)))
     import json
     with open(kp["reference_dist_file"]) as f:
         training_distribution = {"type": "histogram", "data": json.load(f)["histogram"]}
     if train_values is not None:
         # raw training window for raw-vs-raw VMR matching (audit E2)
         training_distribution["raw"] = _subsample_raw(train_values)
-    _seed_vmr_initial(model_names, dataset_config, vmr, training_distribution)
+    # pinned runs touch only their own model's subfolder
+    _seed_vmr_initial([args.pin_model] if args.pin_model else model_names,
+                      dataset_config, vmr, training_distribution)
 
     if args.planner == "bandit":
         # Per-run state in run_dir (audit B7), identical to run_experiment.py.

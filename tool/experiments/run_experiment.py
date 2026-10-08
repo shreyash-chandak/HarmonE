@@ -121,6 +121,27 @@ def _build_reference_distribution(
         )
 
 
+def prepare_central_vmr(dataset_name: str, planner_name: str, pin_model: str | None) -> Path:
+    """Central VMR (2026-10-08): tool/knowledge/vmr/<dataset>/<planner>/<model>/<version>/,
+    outside the run directories so archived model versions never travel with
+    the runs. Each run clears ITS OWN part at start — the whole
+    <dataset>/<planner>/ folder, or only <dataset>/<planner>/<pin_model>/ for
+    pinned (naive / naive_prt) runs — so every run starts from the seeded
+    initial versions only (no carry-over between runs or seeds; resume-safe).
+    Not safe for two runs of the same dataset+planner(+pinned model) at once.
+    Returns the VMR base directory (<dataset>/<planner>/).
+    """
+    import shutil
+    root = (_TOOL_DIR / "knowledge" / "vmr").resolve()
+    base = (root / dataset_name / planner_name).resolve()
+    target = (base / pin_model).resolve() if pin_model else base
+    if root not in target.parents:
+        raise ValueError(f"refusing to clear {target}: not under {root}")
+    shutil.rmtree(target, ignore_errors=True)
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
 def _seed_vmr_initial(
     model_names: list[str],
     dataset_config: dict,
@@ -3010,12 +3031,9 @@ def run_experiment(
     seq_length: int = int(dataset_config.get("seq_length", 5))
 
     # ── VMR ───────────────────────────────────────────────────────────────────
-    # Per-run (audit E3, 2026-10-04): <run_dir>/vmr/<model>/<version>/. Every
-    # run starts from the seeded initial versions only, so results no longer
-    # depend on grid order, earlier seeds, or the other harness. (Previously
-    # shared at tool/knowledge/vmr/<dataset>/<planner>/ across runs and seeds.)
-    _vmr_dir = run_path / "vmr"
-    _vmr_dir.mkdir(parents=True, exist_ok=True)
+    # Central, cleared per run (see prepare_central_vmr): every run starts from
+    # the seeded initial versions only, and versions stay out of the run dir.
+    _vmr_dir = prepare_central_vmr(dataset_name, planner_name, pin_model)
     vmr = VMR(base_dir=str(_vmr_dir))
 
     if not is_cv:

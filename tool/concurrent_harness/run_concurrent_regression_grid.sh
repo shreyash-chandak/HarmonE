@@ -12,13 +12,13 @@
 #
 # Per-run artifacts (predictions.csv, mape_info.json, run_manifest.json) are
 # written to:
-#   concurrent_harness/runs/<dataset>_<planner>_conc/
-#   concurrent_harness/runs/<dataset>_<planner>_<model>_conc/   (naive/naive_prt per-model)
+#   runs/<dataset>_<planner>_conc/
+#   runs/<dataset>_<planner>_<model>_conc/   (naive/naive_prt per-model)
 #
 # Full stdout+stderr is tee'd to:
-#   concurrent_harness/runs/logs/<run_id>.log
+#   runs/logs/<run_id>.log
 # A master timeline is appended to:
-#   concurrent_harness/runs/logs/master_regression_concurrent.log
+#   runs/logs/master_regression_concurrent.log
 #
 # Usage (from inside tool/):
 #   bash concurrent_harness/run_concurrent_regression_grid.sh
@@ -48,7 +48,7 @@ done
 
 HARNESS_DIR="$(cd "$(dirname "$0")" && pwd)"
 TOOL_DIR="$(cd "$HARNESS_DIR/.." && pwd)"
-RUNS_DIR="$HARNESS_DIR/runs"
+RUNS_DIR="$TOOL_DIR/runs"
 LOG_DIR="$RUNS_DIR/logs"
 mkdir -p "$LOG_DIR"
 

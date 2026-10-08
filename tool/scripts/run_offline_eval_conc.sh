@@ -49,7 +49,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 TOOL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-LOG_DIR="$TOOL_DIR/concurrent_harness/runs/logs"
+LOG_DIR="$TOOL_DIR/runs/logs"
 mkdir -p "$LOG_DIR"
 
 MASTER_LOG="$LOG_DIR/master_offline_eval.log"
@@ -67,7 +67,7 @@ log() {
 _eval_one() {
     local run_id="$1"
     local dataset="$2"
-    local run_dir="$TOOL_DIR/concurrent_harness/runs/$run_id"
+    local run_dir="$TOOL_DIR/runs/$run_id"
     local eval_log="$LOG_DIR/${run_id}_offline_eval.log"
 
     if [ ! -f "$run_dir/run_manifest.json" ]; then

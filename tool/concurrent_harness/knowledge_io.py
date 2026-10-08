@@ -68,7 +68,6 @@ PKG_START_FILE = "_pkg_energy_start.json"
 # goes into run_manifest.json as "reload_failures".
 RELOAD_FAILURES_FILE = "reload_failures.csv"
 MODELS_SUBDIR = "models"                            # per-run copies of live weights
-VMR_SUBDIR = "vmr"                                  # per-run VMR (audit E3)
 
 PREDICTION_FIELDS_REGRESSION = [
     "step", "y_true", "y_pred", "active_model", "energy_uJ", "energy_valid",

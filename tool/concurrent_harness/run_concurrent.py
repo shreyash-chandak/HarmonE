@@ -174,7 +174,7 @@ def main() -> None:
                          "run_experiment.py. Thread/process timing can still differ "
                          "run to run, so results are close but not bit-identical.")
     p.add_argument("--configs-dir", default=str(_TOOL_DIR / "configs"))
-    p.add_argument("--runs-dir", default=str(_THIS_DIR / "runs"))
+    p.add_argument("--runs-dir", default=str(_TOOL_DIR / "runs"))
     p.add_argument("--stream-delay-s", type=float, default=None)
     p.add_argument("--shutdown-timeout-s", type=float, default=SHUTDOWN_TIMEOUT_S,
                     help="How long to wait for mape/manage.py to exit after signaling "

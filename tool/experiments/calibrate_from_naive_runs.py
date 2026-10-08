@@ -30,7 +30,7 @@ manifests record which metering produced them.
 
 Usage (from tool/):
     python3 experiments/calibrate_from_naive_runs.py --dataset pems_driftinduced \\
-        --runs-dir concurrent_harness/runs [--write]
+        --runs-dir runs [--write]
 """
 
 from __future__ import annotations
@@ -158,7 +158,7 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--dataset", required=True, action="append",
                    help="Dataset config name; repeat for several.")
-    p.add_argument("--runs-dir", default=str(_TOOL_DIR / "concurrent_harness" / "runs"))
+    p.add_argument("--runs-dir", default=str(_TOOL_DIR / "runs"))
     p.add_argument("--configs-dir", default=str(_TOOL_DIR / "configs" / "datasets"))
     p.add_argument("--write", action="store_true", help="Write the values into the configs.")
     args = p.parse_args()

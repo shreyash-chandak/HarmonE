@@ -20,8 +20,8 @@ documented in the approved plan — no file under experiments/ is modified.
 Retrained/fine-tuned weights are never written back to the shared
 configs/datasets/*.json weights_path — only to this run's own
 knowledge_dir/models/ copy (see knowledge_io.localize_dataset_config). VMR
-archives go to this run's own knowledge_dir/vmr/ (audit E3), same layout as
-the single-threaded harness (see mape/manage.py).
+archives go to the central tool/knowledge/vmr/<dataset>/<planner>/, cleared per
+run (experiments.run_experiment.prepare_central_vmr).
 """
 
 from __future__ import annotations

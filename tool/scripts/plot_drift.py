@@ -27,7 +27,7 @@ log — not a different drift curve.
 
 Usage (from inside tool/):
     python3 scripts/plot_drift.py
-    python3 scripts/plot_drift.py --runs-dir concurrent_harness/runs --out-dir concurrent_harness/runs/plots/drift
+    python3 scripts/plot_drift.py --runs-dir runs --out-dir runs/plots/drift
 """
 
 from __future__ import annotations
@@ -184,7 +184,7 @@ def plot_dataset_drift(dataset: str, df: pd.DataFrame, tau_drift: float | None,
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--runs-dir", default="concurrent_harness/runs")
+    parser.add_argument("--runs-dir", default="runs")
     parser.add_argument("--out-dir", default=None)
     args = parser.parse_args()
 
