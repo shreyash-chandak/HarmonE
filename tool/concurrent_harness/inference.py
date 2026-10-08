@@ -64,7 +64,7 @@ from experiments.run_experiment import (
     _save_cv_prediction,
     _load_models,
 )
-from core.energy import EnergyMeter
+from core.energy import EnergyMeter, Pkg0Meter
 from adapters.loaders import get_loader
 
 logger = logging.getLogger(__name__)
@@ -222,6 +222,18 @@ def main() -> None:
     # (rows written, lock released) BEFORE waiting on the manager, which
     # needs those rows and the lock to process it.
     batch_mode = str(dataset_config.get("energy_metering", "batch")) == "batch"
+    # Original HarmonE metering (2026-10-09; energy_metering "per_prediction",
+    # regression): exactly HarmonE/inference.py — after reading the active
+    # model's name, a pyRAPL-equivalent meter (Pkg0Meter: socket-0 package
+    # counter at begin/end, no lock, no DRAM/GPU) spans ONLY the model load
+    # from disk + the prediction; each row's energy_uJ is that reading and
+    # inference_time_s the same window's wall time (time.time(), as the
+    # original). Whatever else runs on the package during the window (the
+    # managing system, a retrain) is in the reading, as in the original.
+    # The reported energy is the mean over all predictions (paper Table 2).
+    per_prediction = (str(dataset_config.get("energy_metering", "batch")) == "per_prediction"
+                      and not is_cv)
+    pkg0 = Pkg0Meter() if per_prediction else None
     pred_fields = kio.PREDICTION_FIELDS_CV if is_cv else kio.PREDICTION_FIELDS_REGRESSION
     batch_rows: list[dict] = []
     batch_lock = contextlib.ExitStack()
@@ -254,13 +266,6 @@ def main() -> None:
             batch_rows.append(row)
         else:
             kio.append_row(kp["predictions_file"], row, pred_fields)
-
-    # Whole-stream package energy: start reading (see kio.PKG_START_FILE).
-    from core.energy import read_package_counter
-    import json as _json
-    (knowledge_dir / kio.PKG_START_FILE).write_text(_json.dumps({
-        "counter": read_package_counter(), "t": time.time(),
-    }))
 
     # Per-step model loading (2026-10-08; config reload_model_per_step), as
     # in the original HarmonE inference.py: every prediction re-reads which
@@ -310,7 +315,8 @@ def main() -> None:
 
         if per_step_reload:
             current_model = kio.read_current_model(kp["model_file"], default=initial_model)
-            _reload_one_model(models, current_model, local_config)
+            if not per_prediction:  # per_prediction loads inside its meter window
+                _reload_one_model(models, current_model, local_config)
 
         predict_fn = models.get(current_model)
         if predict_fn is None:
@@ -380,7 +386,22 @@ def main() -> None:
             scaled_inputs = scaler.transform(sample.inputs.reshape(-1, 1)).flatten()
             # Blocking cross-process lock — see the CV branch above.
             energy_uJ, energy_valid = 0.0, True  # batch mode: set by _close_batch
-            if batch_mode:
+            inference_time_s = None
+            if per_prediction:
+                pkg0.begin()
+                t0 = time.time()
+                try:
+                    if per_step_reload:
+                        _reload_one_model(models, current_model, local_config)
+                        predict_fn = models.get(current_model) or predict_fn
+                    raw_pred = predict_fn(scaled_inputs)
+                except Exception as exc:
+                    logger.warning("Prediction failed at step %d: %s", step, exc)
+                    raw_pred = 0.0
+                inference_time_s = time.time() - t0
+                reading = pkg0.end()
+                energy_uJ, energy_valid = (reading or 0.0), reading is not None
+            elif batch_mode:
                 try:
                     raw_pred = predict_fn(scaled_inputs)
                 except Exception as exc:
@@ -405,6 +426,7 @@ def main() -> None:
                 "step": step, "y_true": round(y_true, 6), "y_pred": round(y_pred, 6),
                 "active_model": current_model,
                 "energy_uJ": round(energy_uJ, 4), "energy_valid": energy_valid,
+                "inference_time_s": None if inference_time_s is None else round(inference_time_s, 7),
             })
             # Regression has no per-step log line in single-threaded either
             # (relies on the periodic "MAPE[...]" cycle line instead — see

@@ -60,10 +60,6 @@ PROCESSED_FILE = "_processed"
 # result here; t1 is the only thread that plans/executes.
 DRIFT_STATE_FILE = "drift_state.json"
 PLANNER_DECISIONS_FILE = "planner_decisions.csv"
-# CPU package counter reading taken by inference.py just before its first
-# prediction; run_concurrent.py reads the counter again once both processes
-# have exited -> stream_package_energy_uJ in the manifest (2026-10-07).
-PKG_START_FILE = "_pkg_energy_start.json"
 # inference.py logs every failed weight reload here (audit D6); the count
 # goes into run_manifest.json as "reload_failures".
 RELOAD_FAILURES_FILE = "reload_failures.csv"
@@ -71,6 +67,7 @@ MODELS_SUBDIR = "models"                            # per-run copies of live wei
 
 PREDICTION_FIELDS_REGRESSION = [
     "step", "y_true", "y_pred", "active_model", "energy_uJ", "energy_valid",
+    "inference_time_s",
 ]
 PREDICTION_FIELDS_CV = [
     "step", "proxy_acc", "active_model", "planner", "energy_uJ", "energy_valid",

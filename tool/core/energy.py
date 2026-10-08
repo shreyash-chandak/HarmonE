@@ -111,6 +111,49 @@ def package_energy_between(start: dict | None, end: dict | None) -> float | None
     return delta if delta >= 0 else None
 
 
+class Pkg0Meter:
+    """The original HarmonE's energy reading (2026-10-09): pyRAPL's
+    Measurement.begin()/end() with result.pkg[0], i.e. the socket-0 CPU
+    package counter (intel-rapl:0/energy_uj, the same sysfs file pyRAPL reads)
+    read at begin() and at end(); the reading is the difference in µJ. No DRAM,
+    no GPU, no cross-process lock. One addition: a single counter wrap inside
+    the window is corrected (pyRAPL would report a negative value).
+    end() returns None when RAPL is not readable.
+    """
+
+    def __init__(self) -> None:
+        from pathlib import Path as _P
+        path = _rapl_sysfs_path()
+        self._file = _P(path) if path else None
+        self._max_range: float | None = None
+        if self._file is not None:
+            try:
+                self._max_range = float((self._file.parent / "max_energy_range_uj").read_text().strip())
+            except (OSError, ValueError):
+                pass
+        self._begin: float | None = None
+
+    def _read(self) -> float | None:
+        if self._file is None:
+            return None
+        try:
+            return float(self._file.read_text())
+        except (OSError, ValueError):
+            return None
+
+    def begin(self) -> None:
+        self._begin = self._read()
+
+    def end(self) -> float | None:
+        after = self._read()
+        if after is None or self._begin is None:
+            return None
+        delta = after - self._begin
+        if delta < 0 and self._max_range:
+            delta += self._max_range
+        return delta if delta >= 0 else None
+
+
 def _rapl_sysfs_path() -> str | None:
     from pathlib import Path as _P
     for p in _RAPL_SYSFS_CANDIDATES:

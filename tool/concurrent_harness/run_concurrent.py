@@ -122,6 +122,15 @@ def _build_task_metrics_and_energy_by_model(predictions_file: Path, is_cv: bool)
         # Steps with no energy reading (audit C6); excluded from the total.
         "energy_invalid_steps": sum(1 for r in rows if r.get("energy_valid") != "True"),
     }
+    # Paper Table 2 figures (2026-10-09): mean per-prediction energy over all
+    # predictions with a reading, and mean inference time where recorded
+    # (energy_metering "per_prediction").
+    _n_valid = len(rows) - _energy_fields["energy_invalid_steps"]
+    _energy_fields["energy_per_inference_mJ"] = (
+        round(_total_e_uJ / _n_valid / 1000.0, 6) if _n_valid else None)
+    _times = [float(r["inference_time_s"]) for r in rows if r.get("inference_time_s")]
+    _energy_fields["mean_inference_time_ms"] = (
+        round(sum(_times) / len(_times) * 1000.0, 6) if _times else None)
 
     if is_cv:
         # Exact same schema as experiments/run_experiment.py's own CV
@@ -364,19 +373,6 @@ def main() -> None:
     elapsed_s = time.monotonic() - start_wall
     end_ts = datetime.now(timezone.utc).isoformat()
 
-    # Whole-stream CPU package energy (2026-10-07): RAPL counter read by
-    # inference.py just before its first prediction vs now (both processes
-    # have exited). One overlap- and gap-free total covering inference,
-    # MAPE-K and everything in between; None without RAPL.
-    from core.energy import read_package_counter, package_energy_between
-    stream_pkg_uJ, stream_pkg_s = None, None
-    try:
-        _start = json.loads((knowledge_dir / kio.PKG_START_FILE).read_text())
-        stream_pkg_uJ = package_energy_between(_start.get("counter"), read_package_counter())
-        stream_pkg_s = round(time.time() - float(_start["t"]), 3)
-    except (OSError, ValueError, KeyError):
-        pass
-
     mape_info = {}
     if kp["mape_info_file"].exists():
         with open(kp["mape_info_file"]) as f:
@@ -427,8 +423,12 @@ def main() -> None:
         "mape_cycles": mape_info.get("cycles", 0),
         "drift_checks": mape_info.get("drift_checks", 0),
         "final_model": kio.read_current_model(kp["model_file"]),
-        "stream_package_energy_uJ": None if stream_pkg_uJ is None else round(stream_pkg_uJ, 1),
-        "stream_package_window_s": stream_pkg_s,
+        # The single reported energy (2026-10-09), as in the HarmonE paper's
+        # Table 2: mean per-prediction reading (mJ) over the whole stream,
+        # plus the mean inference time (ms) of the same window.
+        "energy_metering": str(dataset_config.get("energy_metering", "batch")),
+        "energy_mJ": (task_metrics or {}).get("energy_per_inference_mJ"),
+        "inference_time_ms": (task_metrics or {}).get("mean_inference_time_ms"),
         # Failed cross-process weight reloads (audit D6); > 0 means some
         # counted adaptations never reached the stream.
         "reload_failures": _count_csv_rows(knowledge_dir / kio.RELOAD_FAILURES_FILE),

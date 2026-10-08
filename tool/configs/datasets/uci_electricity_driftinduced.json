@@ -61,7 +61,7 @@
   "accuracy_signal": "window_r2",
   "retrain_regularisation": "sample_scaled",
   "prt_interval": 3200,
-  "energy_metering": "batch",
+  "energy_metering": "per_prediction",
   "reload_model_per_step": true,
   "energy_budget_rho": 0.5,
   "accuracy_budget_rho": 0.5,
