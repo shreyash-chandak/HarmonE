@@ -41,11 +41,11 @@
 
   "min_score": 0.8612,
 
-  "energy_bounds_source": "calibrate_from_naive_runs: remote naive runs 2026-10-06 (batch metering, positioned pool)",
+  "energy_bounds_source": "calibrate_from_naive_runs:runs_seed1",
 
-  "energy_reference_source": "calibrate_from_naive_runs: remote naive runs 2026-10-06 (batch metering, positioned pool) (E_ref = energy_budget_rho)",
+  "energy_reference_source": "calibrate_from_naive_runs:runs_seed1 (E_ref = energy_budget_rho)",
 
-  "accuracy_gate_source": "calibrate_from_naive_runs: remote naive runs 2026-10-06 (batch metering, positioned pool) (min_accuracy = accuracy_budget_rho rule)",
+  "accuracy_gate_source": "calibrate_from_naive_runs:runs_seed1 (min_accuracy = accuracy_budget_rho rule)",
 
   "min_accuracy": 0.8802,
   "max_energy": 0.5,
@@ -79,8 +79,8 @@
   "bandit_min_observation_steps": 50,
   "drift_cooldown_rows": 1200,
   "max_batches_ahead": 1,
-  "E_m": 13989.0,
-  "E_M": 30265.4,
+  "E_m": 16757.4,
+  "E_M": 106556.7,
   "tau_drift": 0.12241,
   "tau_drift_source": "calibrate_drift_threshold kl_overflow p99 window=1200 null=stream[:2000]",
   "drift_reference": "both",
