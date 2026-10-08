@@ -1631,6 +1631,30 @@ def _do_inline_retrain(
             # recipe: hyperparams.retrain (e.g. the original's 50 epochs /
             # lr 0.001 / batch 16) over hyperparams.train
             hp = {**(info.get("train_params") or {}), **(info.get("retrain_params") or {})}
+            if hp.get("mode") == "finetune":
+                # mode "finetune" (spot, 2026-10-08): the earlier retrain — 5
+                # full-batch Adam steps (lr 5e-4) from the current weights.
+                # A from-scratch retrain on 1,200 volatile hourly prices was
+                # unstable there (next-3,200-row R² as low as -0.23).
+                model_obj = info["model"]
+                model_obj.train()
+                opt = optim.Adam(model_obj.parameters(), lr=float(hp.get("finetune_lr", 5e-4)))
+                loss_fn = nn.MSELoss()
+                X_t = torch.tensor(X, dtype=torch.float32).unsqueeze(-1)
+                y_t = torch.tensor(y, dtype=torch.float32).unsqueeze(-1)
+                for _ in range(int(hp.get("finetune_steps", 5))):
+                    opt.zero_grad()
+                    loss_fn(model_obj(X_t), y_t).backward()
+                    opt.step()
+                model_obj.eval()
+                _m = model_obj
+                def _new_predict(inputs: np.ndarray, m=_m) -> float:
+                    import torch as _t
+                    x = _t.tensor(inputs, dtype=_t.float32).view(1, -1, 1)
+                    with _t.no_grad():
+                        return float(m(x).item())
+                models[model_name] = _new_predict
+                return True
             torch.manual_seed(int(info.get("train_seed", 0)))
             model_obj = LSTMModel()
             opt = optim.Adam(model_obj.parameters(), lr=float(hp.get("lr", 0.001)))

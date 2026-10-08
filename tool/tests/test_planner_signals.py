@@ -253,3 +253,17 @@ def test_lstm_retrain_is_full_retrain():
     assert _do_inline_retrain("lstm", store, models, hist, scaler, seq_length=5, drift_window=1200)
     assert store["lstm"]["model"] is not old          # a new model, trained from scratch
     assert "lstm" in models
+
+
+def test_lstm_finetune_mode_keeps_model():
+    from sklearn.preprocessing import MinMaxScaler
+    from adapters.loaders import LSTMModel
+    from experiments.run_experiment import _do_inline_retrain
+    hist = list(np.sin(np.arange(400) / 5.0))
+    scaler = MinMaxScaler().fit(np.array(hist).reshape(-1, 1))
+    old = LSTMModel()
+    info = {"type": "lstm", "model": old, "retrain_params": {"mode": "finetune"},
+            "train_params": {"epochs": 50}, "train_seed": 0}
+    store, models = {"lstm": info}, {}
+    assert _do_inline_retrain("lstm", store, models, hist, scaler, seq_length=5, drift_window=1200)
+    assert store["lstm"]["model"] is old              # fine-tuned in place, not rebuilt
