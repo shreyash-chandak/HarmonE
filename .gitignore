@@ -159,3 +159,5 @@ tool/logs/
 # ── Model weights (large binary; download separately) ─────────────────────────
 tool/managed_system_*/models/
 tool/managed_system_*/base_models/
+tool/overnight/
+tool/old/
