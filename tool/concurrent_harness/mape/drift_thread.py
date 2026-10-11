@@ -59,8 +59,10 @@ def run(
     mape_store: kio.MapeInfoStore,
     drift_window: int,
     energy_backend: str,
+    rows_rfd: int | None = None,
 ) -> None:
     kp = kio.knowledge_paths(knowledge_dir)
+    waiter = kio.PipeWaiter(rows_rfd, kp["shutdown"], tick_s=_POLL_TICK_S)
     available_models = list(dataset_config.get("models", {}).keys())
     thresholds = dataset_config
     tau_drift = float(dataset_config.get("tau_drift", 0.5))
@@ -99,7 +101,7 @@ def run(
 
     running = True
     while running:
-        running = kio.interruptible_sleep(_POLL_TICK_S, kp["shutdown"])
+        running = waiter.wait()  # blocks until inference finishes a batch (item 1c)
         pred_buf.poll()
         if is_cv:
             lum_buf.poll()
@@ -162,6 +164,8 @@ def run(
                     "adaptation_seen": ref._seen_adaptation.get(current_model, -1),
                     "drift_result": drift_result,
                 })
+                with kio.DRIFT_COND:
+                    kio.DRIFT_COND.notify_all()
                 pending["checks"] += 1
                 if pending["checks"] >= _FLUSH_EVERY:
                     _flush()

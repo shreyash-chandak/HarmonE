@@ -71,7 +71,12 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=42,
                     help="Seeds random/numpy exactly like run_experiment.py (audit D7).")
     p.add_argument("--verbose", action="store_true")
+    p.add_argument("--rows-rfds", default=None,
+                   help="Wake-up pipe fds for t1,t2 written by inference after each batch (run_concurrent.py).")
+    p.add_argument("--processed-wfd", type=int, default=None,
+                   help="Wake-up pipe fd t1 writes to after processing a batch (run_concurrent.py).")
     args = p.parse_args()
+    rows_rfds = kio.parse_fds(args.rows_rfds) or [None, None]
 
     kio.setup_logging(args.verbose)
     random.seed(args.seed)
@@ -171,6 +176,7 @@ def main() -> None:
             scaler=scaler, vmr=vmr, mape_store=mape_store,
             drift_window=drift_window,
             energy_backend=energy_backend,
+            rows_rfd=rows_rfds[0], processed_wfd=args.processed_wfd,
         ),
         daemon=True, name="t1-plan",
     )
@@ -183,6 +189,7 @@ def main() -> None:
             vmr=vmr, mape_store=mape_store,
             drift_window=drift_window,
             energy_backend=energy_backend,
+            rows_rfd=rows_rfds[1],
         ),
         daemon=True, name="t2-drift",
     )

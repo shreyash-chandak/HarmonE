@@ -44,6 +44,8 @@ from pathlib import Path
 import numpy as np
 
 _TOOL_DIR = Path(__file__).resolve().parent.parent
+if str(_TOOL_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOL_DIR))
 _DEFAULT_WINDOW = 1200
 _DEFAULT_INTERVAL = 50
 
@@ -58,17 +60,11 @@ def _naive_run_dir(runs_dir: Path, dataset: str, model: str) -> Path | None:
 def _window_r2_mean(pred_csv: Path, interval: int, window: int) -> float:
     """Mean per-batch accuracy under accuracy_signal="window_r2" (see
     experiments/run_experiment._monitor_batch)."""
+    from core.scoring import window_r2_mean
     with open(pred_csv, newline="") as f:
         rows = list(csv.DictReader(f))
-    yt = np.array([float(r["y_true"]) for r in rows])
-    yp = np.array([float(r["y_pred"]) for r in rows])
-    accs = []
-    for i in range(len(yt) // interval):
-        end = (i + 1) * interval
-        mse = float(np.mean((yt[end - interval:end] - yp[end - interval:end]) ** 2))
-        ref_var = float(np.var(yt[max(0, end - window):end]))
-        accs.append(max(0.0, min(1.0, 1.0 - mse / ref_var)) if ref_var > 0 else 0.0)
-    return float(np.mean(accs)) if accs else 0.0
+    return window_r2_mean([float(r["y_true"]) for r in rows],
+                          [float(r["y_pred"]) for r in rows], interval, window)
 
 
 def calibrate(dataset: str, runs_dir: Path, configs_dir: Path) -> dict:

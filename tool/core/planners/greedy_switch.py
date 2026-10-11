@@ -15,6 +15,7 @@ class GreedySwitchPlanner(Planner):
     """S3: Always switch to the highest-EMA non-current model on any violation."""
 
     name = "greedy_switch"
+    reacts_to_drift = False  # like the original "switch" baselines (no drift thread)
 
     def plan(self, ctx: PlanningContext) -> PlanDecision:
         if ctx.violation is None:

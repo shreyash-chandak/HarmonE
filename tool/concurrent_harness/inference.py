@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import logging
+import os
 import pickle
 import random
 import shutil
@@ -128,6 +129,10 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=42,
                     help="Seeds random/numpy exactly like run_experiment.py (audit D7).")
     p.add_argument("--verbose", action="store_true")
+    p.add_argument("--notify-wfds", default=None,
+                   help="Pipe fds to wake the manager's threads after each batch (run_concurrent.py).")
+    p.add_argument("--processed-rfd", type=int, default=None,
+                   help="Pipe fd the manager writes to after processing a batch (run_concurrent.py).")
     args = p.parse_args()
 
     kio.setup_logging(args.verbose)
@@ -145,6 +150,14 @@ def main() -> None:
     if is_cv:
         from core.device import configure_device
         configure_device(dataset_config)  # CV inference on the GPU (core/device.py)
+
+    if not is_cv:
+        # One intra-op thread (2026-10-12, item 1a): a batch-1 LSTM gains
+        # nothing from a thread pool, and idle pool threads spin on every
+        # core, raising package power during each prediction window. CV
+        # keeps the default (CPU-side preprocessing for the GPU models).
+        import torch
+        torch.set_num_threads(1)
 
     adapter = _build_adapter(dataset_config, configs_dir)
 
@@ -205,13 +218,26 @@ def main() -> None:
     monitor_interval = int(dataset_config.get("monitor_interval", 50))
     max_ahead = int(dataset_config.get("max_batches_ahead", 1))
 
+    notify_wfds = kio.parse_fds(args.notify_wfds)
+    processed_rfd = [args.processed_rfd]  # [None] once the manager's end closes
+
     def _wait_for_manager(step_: int) -> bool:
-        """Block until t1 has processed enough rows. False if the run aborted."""
+        """Block until t1 has processed enough rows. False if the run aborted.
+        Sleeps in select() on the manager's wake-up pipe (item 1c) instead of
+        polling every 5 ms; falls back to polling without a pipe."""
+        import select
         need = step_ - monitor_interval * max_ahead
         while kio.read_processed(kp["processed"]) < need:
             if kp["abort"].exists():
                 return False
-            time.sleep(0.005)
+            fd = processed_rfd[0]
+            if fd is None:
+                time.sleep(0.005)
+                continue
+            ready, _, _ = select.select([fd], [], [], 0.5)
+            if ready and not os.read(fd, 4096):
+                os.close(fd)
+                processed_rfd[0] = None
         return True
 
     # Batch-level energy metering (audit C1, 2026-10-06) — see
@@ -268,12 +294,13 @@ def main() -> None:
             kio.append_row(kp["predictions_file"], row, pred_fields)
 
     # Per-step model loading (2026-10-08; config reload_model_per_step), as
-    # in the original HarmonE inference.py: every prediction re-reads which
-    # model is active (model.txt, written by the managing system) and loads
-    # that model's weights from its file (rewritten by retrain/restore). The
-    # loading cost is part of the measured energy. Model switches can then
-    # land mid-batch, as in the original; the monitor scores the batch's
-    # majority model and only judges batches served by the current model.
+    # in the original HarmonE inference.py: every prediction loads the active
+    # model's weights from its file (rewritten by retrain/restore), and the
+    # loading cost is part of the measured energy. Which model is active
+    # (model.txt, written by the managing system) is read only at batch
+    # boundaries (2026-10-12, item 8a), so a switch applies at the next
+    # boundary and every batch is served by one model; new weights of the
+    # active model still take effect on the very next prediction.
     per_step_reload = bool(dataset_config.get("reload_model_per_step", False))
 
     step = 0
@@ -286,6 +313,8 @@ def main() -> None:
         # (audit D1: previously 267 of 466 batches mixed 2-3 models).
         if step % monitor_interval == 0:
             _close_batch()
+            if step > 0:
+                kio.notify_fds(notify_wfds)  # batch rows are on disk
             if step > 0 and max_ahead >= 0 and not _wait_for_manager(step):
                 logger.error("inference_proc: manager aborted — stopping stream at step %d.", step)
                 break
@@ -313,10 +342,8 @@ def main() -> None:
         if batch_mode and batch_em is None:
             _open_batch(step)
 
-        if per_step_reload:
-            current_model = kio.read_current_model(kp["model_file"], default=initial_model)
-            if not per_prediction:  # per_prediction loads inside its meter window
-                _reload_one_model(models, current_model, local_config)
+        if per_step_reload and not per_prediction:  # per_prediction loads inside its meter window
+            _reload_one_model(models, current_model, local_config)
 
         predict_fn = models.get(current_model)
         if predict_fn is None:
@@ -437,6 +464,7 @@ def main() -> None:
         step += 1
 
     _close_batch()  # trailing partial batch
+    kio.notify_fds(notify_wfds)
     kio.touch(kp["stream_done"])
     logger.info("inference_proc: stream complete, %d steps.", step)
 

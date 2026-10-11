@@ -11,6 +11,8 @@ duplicating them.
 from __future__ import annotations
 
 import logging
+import queue
+import threading
 from pathlib import Path
 
 from core.planners.base import PlanDecision
@@ -22,6 +24,54 @@ import knowledge_io as kio
 import retrain
 
 logger = logging.getLogger(__name__)
+
+# ── Background regression retrains (2026-10-12, item 9a) ─────────────────────
+# As in the original (manage.py runs retrain.py via os.system from its own
+# thread while inference keeps streaming), a regression retrain runs in a
+# background thread: the plan cycle returns at once, so monitoring and the
+# inference barrier keep advancing, and the retrain's package energy lands in
+# the concurrent prediction readings. The new weights are written atomically
+# and picked up by inference on its next prediction (per-prediction reload).
+# One retrain at a time: while one is in flight, further retrain/replace
+# decisions are skipped (counted as adaptation_skipped_busy) — the original's
+# drift thread is likewise blocked during os.system(retrain) (then sleeps).
+# The thread only produces results; the plan thread applies the bookkeeping
+# (counters, last_adaptation, accuracy baseline) at its next cycle, so it
+# cannot race the cycle's own mape_info read-modify-write.
+_bg_thread: threading.Thread | None = None
+_bg_results: "queue.Queue[tuple]" = queue.Queue()
+
+
+def background_busy() -> bool:
+    return _bg_thread is not None and _bg_thread.is_alive()
+
+
+def apply_background_results(mape_store: kio.MapeInfoStore, current_step: int) -> None:
+    """Apply finished background retrains (call from the plan thread only)."""
+    while True:
+        try:
+            model, ok, archived, reason = _bg_results.get_nowait()
+        except queue.Empty:
+            return
+        key = "retrains" if ok else "retrain_skipped"
+        mape_store.update(lambda d: d["event_counters"].__setitem__(
+            key, d["event_counters"][key] + 1))
+        if ok:
+            def _rec(d: dict) -> None:
+                d.setdefault("last_adaptation", {})[model] = current_step
+                note_adaptation(d, model, archived)
+            mape_store.update(_rec)
+        logger.info("retrain %s (background, applied at step %d): %s (%s)",
+                    "ok" if ok else "skipped", current_step, model, reason)
+
+
+def finish_background(mape_store: kio.MapeInfoStore, current_step: int, timeout_s: float = 600.0) -> None:
+    """Wait for an in-flight background retrain and apply its result (shutdown)."""
+    if _bg_thread is not None:
+        _bg_thread.join(timeout_s)
+        if _bg_thread.is_alive():
+            logger.warning("background retrain still running after %.0f s at shutdown — not counted.", timeout_s)
+    apply_background_results(mape_store, current_step)
 
 
 def execute_decision(
@@ -49,8 +99,15 @@ def execute_decision(
     mape_info["last_adaptation"][current_model] = current_step, which t2
     (drift_thread.py) uses to re-base that model's drift reference and start
     its cooldown (audit E1 — see mape/drift_ref.py)."""
+    global _bg_thread
     kp = kio.knowledge_paths(knowledge_dir)
     new_model = current_model
+
+    if decision.action in ("retrain", "replace") and background_busy():
+        mape_store.update(lambda d: d["event_counters"].__setitem__(
+            "adaptation_skipped_busy", d["event_counters"].get("adaptation_skipped_busy", 0) + 1))
+        logger.info("%s skipped: a background retrain is still running (%s)", decision.action, decision.reason)
+        return current_model
 
     def _record_adaptation(d: dict, version_path: str | None = None) -> None:
         d.setdefault("last_adaptation", {})[current_model] = current_step
@@ -112,6 +169,25 @@ def execute_decision(
                 image_path_history or [], luminance_history or [],
                 local_dataset_config, vmr, drift_result, proxy_score,
             )
+        elif local_dataset_config.get("background_retrain", False):
+            history = list(value_history or [])     # snapshot: the plan thread keeps appending
+            drift_snapshot = dict(drift_result or {})
+
+            def _job(model=current_model, reason=decision.reason) -> None:
+                try:
+                    ok_, archived_ = retrain.do_regression_retrain(
+                        local_dataset_config, knowledge_dir, model, scaler,
+                        history, seq_length, vmr, drift_snapshot, proxy_score,
+                    )
+                except Exception:
+                    logger.exception("background retrain of %s failed", model)
+                    ok_, archived_ = False, None
+                _bg_results.put((model, ok_, archived_, reason))
+
+            _bg_thread = threading.Thread(target=_job, daemon=True, name=f"retrain-{current_model}")
+            _bg_thread.start()
+            logger.info("retrain started in background: %s (%s)", current_model, decision.reason)
+            return new_model
         else:
             ok, archived = retrain.do_regression_retrain(
                 local_dataset_config, knowledge_dir, current_model, scaler,

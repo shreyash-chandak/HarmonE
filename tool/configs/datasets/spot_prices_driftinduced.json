@@ -26,7 +26,7 @@
       "cost_class": "light",
       "hyperparams": {
         "train":   {"alpha": 5},
-        "retrain": {"regularisation_factor": 45}
+        "retrain": {}
       }
     },
     "svr": {
@@ -34,8 +34,8 @@
       "loader": "adapters.loaders.sklearn_loader",
       "cost_class": "medium",
       "hyperparams": {
-        "train":   {"kernel": "linear", "C": 0.007, "tol": 0.001, "epsilon": 0.0005, "max_train_samples": 8000},
-        "retrain": {"regularisation_factor": 10}
+        "train":   {"kernel": "linear", "C": 0.007, "tol": 0.001, "epsilon": 0.0005, "train_window_rows": 1200},
+        "retrain": {}
       }
     }
   },
@@ -64,6 +64,7 @@
   "prt_interval": 3200,
   "energy_metering": "per_prediction",
   "reload_model_per_step": true,
+  "background_retrain": true,
   "energy_budget_rho": 0.5,
   "accuracy_budget_rho": 0.5,
   "staleness_window": 500,

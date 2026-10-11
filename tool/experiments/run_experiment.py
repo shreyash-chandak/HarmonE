@@ -334,7 +334,16 @@ def _train_regression_models(
             # find a good hyperplane, and R² on an 8000-point subsample matched the full
             # fit within noise for both datasets.
             X_fit, y_fit = X, y
-            if len(X) > max_train_samples:
+            # train_window_rows (2026-10-12, 4a): fit on the most recent N
+            # training rows — the same window the retrains use and the
+            # paper's 1,200-sample training set — instead of a random
+            # max_train_samples subsample. The SVR's size (support vectors),
+            # hence its per-prediction load cost, then matches a retrained one.
+            window_rows = hp.get("train_window_rows")
+            if window_rows:
+                n_seq = max(1, int(window_rows) - seq_length)
+                X_fit, y_fit = X[-n_seq:], y[-n_seq:]
+            elif len(X) > max_train_samples:
                 idx = np.random.RandomState(0).choice(len(X), max_train_samples, replace=False)
                 X_fit, y_fit = X[idx], y[idx]
             logger.info(
@@ -793,7 +802,12 @@ def _plan(
     # when an ENERGY violation is detected and, while it is > 0, flags no
     # score/energy violation at all ("No switching allowed"). Exploration and
     # drift handling are unaffected (they are not violation-driven there).
+    # 2026-10-12 (item 6a): the hold starts only when the energy violation
+    # actually led to a switch (set after planning, below). In the original an
+    # energy violation always switched; here S5/bandit may decide to stay, and
+    # holding then just muted the next 3 cycles.
     hold_mode = thresholds.get("switch_hold_mode", "after_any_switch")
+    energy_violation_unheld = False
     if hold_mode == "after_energy_violation":
         recovery = int(mape_info.get("recovery_cycles", 0))
         if recovery > 0:
@@ -803,7 +817,12 @@ def _plan(
                 ec["violations_in_recovery"] = ec.get("violations_in_recovery", 0) + 1
             violation = None
         elif violation == "energy":
-            mape_info["recovery_cycles"] = int(thresholds.get("switch_hold_cycles", 3))
+            energy_violation_unheld = True
+
+    # Switch-only baselines never see drift (Planner.reacts_to_drift; the
+    # original's "switch" approaches run no drift thread).
+    if not getattr(planner, "reacts_to_drift", True):
+        drift_result = dict(drift_result, drift_detected=False)
 
     effective_violation = violation
     if drift_result["drift_detected"]:
@@ -841,6 +860,10 @@ def _plan(
         },
     )
     decision = planner.plan(ctx)
+    decision.effective_violation = effective_violation
+    if (energy_violation_unheld and decision.action == "switch"
+            and decision.model and decision.model != current_model):
+        mape_info["recovery_cycles"] = int(thresholds.get("switch_hold_cycles", 3))
 
     # Switch hold (audit A2/A3/D1, 2026-09-28) — mirrors the original HarmonE's
     # recovery_cycles (HarmonE/mape/analyse.py: after an energy violation, no
@@ -867,6 +890,7 @@ def _plan(
                 f"switch hold: {mape_info.get('steps_since_last_switch')} cycle(s) since "
                 f"last switch <= switch_hold_cycles={hold} (suppressed: {decision.reason})"
             ),
+            effective_violation=effective_violation,
         )
     return decision
 
@@ -912,6 +936,7 @@ def _load_model_store(dataset_config: dict, only: list[str] | None = None) -> di
             "retrain_regularisation": dataset_config.get("retrain_regularisation", "sample_scaled"),
             "retrain_regularisation_factor": reg_factor,
             "train_seed": int(dataset_config.get("train_seed", 0)),
+            "seq_length": int(dataset_config.get("seq_length", 5)),
         }
         try:
             if "lstm" in name:
@@ -1589,7 +1614,10 @@ def _sample_scaled_params(info: dict, n_retrain: int) -> dict:
         alpha_train = float(hp.get("alpha", 256))
         return {"alpha": alpha_train * n_retrain / n_train * k}
     if hasattr(model, "C"):                                          # SVR
-        n_fit = min(int(hp.get("max_train_samples", 8000)), n_train)
+        if hp.get("train_window_rows"):
+            n_fit = min(max(1, int(hp["train_window_rows"]) - int(info.get("seq_length", 0) or 0)), n_train)
+        else:
+            n_fit = min(int(hp.get("max_train_samples", 8000)), n_train)
         c_train = float(hp.get("C", 0.08))
         return {"C": c_train * n_fit / n_retrain / k}
     return {}

@@ -9,11 +9,10 @@ run_experiment.py:3166's own behavior), so every completed run's full result
 already lives at the tail of its own log. This also means a run whose
 directory was since cleaned up but whose log survives still contributes a row.
 
-Regression rows: accuracy = task_metrics.r2, energy = event_counters'
-combined energy_used_mJ (the single cross-process total — see
-concurrent_harness_setup.md's "energy double-counting" resolution note; NOT a
-per-model sum, matches the "energy summary | energy_used=..." log line
-exactly).
+Regression rows: accuracy = task_metrics.r2 (stream R²) and
+task_metrics.window_r2 (mean per-batch window R², 2026-10-12); energy = the
+manifest's energy_mJ, the mean per-prediction energy as in the HarmonE paper
+(falls back to event_counters.energy_used_mJ for runs made before it).
 
 CV rows: confidence = task_metrics.mean_proxy_acc (the live run's own proxy
 score — literally "confidence" for classification/detection), energy = same
@@ -124,16 +123,18 @@ def build_regression_table(runs: list[dict]) -> str:
     ))
 
     lines = [
-        "| Dataset | Planner | Pin Model | Accuracy (R²) | Energy Usage (mJ) | Status |",
-        "|---|---|---|---|---|---|",
+        "| Dataset | Planner | Pin Model | Stream R² | Window R² | Energy (mJ/prediction) | Status |",
+        "|---|---|---|---|---|---|---|",
     ]
     for m in rows:
         tm = m["task_metrics"]
-        energy_mj = m.get("event_counters", {}).get("energy_used_mJ")
+        energy_mj = m.get("energy_mJ")
+        if energy_mj is None:
+            energy_mj = m.get("event_counters", {}).get("energy_used_mJ")
         status = "" if m.get("status") == "ok" else f"**FAILED** — {m.get('failure_reason', '')}"
         lines.append(
             f"| {m['dataset']} | {m.get('planner', '')} | {m.get('pin_model') or '-'} "
-            f"| {_fmt(tm.get('r2'))} | {_fmt(energy_mj, 3)} | {status} |"
+            f"| {_fmt(tm.get('r2'))} | {_fmt(tm.get('window_r2'))} | {_fmt(energy_mj, 3)} | {status} |"
         )
     return "\n".join(lines)
 
@@ -194,8 +195,9 @@ clean run.
 
 ## Regression datasets
 
-Accuracy is R² on the full stream. Energy usage is the run's combined
-(inference + MAPE-K) energy total.
+Stream R² is R² over the full stream; window R² is the mean per-batch R²
+against the trailing window (the planners' accuracy signal). Energy is the
+mean per-prediction reading in mJ, as in the HarmonE paper's Table 2.
 
 {reg_table}
 

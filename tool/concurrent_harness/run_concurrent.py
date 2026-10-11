@@ -21,6 +21,7 @@ import argparse
 import csv
 import json
 import logging
+import os
 import subprocess
 import sys
 import time
@@ -74,7 +75,35 @@ def _count_csv_rows(path: Path) -> int:
         return max(sum(1 for _ in csv.reader(f)) - 1, 0)
 
 
-def _build_task_metrics_and_energy_by_model(predictions_file: Path, is_cv: bool) -> tuple[dict, dict]:
+def _model_file_stats(dataset_config: dict, knowledge_dir: Path) -> dict:
+    """Size (bytes) and support-vector count of each sklearn model file, for
+    the initial weights (configs' weights_path) and this run's final local
+    copy (after any retrain/restore). 2026-10-12: the SVR's per-prediction
+    load cost scales with its pickle size, i.e. its support vectors."""
+    import pickle
+    out = {}
+    for name, spec in dataset_config.get("models", {}).items():
+        if not str(spec.get("weights_path", "")).endswith(".pkl"):
+            continue
+        wp = Path(spec["weights_path"])
+        wp = wp if wp.is_absolute() else _TOOL_DIR / wp
+        entry = {}
+        for label, path in (("initial", wp),
+                            ("final", kio.local_weights_path(knowledge_dir, name, spec["weights_path"]))):
+            try:
+                with open(path, "rb") as f:
+                    m = pickle.load(f)
+                entry[f"{label}_bytes"] = path.stat().st_size
+                sv = getattr(m, "support_", None)
+                entry[f"{label}_n_support"] = None if sv is None else int(len(sv))
+            except (OSError, pickle.UnpicklingError, EOFError, AttributeError):
+                entry[f"{label}_bytes"] = None
+        out[name] = entry
+    return out
+
+
+def _build_task_metrics_and_energy_by_model(predictions_file: Path, is_cv: bool,
+                                            interval: int = 50, window: int = 1200) -> tuple[dict, dict]:
     import csv
     if not predictions_file.exists():
         return {}, {}
@@ -163,8 +192,11 @@ def _build_task_metrics_and_energy_by_model(predictions_file: Path, is_cv: bool)
         mae = sum(abs(a - b) for a, b in zip(y_true, y_pred)) / n
         mse = sum((a - b) ** 2 for a, b in zip(y_true, y_pred)) / n
         r2 = float(r2_score(y_true, y_pred)) if n > 1 else 0.0
+        from core.scoring import window_r2_mean
         task_metrics = {
             "r2": round(r2, 6),
+            # mean per-batch window R² (the planners' accuracy signal), 2026-10-12
+            "window_r2": round(window_r2_mean(y_true, y_pred, interval, window), 6),
             "rmse": round(mse ** 0.5, 6),
             "mae": round(mae, 6),
             "n_samples": n,
@@ -288,6 +320,19 @@ def main() -> None:
     if args.verbose:
         mgr_cmd += ["--verbose"]
 
+    # Wake-up pipes (2026-10-12, item 1c; see knowledge_io.PipeWaiter):
+    # inference -> t1 and inference -> t2 ("a batch is written"), and
+    # t1 -> inference ("a batch is processed"). Writers are non-blocking.
+    plan_r, plan_w = os.pipe()
+    drift_r, drift_w = os.pipe()
+    proc_r, proc_w = os.pipe()
+    for fd in (plan_w, drift_w, proc_w):
+        os.set_blocking(fd, False)
+    inf_fds = (plan_w, drift_w, proc_r)
+    mgr_fds = (plan_r, drift_r, proc_w)
+    inf_cmd += ["--notify-wfds", f"{plan_w},{drift_w}", "--processed-rfd", str(proc_r)]
+    mgr_cmd += ["--rows-rfds", f"{plan_r},{drift_r}", "--processed-wfd", str(proc_w)]
+
     # thresholds.json snapshot — matches run_experiment.py's own thresholds_path
     # write (a copy of the effective config for this run, for provenance/debugging).
     with open(kp["thresholds_file"], "w") as f:
@@ -315,8 +360,10 @@ def main() -> None:
     # correctly interleaved by real write order — no new file-plumbing needed,
     # and run_concurrent_{cv,regression}_grid.sh need no changes to benefit.
     logger.info("run_concurrent: starting inference_proc + manage_proc for %s", run_id)
-    inf_proc = subprocess.Popen(inf_cmd, cwd=str(_TOOL_DIR))
-    mgr_proc = subprocess.Popen(mgr_cmd, cwd=str(_TOOL_DIR))
+    inf_proc = subprocess.Popen(inf_cmd, cwd=str(_TOOL_DIR), pass_fds=inf_fds)
+    mgr_proc = subprocess.Popen(mgr_cmd, cwd=str(_TOOL_DIR), pass_fds=mgr_fds)
+    for fd in inf_fds + mgr_fds:  # only the children keep their ends (EOF on exit)
+        os.close(fd)
 
     while not kp["stream_done"].exists():
         if inf_proc.poll() is not None:
@@ -384,7 +431,10 @@ def main() -> None:
     })
 
     total_steps = len(_read_csv_column(kp["predictions_file"], "step"))
-    task_metrics, energy_by_model = _build_task_metrics_and_energy_by_model(kp["predictions_file"], is_cv)
+    task_metrics, energy_by_model = _build_task_metrics_and_energy_by_model(
+        kp["predictions_file"], is_cv,
+        interval=int(dataset_config.get("monitor_interval", 50)),
+        window=int(dataset_config.get("drift_window_size", 1200)))
 
     # Energy split like run_experiment.py (audit C3, 2026-09-28): inference
     # total in task_metrics.total_inference_energy_uJ, MAPE-K overhead in
@@ -436,6 +486,7 @@ def main() -> None:
         "final_ema_scores": mape_info.get("ema_scores", {}),
         "task_metrics": task_metrics,
         "energy_by_model": energy_by_model,
+        "model_files": _model_file_stats(dataset_config, knowledge_dir),
         "artifacts": {
             "predictions_csv": str(kp["predictions_file"]),
             "mape_events_csv": str(kp["mape_events_file"]),

@@ -60,12 +60,19 @@ class PlanDecision:
     version_path: str | None = None     # path to VMR weights for "replace"
     reason: str = ""                    # logged to event log verbatim
     metadata: dict | None = None        # planner-specific data (e.g. bandit pending record)
+    # Violation the planner was actually given (after the recovery hold and
+    # drift folding), set by the harness's _plan(); logged next to the raw one.
+    effective_violation: str | None = None
 
 
 class Planner(ABC):
     """Base class for all planning strategies."""
 
     name: str  # must be set on each subclass
+    # False for the switch-only baselines: the original HarmonE's "switch" and
+    # "switch+retrain" approaches never start its drift thread, so they never
+    # react to drift (2026-10-12). The harness then withholds drift from them.
+    reacts_to_drift: bool = True
 
     @abstractmethod
     def plan(self, ctx: PlanningContext) -> PlanDecision:

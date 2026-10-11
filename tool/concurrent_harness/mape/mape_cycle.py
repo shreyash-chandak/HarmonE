@@ -119,6 +119,7 @@ def run_cycle(
                     "ema_score": mape_info["ema_scores"].get(current_model),
                 }
                 violation = None
+                effective_violation = None
                 if monitor_rows and monitor_model:
                     energies = [float(r["energy_uJ"]) for r in monitor_rows]
                     if is_cv:
@@ -147,6 +148,7 @@ def run_cycle(
                     mape_info, thresholds, planner, current_step=current_step,
                     telemetry=telemetry, served_model=monitor_model,
                 )
+                effective_violation = decision.effective_violation
                 decision = _head_start(decision, is_cv, thresholds, available_models,
                                        current_model, mape_info)
 
@@ -213,6 +215,8 @@ def run_cycle(
             {
                 "step": current_step,
                 "violation": violation,
+                # after the recovery hold / drift folding: what the planner was given
+                "violation_effective": effective_violation,
                 "drift_detected": drift_result.get("drift_detected", False),
                 "drift_confirmed": drift_result.get("drift_confirmed"),
                 "kl_div": drift_result.get("kl_div"),

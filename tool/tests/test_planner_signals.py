@@ -267,3 +267,50 @@ def test_lstm_finetune_mode_keeps_model():
     store, models = {"lstm": info}, {}
     assert _do_inline_retrain("lstm", store, models, hist, scaler, seq_length=5, drift_window=1200)
     assert store["lstm"]["model"] is old              # fine-tuned in place, not rebuilt
+
+
+def test_recovery_hold_only_after_an_energy_switch():
+    """2026-10-12 (6a): an energy violation the planner answers with a noop
+    (e.g. S5 staying on the only accurate model) starts no recovery period;
+    the effective violation passed to the planner is recorded."""
+    from core.planners.base import PlanDecision
+    from experiments.run_experiment import _plan
+
+    class _Stay:
+        def plan(self, ctx):
+            return PlanDecision(action="noop", reason=f"stay v={ctx.violation}")
+
+    info = _initial_mape_info(MODELS)
+    thr = {"switch_hold_mode": "after_energy_violation", "switch_hold_cycles": 3}
+    nod = {"drift_detected": False}
+    d = _plan("energy", dict(nod), "lstm", MODELS, info, thr, _Stay())
+    assert d.action == "noop" and d.effective_violation == "energy"
+    assert info.get("recovery_cycles", 0) == 0
+    d = _plan("energy", dict(nod), "lstm", MODELS, info, thr, _Stay())
+    assert d.effective_violation == "energy"      # not muted by a hold
+
+
+def test_switch_baselines_ignore_drift():
+    """2026-10-12 (7a): the original 'switch' approaches run no drift thread,
+    so random/greedy switch planners never receive drift."""
+    from core.planners.greedy_switch import GreedySwitchPlanner
+    from core.planners.random_switch import RandomSwitchPlanner
+    from core.planners.random_switch_prt import RandomSwitchPRTPlanner
+    from core.planners.harmone_original import HarmonEOriginalPlanner
+    from experiments.run_experiment import _plan
+
+    assert not GreedySwitchPlanner.reacts_to_drift
+    assert not RandomSwitchPlanner.reacts_to_drift
+    assert not RandomSwitchPRTPlanner.reacts_to_drift
+    assert HarmonEOriginalPlanner.reacts_to_drift
+    info = _initial_mape_info(MODELS)
+    drift = {"drift_detected": True, "action": "retrain", "version": None, "kl_div": 9.0}
+    d = _plan(None, dict(drift), "lstm", MODELS, info, {}, GreedySwitchPlanner())
+    assert d.action == "noop" and d.effective_violation is None
+
+
+def test_window_r2_mean_matches_planner_signal():
+    from core.scoring import window_r2_mean
+    y = list(np.sin(np.arange(500) / 7.0) * 10 + 50)
+    assert window_r2_mean(y, y, 50, 1200) == 1.0
+    assert window_r2_mean(y, [50.0] * 500, 50, 1200) < 0.2   # constant predictor scores ~0

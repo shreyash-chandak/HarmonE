@@ -76,7 +76,7 @@ PREDICTION_FIELDS_CV = [
 # writes, so scripts/plot_results.py's chart_ema_timeseries() (which reads
 # step/ema_score from this file) works unmodified against a concurrent run.
 MAPE_EVENT_FIELDS = [
-    "step", "violation", "drift_detected", "drift_confirmed", "kl_div",
+    "step", "violation", "violation_effective", "drift_detected", "drift_confirmed", "kl_div",
     "decision_action", "decision_model", "decision_reason",
     "model_before", "model_after",
     "r2", "accuracy", "ema_score", "avg_energy_uJ", "energy_threshold",
@@ -451,6 +451,60 @@ def interruptible_sleep(total_s: float, shutdown_path: Path, tick: float = 1.0) 
         time.sleep(step)
         elapsed += step
     return not shutdown_path.exists()
+
+
+# ── blocking wake-ups between the two processes (2026-10-12, item 1c) ─────────
+# run_concurrent.py creates OS pipes and passes their fds to both processes:
+# inference writes one byte to each manager thread's pipe after every batch it
+# finishes, and the manager writes one byte back after processing a batch, so
+# each side blocks in select() until there is work instead of polling files
+# every few milliseconds. The data still travels through the knowledge files;
+# the pipes only carry wake-ups. Without fds (e.g. a process started by hand)
+# the waits fall back to the previous short-tick polling.
+
+# t2 -> t1 within mape/manage.py: notified after each drift_state.json write.
+DRIFT_COND = threading.Condition()
+
+
+def parse_fds(arg: str | None) -> list[int]:
+    return [int(x) for x in arg.split(",") if x != ""] if arg else []
+
+
+def notify_fds(fds: list[int]) -> None:
+    """Wake the peer(s); never blocks (fds are non-blocking) or raises."""
+    for fd in fds:
+        try:
+            os.write(fd, b".")
+        except OSError:  # pipe full (peer will wake anyway) or peer gone
+            pass
+
+
+class PipeWaiter:
+    """Block until the peer writes to fd, shutdown_path appears, or timeout_s
+    passes. On EOF (peer exited) it falls back to polling every tick_s."""
+
+    def __init__(self, fd: int | None, shutdown_path: Path, tick_s: float = 0.02,
+                 timeout_s: float = 0.5) -> None:
+        self.fd, self.shutdown_path, self.tick_s, self.timeout_s = fd, shutdown_path, tick_s, timeout_s
+
+    def wait(self) -> bool:
+        """Returns False once shutdown_path exists (same contract as
+        interruptible_sleep)."""
+        if self.fd is None:
+            return interruptible_sleep(self.tick_s, self.shutdown_path)
+        if self.shutdown_path.exists():
+            return False
+        import select
+        ready, _, _ = select.select([self.fd], [], [], self.timeout_s)
+        if ready:
+            try:
+                data = os.read(self.fd, 4096)  # drain all pending wake-ups
+            except BlockingIOError:
+                data = b"."
+            if not data:
+                os.close(self.fd)
+                self.fd = None
+        return not self.shutdown_path.exists()
 
 
 # ── per-model reload flags (retrain -> inference cross-process signal) ────────

@@ -30,11 +30,11 @@ from __future__ import annotations
 
 import collections
 import logging
-import time
 from pathlib import Path
 
 from core.planners.base import get_planner
 
+import execute
 import knowledge_io as kio
 import mape_cycle
 
@@ -52,11 +52,17 @@ _DRIFT_WAIT_S = 10.0
 
 def _drift_for_batch(kp: dict, current_step: int, current_model: str,
                      last_adaptation: dict) -> dict:
-    deadline = time.monotonic() + _DRIFT_WAIT_S
-    state = kio.read_drift_state(kp["drift_state"])
-    while (state is None or state.get("step", -1) < current_step) and time.monotonic() < deadline:
-        time.sleep(0.005)
-        state = kio.read_drift_state(kp["drift_state"])
+    # Blocks on t2's notification (kio.DRIFT_COND, item 1c) instead of
+    # re-reading drift_state.json every 5 ms.
+    box: dict = {}
+
+    def _ready() -> bool:
+        box["state"] = kio.read_drift_state(kp["drift_state"])
+        return box["state"] is not None and box["state"].get("step", -1) >= current_step
+
+    with kio.DRIFT_COND:
+        kio.DRIFT_COND.wait_for(_ready, timeout=_DRIFT_WAIT_S)
+    state = box["state"]
     if state is None or state.get("step", -1) < current_step:
         logger.warning("plan_thread: no drift result from t2 for step %d — assuming no drift.", current_step)
         return dict(_NO_DRIFT)
@@ -82,9 +88,13 @@ def run(
     mape_store: kio.MapeInfoStore,
     drift_window: int,
     energy_backend: str,
+    rows_rfd: int | None = None,
+    processed_wfd: int | None = None,
 ) -> None:
     kp = kio.knowledge_paths(knowledge_dir)
     planner = get_planner(planner_name)
+    waiter = kio.PipeWaiter(rows_rfd, kp["shutdown"], tick_s=_POLL_TICK_S)
+    processed_wfds = [processed_wfd] if processed_wfd is not None else []
     all_models = list(dataset_config.get("models", {}).keys())
     available_models = [pin_model] if pin_model else all_models
     thresholds = dataset_config
@@ -110,7 +120,7 @@ def run(
 
     running = True
     while running:
-        running = kio.interruptible_sleep(_POLL_TICK_S, kp["shutdown"])
+        running = waiter.wait()  # blocks until inference finishes a batch (item 1c)
         pred_buf.poll()
         if is_cv:
             img_buf.poll()
@@ -142,6 +152,7 @@ def run(
                     value_history.extend(float(r["y_true"]) for r in batch)
                     value_history = value_history[-history_keep:]
 
+                execute.apply_background_results(mape_store, current_step)
                 last_adaptation = mape_store.load().get("last_adaptation", {})
                 drift_result = _drift_for_batch(kp, current_step, current_model, last_adaptation)
 
@@ -176,5 +187,7 @@ def run(
                 )
             finally:
                 kio.write_processed(kp["processed"], current_step)
+                kio.notify_fds(processed_wfds)
 
+    execute.finish_background(mape_store, pred_buf.committed_count)
     logger.info("plan_thread: shutdown")

@@ -22,6 +22,7 @@ class RandomSwitchPRTPlanner(Planner):
     """Random switch on violation + periodic retraining every prt_interval steps."""
 
     name = "random_switch_prt"
+    reacts_to_drift = False  # like the original "switch" baselines (no drift thread)
 
     def plan(self, ctx: PlanningContext) -> PlanDecision:
         prt_interval = int(ctx.thresholds.get("prt_interval", PRT_INTERVAL))

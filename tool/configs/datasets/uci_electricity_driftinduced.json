@@ -16,7 +16,7 @@
       "cost_class": "medium",
       "hyperparams": {
         "train":   {"epochs": 4, "lr": 0.0005, "batch_size": 8},
-        "retrain": {"epochs": 50, "lr": 0.001, "batch_size": 16}
+        "retrain": {"mode": "finetune"}
       }
     },
     "ridge": {
@@ -33,7 +33,7 @@
       "loader": "adapters.loaders.sklearn_loader",
       "cost_class": "medium",
       "hyperparams": {
-        "train":   {"kernel": "linear", "C": 0.00035, "tol": 0.001, "epsilon": 0.0005, "max_train_samples": 8000},
+        "train":   {"kernel": "linear", "C": 0.00035, "tol": 0.001, "epsilon": 0.0005, "train_window_rows": 1200},
         "retrain": {"regularisation_factor": 3}
       }
     }
@@ -63,6 +63,7 @@
   "prt_interval": 3200,
   "energy_metering": "per_prediction",
   "reload_model_per_step": true,
+  "background_retrain": true,
   "energy_budget_rho": 0.5,
   "accuracy_budget_rho": 0.5,
   "staleness_window": 500,

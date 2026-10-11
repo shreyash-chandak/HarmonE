@@ -135,3 +135,22 @@ def normalize_energy(
         return 0.0
     raw = (avg_energy_uj - e_min) / (e_max - e_min)
     return max(0.0, min(1.0, raw))
+
+
+def window_r2_mean(y_true, y_pred, interval: int = 50, window: int = 1200) -> float:
+    """Mean per-batch accuracy as the planners see it (accuracy_signal
+    "window_r2"): for each interval-row batch, 1 - batch MSE / variance of
+    the trailing `window` true values, clipped to [0, 1]. Reported next to
+    stream R² (2026-10-12) because stream R² on spot is dominated by a few
+    price spikes and hid retrained models collapsing to near-constant output.
+    """
+    import numpy as np
+    yt = np.asarray(y_true, dtype=float)
+    yp = np.asarray(y_pred, dtype=float)
+    accs = []
+    for i in range(len(yt) // interval):
+        end = (i + 1) * interval
+        mse = float(np.mean((yt[end - interval:end] - yp[end - interval:end]) ** 2))
+        ref_var = float(np.var(yt[max(0, end - window):end]))
+        accs.append(max(0.0, min(1.0, 1.0 - mse / ref_var)) if ref_var > 0 else 0.0)
+    return float(np.mean(accs)) if accs else 0.0

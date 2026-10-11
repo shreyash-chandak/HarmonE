@@ -16,6 +16,7 @@ class RandomSwitchPlanner(Planner):
     """S2: Random switch. On violation, choose any other available model."""
 
     name = "random_switch"
+    reacts_to_drift = False  # like the original "switch" baselines (no drift thread)
 
     def plan(self, ctx: PlanningContext) -> PlanDecision:
         if ctx.violation is None:
