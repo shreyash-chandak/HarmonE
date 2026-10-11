@@ -97,26 +97,9 @@ PY
 
     # 4. summary
     log "[4/4] summary"
-    python3 - <<'PY' > "$STATE/summary.txt" 2>&1
-import glob, json, statistics as st, collections
-rows = collections.defaultdict(list)
-status = collections.Counter()
-for m in glob.glob("runs_seed*/*_conc/run_manifest.json"):
-    j = json.load(open(m))
-    status[j.get("status")] += 1
-    p = j["run_id"][len(j["dataset"]) + 1:-5]
-    rows[(j["dataset"], p)].append((j["task_metrics"].get("r2"), j.get("energy_mJ"),
-                                    j["event_counters"].get("model_switches", 0),
-                                    j["event_counters"].get("retrains", 0)))
-print("run status:", dict(status))
-for ds in sorted({d for d, _ in rows}):
-    print(f"\n{ds}\n{'planner':22s} {'n':>2s} {'R2 mean':>8s} {'mJ/pred':>8s} {'switch':>7s} {'retrain':>7s}")
-    for (d, p), v in sorted(rows.items()):
-        if d != ds:
-            continue
-        f = lambda i: st.mean(x[i] for x in v if x[i] is not None) if any(x[i] is not None for x in v) else float("nan")
-        print(f"{p:22s} {len(v):2d} {f(0):8.4f} {f(1):8.3f} {f(2):7.0f} {f(3):7.0f}")
-PY
+    python3 scripts/aggregate_seeds.py --runs $(printf 'runs_seed%s ' "${SEEDS[@]}") > "$STATE/summary.txt" 2>&1
+    python3 experiments/drift_detection_eval.py --runs $(printf 'runs_seed%s ' "${SEEDS[@]}") \
+        --csv "$STATE/drift_detection.csv" >> "$STATE/summary.txt" 2>&1
     cat "$STATE/summary.txt" >> "$LOG"
     log "=== pipeline DONE — results in runs_seed1..5, summary in overnight/summary.txt ==="
     log "configs/ now hold the new calibration (uncommitted on this machine; see overnight/calibration.diff)"
