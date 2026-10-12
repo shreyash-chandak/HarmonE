@@ -39,7 +39,7 @@
     }
   },
 
-  "min_score": 0.8612,
+  "min_score": 0.8299,
 
   "energy_bounds_source": "calibrate_from_naive_runs:runs_calib",
 
@@ -47,7 +47,7 @@
 
   "accuracy_gate_source": "calibrate_from_naive_runs:runs_calib (min_accuracy = accuracy_budget_rho rule)",
 
-  "min_accuracy": 0.8802,
+  "min_accuracy": 0.8473,
   "max_energy": 0.5,
   "E_ref": 0.5,
   "energy_reference": 0.5,
@@ -80,8 +80,8 @@
   "bandit_min_observation_steps": 50,
   "drift_cooldown_rows": 1200,
   "max_batches_ahead": 1,
-  "E_m": 9011.1,
-  "E_M": 59305.6,
+  "E_m": 9108.8,
+  "E_M": 58377.9,
   "tau_drift": 0.12241,
   "tau_drift_source": "calibrate_drift_threshold kl_overflow p99 window=1200 null=stream[:2000]",
   "drift_reference": "both",
