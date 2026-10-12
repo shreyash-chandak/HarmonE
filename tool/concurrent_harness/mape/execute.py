@@ -15,6 +15,7 @@ import queue
 import threading
 from pathlib import Path
 
+from core.energy import Pkg0Meter
 from core.planners.base import PlanDecision
 from core.vmr import VMR
 
@@ -50,12 +51,15 @@ def apply_background_results(mape_store: kio.MapeInfoStore, current_step: int) -
     """Apply finished background retrains (call from the plan thread only)."""
     while True:
         try:
-            model, ok, archived, reason = _bg_results.get_nowait()
+            model, ok, archived, reason, energy_uJ = _bg_results.get_nowait()
         except queue.Empty:
             return
         key = "retrains" if ok else "retrain_skipped"
         mape_store.update(lambda d: d["event_counters"].__setitem__(
             key, d["event_counters"][key] + 1))
+        if energy_uJ is not None:
+            mape_store.update(lambda d: d["event_counters"].__setitem__(
+                "retrain_energy_uJ", d["event_counters"].get("retrain_energy_uJ", 0.0) + energy_uJ))
         if ok:
             def _rec(d: dict) -> None:
                 d.setdefault("last_adaptation", {})[model] = current_step
@@ -174,6 +178,11 @@ def execute_decision(
             drift_snapshot = dict(drift_result or {})
 
             def _job(model=current_model, reason=decision.reason) -> None:
+                # Metered like the original's periodic_retrain (pyRAPL pkg[0]
+                # around retrain.py), without the MAPE energy lock so monitoring
+                # is not blocked; added to the reported total (2026-10-13).
+                meter = Pkg0Meter()
+                meter.begin()
                 try:
                     ok_, archived_ = retrain.do_regression_retrain(
                         local_dataset_config, knowledge_dir, model, scaler,
@@ -182,7 +191,7 @@ def execute_decision(
                 except Exception:
                     logger.exception("background retrain of %s failed", model)
                     ok_, archived_ = False, None
-                _bg_results.put((model, ok_, archived_, reason))
+                _bg_results.put((model, ok_, archived_, reason, meter.end()))
 
             _bg_thread = threading.Thread(target=_job, daemon=True, name=f"retrain-{current_model}")
             _bg_thread.start()

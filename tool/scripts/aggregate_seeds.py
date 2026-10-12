@@ -5,7 +5,8 @@ Reads runs_seed*/<dataset>_<planner>[_<model>]_conc/run_manifest.json (+
 predictions.csv for model shares, and for window R² on runs made before the
 manifest carried it) and prints, per dataset, mean ± sd over seeds of:
 stream R², window R² (mean per-batch R², the planners' accuracy signal),
-energy (mean mJ per prediction, the HarmonE paper's metric), inference time,
+energy (all metered energy per prediction: inference + MAPE-K + retrains,
+and the per-prediction readings alone), inference time,
 switches, retrains, VMR restores, skipped adaptations and model shares. Then
 the trade-off against the ridge-LSTM line, retraining gains, SVR model sizes
 (initial vs after retraining), per-seed greedy energy on UCI and S5's LSTM
@@ -63,6 +64,8 @@ def load(run_dirs: list[Path]) -> dict:
                 "seed": rd.name, "status": j.get("status"),
                 "r2": tm.get("r2"), "wr2": wr2,
                 "e": j.get("energy_mJ"), "it": j.get("inference_time_ms"),
+                # per-prediction readings only (manifests before 2026-10-13: energy_mJ was this)
+                "ei": j.get("inference_energy_mJ", j.get("energy_mJ")),
                 "sw": ec.get("model_switches", 0), "rt": ec.get("retrains", 0),
                 "vmr": ec.get("vmr_events", 0), "busy": ec.get("adaptation_skipped_busy", 0),
                 "share": {m: share.get(m, 0) / n for m in MODELS},
@@ -94,12 +97,12 @@ def main() -> None:
             continue
         n_seeds = max(len(rows[(ds, k)]) for k in keys)
         print(f"\n### {SHORT[ds]} (mean ± sd over {n_seeds} seeds)\n")
-        print("| Planner | Stream R² | Window R² | mJ/pred | inf ms | Switches | Retrains | VMR | Skipped (busy) | ridge/svr/lstm % |")
-        print("|---|---|---|---|---|---|---|---|---|---|")
+        print("| Planner | Stream R² | Window R² | mJ/pred | of which inference | inf ms | Switches | Retrains | VMR | Skipped (busy) | ridge/svr/lstm % |")
+        print("|---|---|---|---|---|---|---|---|---|---|---|")
         for k in keys:
             sh = {m: np.mean([r["share"][m] for r in rows[(ds, k)]]) * 100 for m in MODELS}
             print(f"| {k} | {mean(ds,k,'r2'):.4f} ± {sd(ds,k,'r2'):.4f} | {mean(ds,k,'wr2'):.4f} ± {sd(ds,k,'wr2'):.4f} "
-                  f"| {mean(ds,k,'e'):.2f} ± {sd(ds,k,'e'):.2f} | {mean(ds,k,'it'):.3f} | {mean(ds,k,'sw'):.0f} "
+                  f"| {mean(ds,k,'e'):.2f} ± {sd(ds,k,'e'):.2f} | {mean(ds,k,'ei'):.2f} | {mean(ds,k,'it'):.3f} | {mean(ds,k,'sw'):.0f} "
                   f"| {mean(ds,k,'rt'):.0f} | {mean(ds,k,'vmr'):.0f} | {mean(ds,k,'busy'):.0f} "
                   f"| {sh['ridge']:.0f}/{sh['svr']:.0f}/{sh['lstm']:.0f} |")
 

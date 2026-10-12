@@ -445,8 +445,10 @@ def main() -> None:
     event_counters = dict(event_counters)
     _inf_uJ = float(task_metrics.get("total_inference_energy_uJ", 0.0)) if task_metrics else 0.0
     _mape_uJ = float(event_counters.get("mape_k_energy_uJ", 0.0))
-    event_counters["energy_used_uJ"] = round(_inf_uJ + _mape_uJ, 2)
-    event_counters["energy_used_mJ"] = round((_inf_uJ + _mape_uJ) / 1000.0, 4)
+    _retrain_uJ = float(event_counters.get("retrain_energy_uJ", 0.0))  # background retrains
+    event_counters["energy_used_uJ"] = round(_inf_uJ + _mape_uJ + _retrain_uJ, 2)
+    event_counters["energy_used_mJ"] = round((_inf_uJ + _mape_uJ + _retrain_uJ) / 1000.0, 4)
+    _n_valid = int((task_metrics or {}).get("n_samples", 0)) - int((task_metrics or {}).get("energy_invalid_steps", 0) or 0)
 
     # A clean exit with zero recorded steps is still a failure (e.g. the
     # stream produced nothing before crashing between polls) — matches
@@ -473,11 +475,18 @@ def main() -> None:
         "mape_cycles": mape_info.get("cycles", 0),
         "drift_checks": mape_info.get("drift_checks", 0),
         "final_model": kio.read_current_model(kp["model_file"]),
-        # The single reported energy (2026-10-09), as in the HarmonE paper's
-        # Table 2: mean per-prediction reading (mJ) over the whole stream,
-        # plus the mean inference time (ms) of the same window.
+        # The single reported energy (2026-10-13): all metered energy of the
+        # run — per-prediction readings + MAPE-K cycles and drift checks +
+        # background retrains — per prediction (mJ). The paper's Table 2
+        # charges retraining to its PRT baselines (LSTM+PRT 45.4 vs LSTM
+        # 32.9 mJ); the per-prediction mean alone missed it. Breakdown in
+        # energy_breakdown_J; inference_energy_mJ is the old per-prediction mean.
         "energy_metering": str(dataset_config.get("energy_metering", "batch")),
-        "energy_mJ": (task_metrics or {}).get("energy_per_inference_mJ"),
+        "energy_mJ": (round(event_counters["energy_used_mJ"] / _n_valid, 6)
+                      if task_metrics and _n_valid > 0 else None),
+        "inference_energy_mJ": (task_metrics or {}).get("energy_per_inference_mJ"),
+        "energy_breakdown_J": {"inference": round(_inf_uJ / 1e6, 3), "mape_k": round(_mape_uJ / 1e6, 3),
+                               "retrain": round(_retrain_uJ / 1e6, 3)},
         "inference_time_ms": (task_metrics or {}).get("mean_inference_time_ms"),
         # Failed cross-process weight reloads (audit D6); > 0 means some
         # counted adaptations never reached the stream.
