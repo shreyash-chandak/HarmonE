@@ -9,7 +9,7 @@
   "train_frac": 0.6,
   "train_window_rows": 17520,
   "val_frac": 0.15,
-  "stream_delay_s": 0.0,
+  "stream_delay_s": 0.02,
   "models": {
     "lstm": {
       "weights_path": "managed_system_regression/models/lstm_spot_prices.pt",

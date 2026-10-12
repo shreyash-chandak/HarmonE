@@ -8,7 +8,7 @@
   "seq_length": 96,
   "train_frac": 0.1,
   "val_frac": 0.05,
-  "stream_delay_s": 0.0,
+  "stream_delay_s": 0.02,
   "models": {
     "lstm": {
       "weights_path": "managed_system_regression/models/lstm_uci_electricity.pt",

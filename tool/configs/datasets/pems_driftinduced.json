@@ -7,7 +7,7 @@
   "stream_path": "data/pems/flow_data_test_driftInduced.csv",
   "value_column": "flow",
   "seq_length": 5,
-  "stream_delay_s": 0.0,
+  "stream_delay_s": 0.02,
 
   "models": {
     "lstm": {
