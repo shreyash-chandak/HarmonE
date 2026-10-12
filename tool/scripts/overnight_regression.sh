@@ -43,17 +43,27 @@ if [[ "${1:-}" == "--inner" ]]; then
         bash concurrent_harness/run_concurrent_regression_grid.sh --seed 1 --only-naive >> "$STATE/grid.log" 2>&1 \
             || bash concurrent_harness/run_concurrent_regression_grid.sh --seed 1 --only-naive >> "$STATE/grid.log" 2>&1 \
             || die "naive grid failed twice — see runs/logs/failed_regression_concurrent.log"
-        python3 - <<'PY' >> "$LOG" 2>&1 || die "naive runs have no energy readings (RAPL?) — not calibrating"
+        python3 - <<'PY' >> "$LOG" 2>&1 || die "naive runs failed, have no energy readings (RAPL?) or R² off the expected pool — see pipeline.log; not calibrating"
 import glob, json, sys
+# Expected static stream R² (laptop, 2026-10-13 configs). The LSTMs are deliberately
+# under-trained to match the paper's pool, so they are sensitive to the machine; stop
+# here rather than run five seeds on a different pool.
+EXPECTED = {"pems_driftinduced": {"ridge": 0.7595, "svr": 0.7895, "lstm": 0.9213},
+            "spot_prices_driftinduced": {"ridge": 0.7586, "svr": 0.7973, "lstm": 0.9328},
+            "uci_electricity_driftinduced": {"ridge": 0.7596, "svr": 0.7898, "lstm": 0.9256}}
 bad = []
 for m in sorted(glob.glob("runs/*_naive_*_conc/run_manifest.json")):
     j = json.load(open(m))
     if "_naive_prt_" in m:
         continue
     e = j.get("energy_mJ")
-    print(f"  {j['run_id']:45s} status={j.get('status')} energy_mJ={e} R2={j['task_metrics'].get('r2')}")
+    r2 = j["task_metrics"].get("r2")
+    exp = EXPECTED.get(j["dataset"], {}).get(j.get("pin_model"))
+    print(f"  {j['run_id']:45s} status={j.get('status')} energy_mJ={e} R2={r2} expected={exp}")
     if j.get("status") != "ok" or not e or e <= 0:
         bad.append(j["run_id"])
+    elif exp is not None and (r2 is None or abs(r2 - exp) > 0.02):
+        bad.append(f"{j['run_id']} (R2 {r2} vs expected {exp})")
 if len(glob.glob("runs/*_naive_*_conc/run_manifest.json")) < 18 or bad:
     print("bad or missing naive runs:", bad); sys.exit(1)
 PY

@@ -16,7 +16,7 @@
       "loader": "adapters.loaders.lstm_loader",
       "cost_class": "medium",
       "hyperparams": {
-        "train":   {"epochs": 45, "lr": 0.0005, "batch_size": 8},
+        "train":   {"epochs": 20, "lr": 0.0005, "batch_size": 8},
         "retrain": {"mode": "finetune"}
       }
     },
@@ -25,7 +25,7 @@
       "loader": "adapters.loaders.sklearn_loader",
       "cost_class": "light",
       "hyperparams": {
-        "train":   {"alpha": 6.8},
+        "train":   {"alpha": 6.4},
         "retrain": {}
       }
     },
@@ -34,7 +34,7 @@
       "loader": "adapters.loaders.sklearn_loader",
       "cost_class": "medium",
       "hyperparams": {
-        "train":   {"kernel": "linear", "C": 0.13, "tol": 0.001, "epsilon": 0.0005, "train_window_rows": 1200},
+        "train":   {"kernel": "linear", "C": 0.095, "tol": 0.001, "epsilon": 0.0005, "train_window_rows": 1200},
         "retrain": {}
       }
     }
