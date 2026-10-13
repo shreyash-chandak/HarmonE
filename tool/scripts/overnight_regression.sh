@@ -9,6 +9,8 @@
 #
 # Usage (from tool/, after git pull):
 #   bash scripts/overnight_regression.sh          # pre-flight here, then starts tmux session "harmone"
+#   bash scripts/overnight_regression.sh --seeds "1"            # baselines + calibration + seed 1 only
+#   bash scripts/overnight_regression.sh --seeds "1 2 3 4 5"    # later: resumes, runs seeds 2-5, summarises all
 #   tmux attach -t harmone                        # watch; detach with Ctrl-b d
 #   tail -f overnight/pipeline.log                # step log (per-run output: overnight/grid.log)
 #
@@ -24,7 +26,7 @@ cd "$TOOL_DIR" || exit 1
 STATE="$TOOL_DIR/overnight"
 LOG="$STATE/pipeline.log"
 SESSION="harmone"
-SEEDS=(1 2 3 4 5)
+read -r -a SEEDS <<< "${HARMONE_SEEDS:-1 2 3 4 5}"   # --seeds (outer) is passed to --inner via HARMONE_SEEDS
 DATASETS=(pems_driftinduced spot_prices_driftinduced uci_electricity_driftinduced)
 COOLDOWN_S=60
 VENV="$TOOL_DIR/../.venv/bin/activate"
@@ -124,7 +126,17 @@ command -v tmux >/dev/null || { echo "tmux not installed"; exit 1; }
 tmux has-session -t "$SESSION" 2>/dev/null && { echo "tmux session '$SESSION' already exists — attach with: tmux attach -t $SESSION"; exit 1; }
 [[ -f "$VENV" ]] || { echo "venv not found at $VENV"; exit 1; }
 
-if [[ "${1:-}" == "--fresh" ]]; then
+FRESH=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --fresh) FRESH=1; shift ;;
+        --seeds) read -r -a SEEDS <<< "$2"; shift 2 ;;
+        *) echo "unknown argument: $1 (use --fresh, --seeds \"1 2 3\")"; exit 1 ;;
+    esac
+done
+echo "seeds: ${SEEDS[*]}"
+
+if [[ "$FRESH" -eq 1 ]]; then
     ts="$(date +%Y%m%d_%H%M%S)"
     mkdir -p "old/$ts"
     for d in runs runs_calib runs_seed* overnight; do
@@ -163,7 +175,7 @@ if [[ ! -f "$STATE/calibration.done" ]] && ! git diff --quiet configs/; then
 fi
 echo "disk free: $(df -h . | awk 'NR==2{print $4}')"
 
-tmux new-session -d -s "$SESSION" "bash '$TOOL_DIR/scripts/overnight_regression.sh' --inner; echo; echo 'pipeline finished — press enter to close'; read"
+tmux new-session -d -s "$SESSION" "HARMONE_SEEDS='${SEEDS[*]}' bash '$TOOL_DIR/scripts/overnight_regression.sh' --inner; echo; echo 'pipeline finished — press enter to close'; read"
 echo
 echo "started in tmux session '$SESSION'."
 echo "  watch:   tmux attach -t $SESSION   (detach: Ctrl-b d)"
