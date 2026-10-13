@@ -13,7 +13,8 @@ the trade-off against the ridge-LSTM line, retraining gains, SVR model sizes
 share on PeMS.
 
 Usage (from tool/):
-    python3 scripts/aggregate_seeds.py --runs runs_seed1 runs_seed2 runs_seed3 runs_seed4 runs_seed5
+    python3 scripts/aggregate_seeds.py --runs runs_calib runs_seed1 runs_seed2 runs_seed3 runs_seed4 runs_seed5
+(single-model baselines run once, into runs_calib, since 2026-10-13)
 """
 
 from __future__ import annotations
@@ -96,7 +97,7 @@ def main() -> None:
         if not keys:
             continue
         n_seeds = max(len(rows[(ds, k)]) for k in keys)
-        print(f"\n### {SHORT[ds]} (mean ± sd over {n_seeds} seeds)\n")
+        print(f"\n### {SHORT[ds]} (mean ± sd over {n_seeds} seeds; single-model baselines run once, sd 0)\n")
         print("| Planner | Stream R² | Window R² | mJ/pred | of which inference | inf ms | Switches | Retrains | VMR | Skipped (busy) | ridge/svr/lstm % |")
         print("|---|---|---|---|---|---|---|---|---|---|---|")
         for k in keys:

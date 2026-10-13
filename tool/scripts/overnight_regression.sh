@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # scripts/overnight_regression.sh — unattended regression pipeline in tmux:
-#   1. naive runs (seed 1)                 -> runs_calib/
+#   1. single-model baselines (naive, naive_prt; seed 1) -> runs_calib/
 #   2. calibrate E_m/E_M/min_accuracy/min_score from them (--write)
-#   3. full grid for seeds 1..5            -> runs_seed1/ .. runs_seed5/
+#   3. adaptive planners for seeds 1..5    -> runs_seed1/ .. runs_seed5/
+#      (the baselines run once — their R² does not depend on the seed — and
+#      the summary takes them from runs_calib; 2026-10-13)
 #   4. summary table                       -> overnight/summary.txt
 #
 # Usage (from tool/, after git pull):
@@ -94,9 +96,9 @@ PY
         [[ -f "$STATE/seed$s.done" ]] && continue
         log "[3/4] seed $s grid"
         if [[ -d "runs_seed$s" ]]; then mv "runs_seed$s" runs; fi   # resume a partial seed
-        if ! bash concurrent_harness/run_concurrent_regression_grid.sh --seed "$s" >> "$STATE/grid.log" 2>&1; then
+        if ! bash concurrent_harness/run_concurrent_regression_grid.sh --seed "$s" --skip-naive >> "$STATE/grid.log" 2>&1; then
             log "seed $s: some runs failed — retrying the missing ones once"
-            bash concurrent_harness/run_concurrent_regression_grid.sh --seed "$s" >> "$STATE/grid.log" 2>&1 \
+            bash concurrent_harness/run_concurrent_regression_grid.sh --seed "$s" --skip-naive >> "$STATE/grid.log" 2>&1 \
                 || log "seed $s: still has failed runs (kept going) — see runs_seed$s/logs/failed_regression_concurrent.log"
         fi
         mv runs "runs_seed$s"
@@ -107,11 +109,11 @@ PY
 
     # 4. summary
     log "[4/4] summary"
-    python3 scripts/aggregate_seeds.py --runs $(printf 'runs_seed%s ' "${SEEDS[@]}") > "$STATE/summary.txt" 2>&1
+    python3 scripts/aggregate_seeds.py --runs runs_calib $(printf 'runs_seed%s ' "${SEEDS[@]}") > "$STATE/summary.txt" 2>&1
     python3 experiments/drift_detection_eval.py --runs $(printf 'runs_seed%s ' "${SEEDS[@]}") \
         --csv "$STATE/drift_detection.csv" >> "$STATE/summary.txt" 2>&1
     cat "$STATE/summary.txt" >> "$LOG"
-    log "=== pipeline DONE — results in runs_seed1..5, summary in overnight/summary.txt ==="
+    log "=== pipeline DONE — baselines in runs_calib, planners in runs_seed1..5, summary in overnight/summary.txt ==="
     log "configs/ now hold the new calibration (uncommitted on this machine; see overnight/calibration.diff)"
     exit 0
 fi

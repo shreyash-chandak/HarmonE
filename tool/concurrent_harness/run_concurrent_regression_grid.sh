@@ -38,10 +38,12 @@ set -uo pipefail
 
 SEED=1
 ONLY_NAIVE=0
+SKIP_NAIVE=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --seed) SEED="$2"; shift 2 ;;
         --only-naive) ONLY_NAIVE=1; shift ;;   # naive runs only, for experiments/calibrate_from_naive_runs.py
+        --skip-naive) SKIP_NAIVE=1; shift ;;   # adaptive planners only (single-model baselines run once, 2026-10-13)
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
 done
@@ -66,8 +68,9 @@ DRIFT_CSV["spot_prices_driftinduced"]="$TOOL_DIR/data/spot_prices/spot_prices_dr
 # (monitor_interval, default 50 — matching run_experiment.py's own
 # per-monitor_interval cycle exactly) rather than on a fixed wall-clock
 # schedule, so decision cadence no longer depends on how fast the stream
-# runs. Every run uses each dataset config's own stream_delay_s (0.0 for all
-# *_driftinduced configs) — i.e. full speed, matching run_experiment.py.
+# runs. Every run uses each dataset config's own stream_delay_s (the pacing
+# sleep between predictions; 7.5 ms for the *_driftinduced configs since
+# 2026-10-13).
 
 MASTER_LOG="$LOG_DIR/master_regression_concurrent.log"
 FAILED_LOG="$LOG_DIR/failed_regression_concurrent.log"
@@ -124,6 +127,7 @@ if [ "$MISSING" -gt 0 ]; then
 fi
 
 for dataset in "${DATASETS[@]}"; do
+  if [ "$SKIP_NAIVE" -eq 0 ]; then
 
     # Naive: one run per model (pinned). t1 still runs for naive (see
     # mape/manage.py — it starts unconditionally so the periodic Monitor/
@@ -140,6 +144,7 @@ for dataset in "${DATASETS[@]}"; do
         _run_one "${dataset}_naive_prt_${model}_conc" \
             --dataset "$dataset" --planner naive_prt --pin-model "$model"
     done
+  fi
 
     # All adaptive planners: one run each (full model pool).
     [ "$ONLY_NAIVE" -eq 1 ] && continue
