@@ -7,7 +7,7 @@
   "stream_path": "data/pems/flow_data_test_driftInduced.csv",
   "value_column": "flow",
   "seq_length": 5,
-  "stream_delay_s": 0.02,
+  "stream_delay_s": 0.0075,
 
   "models": {
     "lstm": {
@@ -16,7 +16,7 @@
       "cost_class": "heavy",
       "hyperparams": {
         "train":   {"epochs": 5, "lr": 0.00009, "batch_size": 16},
-        "retrain": {"mode": "finetune"}
+        "retrain": {"epochs": 15, "lr": 0.001, "batch_size": 16}
       }
     },
     "ridge": {

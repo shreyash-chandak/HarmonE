@@ -9,7 +9,7 @@
   "train_frac": 0.6,
   "train_window_rows": 17520,
   "val_frac": 0.15,
-  "stream_delay_s": 0.02,
+  "stream_delay_s": 0.0075,
   "models": {
     "lstm": {
       "weights_path": "managed_system_regression/models/lstm_spot_prices.pt",
@@ -17,7 +17,7 @@
       "cost_class": "medium",
       "hyperparams": {
         "train":   {"epochs": 20, "lr": 0.0005, "batch_size": 8},
-        "retrain": {"mode": "finetune"}
+        "retrain": {"epochs": 15, "lr": 0.001, "batch_size": 16}
       }
     },
     "ridge": {

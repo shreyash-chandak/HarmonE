@@ -8,7 +8,7 @@
   "seq_length": 96,
   "train_frac": 0.1,
   "val_frac": 0.05,
-  "stream_delay_s": 0.02,
+  "stream_delay_s": 0.0075,
   "models": {
     "lstm": {
       "weights_path": "managed_system_regression/models/lstm_uci_electricity.pt",
@@ -16,7 +16,7 @@
       "cost_class": "medium",
       "hyperparams": {
         "train":   {"epochs": 3, "lr": 0.0002, "batch_size": 8},
-        "retrain": {"mode": "finetune"}
+        "retrain": {"epochs": 15, "lr": 0.001, "batch_size": 16}
       }
     },
     "ridge": {
