@@ -39,6 +39,21 @@ class PlanningContext:
     telemetry: dict = field(default_factory=dict)
 
 
+def prt_due(ctx: "PlanningContext", default_interval: int) -> bool:
+    """Whether this cycle crossed a multiple of prt_interval (2026-10-14).
+
+    Planning happens once per monitor_interval rows, so with a cycle that does
+    not divide prt_interval (260 vs 3200) `step % prt_interval == 0` almost
+    never holds (first at lcm = 41 600). This fires on the first cycle at or
+    past each multiple instead; identical to the modulo test whenever
+    monitor_interval divides prt_interval (e.g. 50 vs 3200).
+    """
+    p = int(ctx.thresholds.get("prt_interval", default_interval))
+    mi = int(ctx.thresholds.get("monitor_interval", 50))
+    s = ctx.current_step
+    return s > 0 and s // p > max(s - mi, 0) // p
+
+
 def is_observed(ctx: "PlanningContext", model: str) -> bool:
     """Whether `model` has real EMA estimates (audit A5).
 

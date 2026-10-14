@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import random
 
-from .base import Planner, PlanningContext, PlanDecision, REGISTRY
+from .base import Planner, PlanningContext, PlanDecision, REGISTRY, prt_due
 
 PRT_INTERVAL = 3200
 
@@ -26,7 +26,7 @@ class RandomSwitchPRTPlanner(Planner):
 
     def plan(self, ctx: PlanningContext) -> PlanDecision:
         prt_interval = int(ctx.thresholds.get("prt_interval", PRT_INTERVAL))
-        if ctx.current_step > 0 and ctx.current_step % prt_interval == 0:
+        if prt_due(ctx, PRT_INTERVAL):
             return PlanDecision(
                 action="retrain",
                 reason=f"random_switch_prt: PRT trigger at step {ctx.current_step} (interval={prt_interval})",

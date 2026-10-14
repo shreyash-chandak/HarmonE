@@ -9,7 +9,8 @@ Threads (2026-09-28 redesign, audit D4/D8 — both start for EVERY planner):
     Monitor->Analyse->Plan->Execute cycle per monitor_interval batch, with
     violation AND drift passed into the same _plan() call, exactly like
     experiments/run_experiment.py. Also drives PRT (naive_prt /
-    random_switch_prt check current_step % prt_interval inside plan()).
+    random_switch_prt fire on the first cycle past each prt_interval multiple,
+    core/planners/base.py prt_due()).
   - t2 (drift_thread.py): drift detection only (KL + VMR lookup), published to
     drift_state.json for t1. Mirrors the original's separate drift thread in
     role, but never acts on its own.
