@@ -4,7 +4,8 @@ real), so a broken run is caught before hours of seeds are spent on it
 (2026-10-18).
 
 Per run (runs/<dataset>_<planner>[_<model>]_conc/):
-  FAIL  status not ok; rows != stream length; MAPE cycles != rows // monitor_interval;
+  FAIL  status not ok; wall time per row outside (delay, 1.5 x delay + 4 ms) on
+        real runs (catches doubled or missing pacing); rows != stream length; MAPE cycles != rows // monitor_interval;
         mape_events rows != cycles; drift checks missing; reload failures; NaN
         predictions; a pinned run served another model; batches served by mixed
         models; naive runs that adapted; naive static R² off the expected pool;
@@ -112,6 +113,13 @@ def check_run(run: Path, naive_dirs: list[Path], cache: dict) -> tuple[dict, lis
     mixed = sum(1 for a in range(0, n - n % mi, mi) if len(set(served[a:a + mi])) > 1)
     if mixed:
         fail.append(f"{mixed} batches served by more than one model")
+
+    # pacing: wall time per row = one stream_delay_s + inference + overhead
+    delay = float(thr.get("stream_delay_s", 0.0))
+    if not smoke and delay > 0 and n:
+        per_row = float(j.get("elapsed_s", 0.0)) / n
+        if not delay < per_row < 1.5 * delay + 0.004:
+            fail.append(f"{1000 * per_row:.1f} ms per row for a {1000 * delay:.1f} ms delay")
 
     # energy
     if not j.get("energy_mJ") or j["energy_mJ"] <= 0:

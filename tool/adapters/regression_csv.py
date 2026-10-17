@@ -24,7 +24,8 @@ Config schema (all keys read from the dataset config JSON):
   Shared keys:
     value_column      : name of the target column (e.g. "flow")
     seq_length        : number of timesteps per input window (e.g. 5)
-    stream_delay_s    : seconds to sleep between yields (default 0.0)
+    stream_delay_s    : not used here; the consumer sleeps between predictions
+                        (concurrent_harness/inference.py, run_experiment.py)
     models            : dict of model specs (name → {weights_path, loader, cost_class})
     induced_drift     : optional; {type, start_frac, end_frac, scale, shift}
 """
@@ -32,7 +33,6 @@ Config schema (all keys read from the dataset config JSON):
 from __future__ import annotations
 
 import os
-import time
 from typing import Any, Iterator
 
 import numpy as np
@@ -74,7 +74,6 @@ class RegressionCSVAdapter(DatasetAdapter):
             self._train_end = int(len(self._values) * train_frac)
 
         self._seq_length = int(config.get("seq_length", 5))
-        self._stream_delay = float(config.get("stream_delay_s", 0.0))
         self._induced_drift_cfg = config.get("induced_drift", None)
         self._model_specs = {
             name: ModelSpec(
@@ -111,9 +110,9 @@ class RegressionCSVAdapter(DatasetAdapter):
         for i in range(len(test_values) - seq):
             inputs = test_values[i : i + seq]
             truth = test_values[i + seq]
+            # No sleep here (2026-10-18): inference.py also slept stream_delay_s,
+            # so every paced run waited twice the configured delay.
             yield Sample(index=i, inputs=inputs, ground_truth=truth)
-            if self._stream_delay > 0:
-                time.sleep(self._stream_delay)
 
     def offline_labels(self) -> np.ndarray:
         """Ground-truth values for the full test split."""

@@ -2963,8 +2963,6 @@ def run_experiment(
     # ── Adapter ───────────────────────────────────────────────────────────────
     adapter = _build_adapter(dataset_config, configs_path)
     effective_delay = float(thresholds.get("stream_delay_s", stream_delay_s))
-    if hasattr(adapter, "_stream_delay"):
-        adapter._stream_delay = effective_delay
 
     domain = dataset_config.get("domain", "regression")
     is_cv = (domain == "cv")
@@ -3225,8 +3223,8 @@ def run_experiment(
                 "energy_valid": _em.valid,
             })
 
-        if stream_delay_s > 0:
-            time.sleep(stream_delay_s)
+        if effective_delay > 0:  # the adapter no longer sleeps (2026-10-18)
+            time.sleep(effective_delay)
 
         # ── MAPE cycle ────────────────────────────────────────────────────────
         step += 1

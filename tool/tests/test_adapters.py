@@ -79,6 +79,20 @@ class TestRegressionCSVAdapter:
         finally:
             os.unlink(path)
 
+    def test_stream_does_not_sleep(self):
+        """Pacing is the consumer's job (2026-10-18): with the adapter also
+        sleeping, every paced run waited twice stream_delay_s."""
+        import time
+        from adapters.regression_csv import RegressionCSVAdapter
+        path = self._make_csv(1000)
+        try:
+            cfg = dict(self._make_config(path, train_frac=0.5), stream_delay_s=0.05)
+            t0 = time.perf_counter()
+            n = sum(1 for _ in RegressionCSVAdapter(cfg).stream())
+            assert n == 495 and time.perf_counter() - t0 < 2.0  # 495 x 50 ms would be ~25 s
+        finally:
+            os.unlink(path)
+
     def test_stream_yields_correct_count(self):
         from adapters.regression_csv import RegressionCSVAdapter
         path = self._make_csv(100)
