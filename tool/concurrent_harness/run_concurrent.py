@@ -102,6 +102,28 @@ def _model_file_stats(dataset_config: dict, knowledge_dir: Path) -> dict:
     return out
 
 
+def _smoke_config(dataset_config: dict, dataset: str, energy_from: Path) -> dict:
+    """Config for a smoke check (2026-10-18): same models, thresholds and
+    planner logic, but no pacing, weights loaded once (reloaded only after a
+    retrain/restore), and each prediction charged its model's mean
+    per-prediction reading from the real naive runs in `energy_from`, so the
+    planners see realistic energies. Background retrains are waited for (see
+    mape/execute.py). Checks the plumbing in minutes; its energy and timing are
+    not results."""
+    cfg = dict(dataset_config)
+    fixed = {}
+    for m in cfg.get("models", {}):
+        mf = energy_from / f"{dataset}_naive_{m}_conc" / "run_manifest.json"
+        if not mf.exists():
+            sys.exit(f"--smoke: {mf} not found (need the real naive runs for per-model energies)")
+        j = json.loads(mf.read_text())
+        fixed[m] = round(float(j.get("inference_energy_mJ") or j["energy_mJ"]) * 1000.0, 1)
+    cfg.update({"stream_delay_s": 0.0, "reload_model_per_step": False, "energy_metering": "fixed",
+                "fixed_energy_uJ": fixed, "smoke_wait_retrain": True,
+                "smoke_energy_source": str(energy_from)})
+    return cfg
+
+
 def _build_task_metrics_and_energy_by_model(predictions_file: Path, is_cv: bool,
                                             interval: int = 50, window: int = 1200) -> tuple[dict, dict]:
     import csv
@@ -226,6 +248,11 @@ def main() -> None:
     p.add_argument("--verbose", action="store_true",
                     help="DEBUG-level logging, propagated to both inference.py and "
                          "mape/manage.py subprocesses too.")
+    p.add_argument("--smoke", action="store_true",
+                    help="Fast plumbing check: no pacing, no per-prediction reload, fixed "
+                         "per-model energies from --smoke-energy-from (see _smoke_config).")
+    p.add_argument("--smoke-energy-from", default=str(_TOOL_DIR / "runs_calib"),
+                    help="Runs dir with the real naive runs whose per-prediction energies --smoke uses.")
     args = p.parse_args()
 
     kio.setup_logging(args.verbose)
@@ -296,9 +323,19 @@ def main() -> None:
             dataset_config, run_dir,
         )
 
+    child_configs_dir = args.configs_dir
+    if args.smoke:
+        dataset_config = _smoke_config(dataset_config, args.dataset, Path(args.smoke_energy_from))
+        smoke_dir = run_dir / "_smoke_configs"
+        (smoke_dir / "datasets").mkdir(parents=True, exist_ok=True)
+        with open(smoke_dir / "datasets" / f"{args.dataset}.json", "w") as f:
+            json.dump(dataset_config, f, indent=2)
+        child_configs_dir = str(smoke_dir)
+        logger.info("run_concurrent: SMOKE check, fixed energies %s", dataset_config["fixed_energy_uJ"])
+
     inf_cmd = [
         sys.executable, str(_THIS_DIR / "inference.py"),
-        "--dataset", args.dataset, "--configs-dir", args.configs_dir,
+        "--dataset", args.dataset, "--configs-dir", child_configs_dir,
         "--knowledge-dir", str(knowledge_dir), "--planner", args.planner,
         "--seed", str(args.seed),
     ]
@@ -311,7 +348,7 @@ def main() -> None:
 
     mgr_cmd = [
         sys.executable, str(_THIS_DIR / "mape" / "manage.py"),
-        "--dataset", args.dataset, "--configs-dir", args.configs_dir,
+        "--dataset", args.dataset, "--configs-dir", child_configs_dir,
         "--knowledge-dir", str(knowledge_dir), "--planner", args.planner,
         "--seed", str(args.seed),
     ]
@@ -463,6 +500,7 @@ def main() -> None:
         "pin_model": args.pin_model,
         "seed": args.seed,
         "mode": "concurrent",
+        "smoke": bool(args.smoke),
         "compute_device": compute_device,
         "started_at": start_ts,
         "finished_at": end_ts,

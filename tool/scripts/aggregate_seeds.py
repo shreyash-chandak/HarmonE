@@ -79,6 +79,7 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--runs", nargs="+", required=True)
     args = p.parse_args()
+    sys.stdout.reconfigure(encoding="utf-8")  # R², Δ on a Windows console
     rows = load([Path(r) for r in args.runs])
 
     def mean(ds, k, key):

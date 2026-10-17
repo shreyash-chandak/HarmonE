@@ -260,6 +260,11 @@ def main() -> None:
     per_prediction = (str(dataset_config.get("energy_metering", "batch")) == "per_prediction"
                       and not is_cv)
     pkg0 = Pkg0Meter() if per_prediction else None
+    # Smoke check (2026-10-18, run_concurrent.py --smoke): no meter; each row
+    # gets its model's mean per-prediction reading from earlier real runs, so
+    # the planners see realistic energies at full speed (and without RAPL).
+    fixed_energy = (dataset_config.get("fixed_energy_uJ")
+                    if str(dataset_config.get("energy_metering")) == "fixed" and not is_cv else None)
     pred_fields = kio.PREDICTION_FIELDS_CV if is_cv else kio.PREDICTION_FIELDS_REGRESSION
     batch_rows: list[dict] = []
     batch_lock = contextlib.ExitStack()
@@ -414,7 +419,16 @@ def main() -> None:
             # Blocking cross-process lock — see the CV branch above.
             energy_uJ, energy_valid = 0.0, True  # batch mode: set by _close_batch
             inference_time_s = None
-            if per_prediction:
+            if fixed_energy is not None:
+                t0 = time.time()
+                try:
+                    raw_pred = predict_fn(scaled_inputs)
+                except Exception as exc:
+                    logger.warning("Prediction failed at step %d: %s", step, exc)
+                    raw_pred = 0.0
+                inference_time_s = time.time() - t0
+                energy_uJ, energy_valid = float(fixed_energy[current_model]), True
+            elif per_prediction:
                 pkg0.begin()
                 t0 = time.time()
                 try:

@@ -196,6 +196,11 @@ def execute_decision(
             _bg_thread = threading.Thread(target=_job, daemon=True, name=f"retrain-{current_model}")
             _bg_thread.start()
             logger.info("retrain started in background: %s (%s)", current_model, decision.reason)
+            if local_dataset_config.get("smoke_wait_retrain"):
+                # Smoke check: without pacing the stream would run thousands of
+                # rows past a retrain; waiting keeps the new weights' arrival
+                # (in rows) close to a paced run. Applied next cycle as usual.
+                _bg_thread.join()
             return new_model
         else:
             ok, archived = retrain.do_regression_retrain(

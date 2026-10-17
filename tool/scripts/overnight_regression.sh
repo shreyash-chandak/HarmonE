@@ -71,6 +71,7 @@ for m in sorted(glob.glob("runs/*_naive_*_conc/run_manifest.json")):
 if len(glob.glob("runs/*_naive_*_conc/run_manifest.json")) < 18 or bad:
     print("bad or missing naive runs:", bad); sys.exit(1)
 PY
+        python3 scripts/check_runs.py --runs runs > "$STATE/check_calib.txt" 2>&1 || die "baseline runs failed scripts/check_runs.py — see overnight/check_calib.txt; not calibrating"
         mv runs runs_calib
         touch "$STATE/naive.done"
     fi
@@ -104,8 +105,9 @@ PY
                 || log "seed $s: still has failed runs (kept going) — see runs_seed$s/logs/failed_regression_concurrent.log"
         fi
         mv runs "runs_seed$s"
+        python3 scripts/check_runs.py --runs "runs_seed$s" > "$STATE/check_seed$s.txt" 2>&1 || die "seed $s failed scripts/check_runs.py — see overnight/check_seed$s.txt; stopping before the next seed"
         touch "$STATE/seed$s.done"
-        log "seed $s done ($(ls -d runs_seed$s/*_conc 2>/dev/null | wc -l) runs)"
+        log "seed $s done ($(ls -d runs_seed$s/*_conc 2>/dev/null | wc -l) runs, checks passed)"
         sleep "$COOLDOWN_S"
     done
 
