@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # scripts/overnight_regression.sh — unattended regression pipeline in tmux:
+#   0. one real run as a pacing check     -> runs_pacecheck/ (abort if off)
 #   1. single-model baselines (naive, naive_prt; seed 1) -> runs_calib/
 #   2. calibrate E_m/E_M/min_accuracy/min_score from them (--write)
 #   3. adaptive planners for seeds 1..5    -> runs_seed1/ .. runs_seed5/
@@ -39,6 +40,22 @@ if [[ "${1:-}" == "--inner" ]]; then
     # shellcheck disable=SC1090
     source "$VENV"
     log "=== pipeline start (git $(git rev-parse --short HEAD)) ==="
+
+    # 0. one real run (~4 min): pacing, metering and reloads as in the grid.
+    #    Catches wrong pacing (e.g. the doubled sleep fixed 2026-10-18) before
+    #    3.5 h of baselines instead of after them.
+    if [[ ! -f "$STATE/pacecheck.done" ]]; then
+        log "[0/4] pacing check (pems naive lstm, real mode)"
+        rm -rf runs_pacecheck
+        python3 concurrent_harness/run_concurrent.py --dataset pems_driftinduced --planner naive --pin-model lstm \
+            --run-id pems_driftinduced_naive_lstm_conc --runs-dir runs_pacecheck --seed 1 >> "$STATE/grid.log" 2>&1 \
+            || die "pacing check run failed — see overnight/grid.log"
+        python3 scripts/check_runs.py --runs runs_pacecheck > "$STATE/check_pace.txt" 2>&1 \
+            || die "pacing check failed scripts/check_runs.py — see overnight/check_pace.txt"
+        python3 -c "import json; j = json.load(open('runs_pacecheck/pems_driftinduced_naive_lstm_conc/run_manifest.json')); \
+print(f\"  {j.get('cpu')}: {1000 * j['elapsed_s'] / j['total_steps']:.2f} ms per row, {j['energy_mJ']:.1f} mJ per prediction, R2 {j['task_metrics']['r2']:.4f}\")" >> "$LOG" 2>&1
+        touch "$STATE/pacecheck.done"
+    fi
 
     # 1. naive runs for the calibration
     if [[ ! -f "$STATE/naive.done" ]]; then
@@ -141,7 +158,7 @@ echo "seeds: ${SEEDS[*]}"
 if [[ "$FRESH" -eq 1 ]]; then
     ts="$(date +%Y%m%d_%H%M%S)"
     mkdir -p "old/$ts"
-    for d in runs runs_calib runs_seed* overnight; do
+    for d in runs runs_calib runs_pacecheck runs_seed* overnight; do
         [[ -e "$d" ]] && mv "$d" "old/$ts/"
     done
     mkdir -p "$STATE"
@@ -171,6 +188,15 @@ for f in data/pems/flow_data_test_driftInduced.csv data/uci_electricity/uci_elec
          data/spot_prices/spot_prices_driftInduced.csv; do
     [[ -f "$f" ]] || { echo "missing $f"; exit 1; }
 done
+# base weights must be the shared ones (a missing file would be retrained on
+# this machine, giving a different pool); print checksums to compare machines
+for ds in "${DATASETS[@]}"; do
+    for w in $(grep -o '"weights_path": "[^"]*"' "configs/datasets/$ds.json" | cut -d'"' -f4); do
+        [[ -f "$w" ]] || { echo "missing model weights $w — copy managed_system_regression/models/ from the other machine"; exit 1; }
+    done
+done
+echo "model checksums (compare across machines):"
+(cd managed_system_regression/models && sha256sum *.pt *.pkl | cut -c1-12,65-)
 if [[ ! -f "$STATE/calibration.done" ]] && ! git diff --quiet configs/; then
     echo "WARNING: configs/ has local changes (they will be overwritten by the calibration):"
     git diff --stat configs/

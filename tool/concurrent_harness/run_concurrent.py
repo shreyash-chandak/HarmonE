@@ -22,6 +22,7 @@ import csv
 import json
 import logging
 import os
+import platform
 import subprocess
 import sys
 import time
@@ -49,6 +50,18 @@ POLL_INTERVAL_S = 1.0
 # mid-training and reports the whole run as FAILED. Sized well above the
 # slowest observed real retrain, not just "a bit more than usual."
 SHUTDOWN_TIMEOUT_S = 600.0
+
+
+def _cpu_model() -> str:
+    """CPU model name, so runs from different machines are never pooled by
+    accident (energy readings are per machine; 2026-10-20)."""
+    try:
+        for line in Path("/proc/cpuinfo").read_text().splitlines():
+            if line.startswith("model name"):
+                return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return platform.processor() or "unknown"
 
 
 def build_run_id(dataset: str, planner: str, pin_model: str | None) -> str:
@@ -502,6 +515,8 @@ def main() -> None:
         "mode": "concurrent",
         "smoke": bool(args.smoke),
         "compute_device": compute_device,
+        "host": platform.node(),
+        "cpu": _cpu_model(),
         "started_at": start_ts,
         "finished_at": end_ts,
         "elapsed_s": round(elapsed_s, 3),
