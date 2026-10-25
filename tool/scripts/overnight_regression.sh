@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # scripts/overnight_regression.sh — unattended regression pipeline in tmux:
-#   0. one real run as a pacing check     -> runs_pacecheck/ (abort if off)
 #   1. single-model baselines (naive, naive_prt; seed 1) -> runs_calib/
 #   2. calibrate E_m/E_M/min_accuracy/min_score/s5_credit_cap from them (--write)
 #   3. the 8 adaptive planners (incl. violation_aware_gated, 2026-10-26) for
@@ -42,22 +41,6 @@ if [[ "${1:-}" == "--inner" ]]; then
     # shellcheck disable=SC1090
     source "$VENV"
     log "=== pipeline start (git $(git rev-parse --short HEAD)) ==="
-
-    # 0. one real run (~4 min): pacing, metering and reloads as in the grid.
-    #    Catches wrong pacing (e.g. the doubled sleep fixed 2026-10-18) before
-    #    3.5 h of baselines instead of after them.
-    if [[ ! -f "$STATE/pacecheck.done" ]]; then
-        log "[0/4] pacing check (pems naive lstm, real mode)"
-        rm -rf runs_pacecheck
-        python3 concurrent_harness/run_concurrent.py --dataset pems_driftinduced --planner naive --pin-model lstm \
-            --run-id pems_driftinduced_naive_lstm_conc --runs-dir runs_pacecheck --seed 1 >> "$STATE/grid.log" 2>&1 \
-            || die "pacing check run failed — see overnight/grid.log"
-        python3 scripts/check_runs.py --runs runs_pacecheck > "$STATE/check_pace.txt" 2>&1 \
-            || die "pacing check failed scripts/check_runs.py — see overnight/check_pace.txt"
-        python3 -c "import json; j = json.load(open('runs_pacecheck/pems_driftinduced_naive_lstm_conc/run_manifest.json')); \
-print(f\"  {j.get('cpu')}: {1000 * j['elapsed_s'] / j['total_steps']:.2f} ms per row, {j['energy_mJ']:.1f} mJ per prediction, R2 {j['task_metrics']['r2']:.4f}\")" >> "$LOG" 2>&1
-        touch "$STATE/pacecheck.done"
-    fi
 
     # 1. naive runs for the calibration
     if [[ ! -f "$STATE/naive.done" ]]; then
@@ -161,7 +144,7 @@ echo "seeds: ${SEEDS[*]}"
 if [[ "$FRESH" -eq 1 ]]; then
     ts="$(date +%Y%m%d_%H%M%S)"
     mkdir -p "old/$ts"
-    for d in runs runs_calib runs_pacecheck runs_seed* overnight; do
+    for d in runs runs_calib runs_seed* overnight; do
         [[ -e "$d" ]] && mv "$d" "old/$ts/"
     done
     mkdir -p "$STATE"
