@@ -160,5 +160,6 @@ tool/logs/
 tool/managed_system_*/models/
 tool/managed_system_*/base_models/
 tool/overnight/
+tool/overnight_partial/
 tool/old/
 tool/diagnostics/
