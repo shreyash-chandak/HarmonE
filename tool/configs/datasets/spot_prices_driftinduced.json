@@ -26,7 +26,7 @@
       "cost_class": "light",
       "hyperparams": {
         "train":   {"alpha": 6.4},
-        "retrain": {}
+        "retrain": {"regularisation_factor": 26}
       }
     },
     "svr": {
@@ -35,7 +35,7 @@
       "cost_class": "medium",
       "hyperparams": {
         "train":   {"kernel": "linear", "C": 0.095, "tol": 0.001, "epsilon": 0.0005, "train_window_rows": 1200},
-        "retrain": {}
+        "retrain": {"regularisation_factor": 22}
       }
     }
   },

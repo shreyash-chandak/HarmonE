@@ -14,7 +14,7 @@ Per run (runs/<dataset>_<planner>[_<model>]_conc/):
         (predictions after the first retrain identical to the naive run's);
         missing/zero energy; Python tracebacks in the run log; smoke runs with
         busy-skipped retrains (they wait for retrains).
-  WARN  ridge/SVR retrain gain over the 0.075 cap; a retrain that lowers R²;
+  WARN  ridge/SVR retrain gain over the 0.075 cap; naive_prt R² over PRT_MAX; a retrain that lowers R²;
         busy-skipped adaptations (real runs); "no drift result from t2" log lines;
         energy readings missing on > 1 % of rows (real runs).
 
@@ -45,6 +45,8 @@ EXPECTED = {"pems_driftinduced": {"ridge": 0.7595, "svr": 0.7895, "lstm": 0.9213
             "spot_prices_driftinduced": {"ridge": 0.7586, "svr": 0.7973, "lstm": 0.9328},
             "uci_electricity_driftinduced": {"ridge": 0.7596, "svr": 0.7898, "lstm": 0.9256}}
 GAIN_CAP = 0.075  # user cap on ridge/SVR retraining gains
+# user caps on naive_prt stream R² (2026-10-26)
+PRT_MAX = {"spot_prices_driftinduced": {"ridge": 0.81, "svr": 0.85}}
 
 
 def r2(y, p):
@@ -175,6 +177,9 @@ def check_run(run: Path, naive_dirs: list[Path], cache: dict) -> tuple[dict, lis
                 info["gain"] = gain
                 if pin in ("ridge", "svr") and gain > GAIN_CAP:
                     warn.append(f"retrain gain {gain:+.3f} over the {GAIN_CAP} cap")
+                cap = PRT_MAX.get(ds, {}).get(pin)
+                if cap is not None and tm["r2"] > cap:
+                    warn.append(f"PRT R² {tm['r2']:.4f} over the {cap} cap")
                 if gain < -0.01:
                     warn.append(f"retraining lowers R² ({gain:+.3f})")
     if info["busy"]:
