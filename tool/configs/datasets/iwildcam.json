@@ -65,7 +65,6 @@
   "E_m": 0,
   "E_M": 10000000,
   "tau_drift": 0.01,
-  "drift_reference": "fixed",
   "switch_cooldown_s": 30,
   "planner": "harmone_original",
   "ema_head_start": 0.1,

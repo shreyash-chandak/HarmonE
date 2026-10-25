@@ -13,7 +13,10 @@ Per run (runs/<dataset>_<planner>[_<model>]_conc/):
         failed retrains; retrained weights that never reached the stream
         (predictions after the first retrain identical to the naive run's);
         missing/zero energy; Python tracebacks in the run log; smoke runs with
-        busy-skipped retrains (they wait for retrains).
+        busy-skipped retrains (they wait for retrains); S5 runs (both variants)
+        with s5_credit missing or outside ±s5_credit_cap or cycles without an
+        s5_reason; new-S5 runs with an energy-violation noop other than
+        "already_cheapest" or a switch on drift (2026-10-26).
   WARN  ridge/SVR retrain gain over the 0.075 cap; naive_prt R² over PRT_MAX; a retrain that lowers R²;
         busy-skipped adaptations (real runs); "no drift result from t2" log lines;
         energy readings missing on > 1 % of rows (real runs).
@@ -182,9 +185,35 @@ def check_run(run: Path, naive_dirs: list[Path], cache: dict) -> tuple[dict, lis
                     warn.append(f"PRT R² {tm['r2']:.4f} over the {cap} cap")
                 if gain < -0.01:
                     warn.append(f"retraining lowers R² ({gain:+.3f})")
+    if planner in ("violation_aware", "violation_aware_gated"):
+        fail += check_s5(run, planner, thr)
     if info["busy"]:
         (fail if smoke else warn).append(f"{info['busy']} adaptations skipped (retrain busy)")
     return info, fail, warn
+
+
+def check_s5(run: Path, planner: str, thr: dict) -> list[str]:
+    """S5 credit / reason integrity (2026-10-26, core/planners/credit.py)."""
+    fail = []
+    with open(run / "mape_events.csv", newline="") as f:
+        ev = list(csv.DictReader(f))
+    cap = float(thr.get("s5_credit_cap", 0.5))
+    credit = [float(e["s5_credit"]) for e in ev if e.get("s5_credit") not in (None, "")]
+    if len(credit) < len(ev):
+        fail.append(f"s5_credit missing on {len(ev) - len(credit)} cycles")
+    if credit and any(abs(b) > cap + 1e-6 for b in credit):
+        fail.append(f"s5_credit outside ±{cap} (min {min(credit):.4f}, max {max(credit):.4f})")
+    if any(not e.get("s5_reason") for e in ev):
+        fail.append(f"{sum(not e.get('s5_reason') for e in ev)} cycles without an s5_reason")
+    if planner == "violation_aware":
+        stay = [e for e in ev if e.get("violation_effective") == "energy"
+                and e["decision_action"] == "noop" and e.get("s5_reason") != "already_cheapest"]
+        if stay:
+            fail.append(f"{len(stay)} energy-violation noops other than already_cheapest")
+        drift_sw = [e for e in ev if e.get("violation_effective") == "drift" and e["decision_action"] == "switch"]
+        if drift_sw:
+            fail.append(f"{len(drift_sw)} switches on drift")
+    return fail
 
 
 def main() -> None:

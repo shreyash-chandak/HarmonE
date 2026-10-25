@@ -46,6 +46,7 @@ from experiments.run_experiment import (
     _analyse_violation,
     _update_energy_boundary,
     _plan,
+    s5_event_fields,
 )
 
 import knowledge_io as kio
@@ -56,7 +57,7 @@ logger = logging.getLogger(__name__)
 _MONITOR_FIELDS = (
     "ema_scores", "ema_accuracy", "ema_energy", "current_energy_threshold",
     "last_observed_step", "steps_since_last_switch", "observed", "acc_since_adapt",
-    "recovery_cycles",
+    "recovery_cycles", "s5_credit",
 )
 
 
@@ -230,6 +231,7 @@ def run_cycle(
                 "ema_score": telemetry.get("ema_score"),
                 "avg_energy_uJ": telemetry.get("avg_energy_uJ"),
                 "energy_threshold": round(mape_info.get("current_energy_threshold", 0.6), 6),
+                **s5_event_fields(planner.name, decision, mape_info),
             },
             kio.MAPE_EVENT_FIELDS,
         )

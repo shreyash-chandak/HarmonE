@@ -266,7 +266,8 @@
                             <optgroup label="Regression — HarmonE">
                                 <option value="reg_harmone_score">REG: HarmonE Original</option>
                                 <option value="reg_greedy_switch">REG: HarmonE Greedy Switch</option>
-                                <option value="reg_violation_aware">REG: HarmonE Violation Aware</option>
+                                <option value="reg_violation_aware">REG: HarmonE Violation Aware (S5)</option>
+                                <option value="reg_violation_aware_gated">REG: HarmonE Violation Aware, gated (S5a)</option>
                                 <option value="reg_pareto">REG: HarmonE Pareto Optimal</option>
                                 <option value="reg_bandit">REG: HarmonE LinUCB Bandit (S7)</option>
                             </optgroup>
@@ -277,7 +278,8 @@
                             <optgroup label="Computer Vision — HarmonE">
                                 <option value="cv_harmone_score">CV: HarmonE Original</option>
                                 <option value="cv_greedy_switch">CV: HarmonE Greedy Switch</option>
-                                <option value="cv_violation_aware">CV: HarmonE Violation Aware</option>
+                                <option value="cv_violation_aware">CV: HarmonE Violation Aware (S5)</option>
+                                <option value="cv_violation_aware_gated">CV: HarmonE Violation Aware, gated (S5a)</option>
                             </optgroup>
                             <optgroup label="Computer Vision — Baselines">
                                 <option value="cv_switch_conf">CV: Simple Confidence Switch</option>
@@ -464,7 +466,8 @@
         const PLANNERS = [
             { id: 'harmone_original',  name: 'HarmonE Original',    desc: 'ε-greedy EMA-weighted selection — paper baseline' },
             { id: 'greedy_switch',     name: 'Greedy Switch',        desc: 'Always picks the highest-EMA non-current model' },
-            { id: 'violation_aware',   name: 'Violation Aware',      desc: 'Deprioritises models that recently violated energy budget' },
+            { id: 'violation_aware',   name: 'Violation Aware (S5)', desc: 'Routes energy/score violations under a run-level accuracy credit; adapts on drift' },
+            { id: 'violation_aware_gated', name: 'Violation Aware, gated (S5a)', desc: 'Ablation: per-cycle min_accuracy gate and energy budget, switches on drift' },
             { id: 'pareto',            name: 'Pareto Optimal',       desc: 'Selects from accuracy-energy Pareto frontier' },
             { id: 'random_switch',     name: 'Random Switch (HarmonE policy)',  desc: 'Random model selection under the HarmonE score+drift policy — ablation baseline (distinct from the Switch approach button)' },
             { id: 'bandit',            name: 'LinUCB Bandit (S7)',              desc: 'Contextual bandit that learns which model to select given system state — accumulates across runs (bandit_state.json)' },
@@ -497,6 +500,16 @@
             },
             "reg_violation_aware": {
                 policy_id: "reg_violation_aware",
+                quality_attribute: "score",
+                adaptation_boundary: { type: "STATIC_THRESHOLD", condition: "LESS_THAN", threshold: 0.78 },
+                tactics: [ { tactic_id: "execute_mape_plan", priority: 1, tactic_endpoint: "http://localhost:8080/adaptor/tactic" } ],
+                secondary_boundaries: [
+                    { quality_attribute: "kl_div", condition: "GREATER_THAN", threshold: 0.10, tactic_id: "handle_data_drift" }
+                ],
+                associated_qas: ["r2_score", "energy", "model_used"]
+            },
+            "reg_violation_aware_gated": {
+                policy_id: "reg_violation_aware_gated",
                 quality_attribute: "score",
                 adaptation_boundary: { type: "STATIC_THRESHOLD", condition: "LESS_THAN", threshold: 0.78 },
                 tactics: [ { tactic_id: "execute_mape_plan", priority: 1, tactic_endpoint: "http://localhost:8080/adaptor/tactic" } ],
@@ -578,6 +591,16 @@
                 ],
                 associated_qas: ["confidence", "energy", "model_used"]
             },
+            "cv_violation_aware_gated": {
+                policy_id: "cv_violation_aware_gated",
+                quality_attribute: "score",
+                adaptation_boundary: { type: "STATIC_THRESHOLD", condition: "LESS_THAN", threshold: 0.54 },
+                tactics: [ { tactic_id: "execute_mape_plan", priority: 1, tactic_endpoint: "http://localhost:8080/adaptor/tactic" } ],
+                secondary_boundaries: [
+                    { quality_attribute: "kl_div", condition: "GREATER_THAN", threshold: 0.07, tactic_id: "handle_data_drift" }
+                ],
+                associated_qas: ["confidence", "energy", "model_used"]
+            },
             "cv_harmone_drift": {
                 policy_id: "cv_harmone_drift",
                 quality_attribute: "kl_div",
@@ -599,7 +622,7 @@
 
         // Planners not yet wired to CV dispatch — run as harmone_original (DP11)
         // bandit is also excluded from CV until DP11 is resolved
-        const CV_UNIMPLEMENTED_PLANNERS = new Set(['pareto', 'random_switch', 'bandit']);
+        const CV_UNIMPLEMENTED_PLANNERS = new Set(['pareto', 'random_switch', 'bandit', 'violation_aware', 'violation_aware_gated']);
 
         function showPlannerModal(system) {
             pendingHarmonESystem = system;

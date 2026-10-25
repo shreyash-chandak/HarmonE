@@ -21,7 +21,7 @@ import pytest
 
 from core.planners.base import PlanningContext, PlanDecision
 from core.planners.harmone_original import HarmonEOriginalPlanner
-from core.planners.violation_aware import ViolationAwarePlanner
+from core.planners.violation_aware_gated import ViolationAwareGatedPlanner as ViolationAwarePlanner
 from core.planners.pareto import ParetoPlanner
 from core.planners.exploration import stalest_model
 from core.vmr import VMR

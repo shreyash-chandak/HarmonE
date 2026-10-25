@@ -1,0 +1,298 @@
+"""
+core/planners/violation_aware_gated.py — S5a: the original violation-aware planner,
+kept as the "hard per-cycle constraints" ablation of S5 (2026-10-26).
+
+Until 2026-10-26 this was `violation_aware` (S5). The redesigned S5 (run-level
+accuracy credit, core/planners/violation_aware.py) took over that name; this
+module keeps the previous logic and config unchanged. The only addition is a
+short `s5_reason` label in each decision's metadata (logged to mape_events.csv
+next to the full reason text), so both S5 variants can be counted the same way.
+
+Routes each violation type to a targeted response:
+- energy violation: find the model that meets min_accuracy AND uses least energy.
+- score  violation: find the model that meets energy budget AND has best accuracy.
+- drift  violation: VMR replace or retrain (same as S4).
+
+Phase 2 bug fixes applied (all labeled as fixes, not redesigns):
+  2.1 Scale bug:   energy handler now reads min_accuracy, not min_score.
+  2.2 Threshold bug: score handler reads live current_energy_threshold from ctx.
+  2.3 Forced-switch bug: current model included in both candidate pools; returns
+      noop (with explicit reason) when current is already the best choice.
+  2.4 Thrash guard: hysteresis via shared helper with s5_switch_margin (default 0.02).
+  2.5 Fallback semantics: when no candidate meets the constraint, minimise the
+      violated quantity (least energy for energy-violations; best accuracy for
+      score-violations) across ALL models including current, rather than picking
+      any arbitrary alternative.
+"""
+
+from __future__ import annotations
+
+import logging
+
+from .base import Planner, PlanningContext, PlanDecision, REGISTRY, is_observed
+from .hysteresis import should_switch
+from .exploration import maybe_explore
+
+logger = logging.getLogger(__name__)
+
+_DEFAULT_MIN_ACCURACY = 0.0   # conservative: never filter on accuracy if key absent
+_DEFAULT_SWITCH_MARGIN = 0.02
+
+
+def _get_min_accuracy(thr: dict) -> float:
+    """Read min_accuracy from thresholds; fall back to 0.0 with a warning (Phase 1.3)."""
+    if "min_accuracy" in thr:
+        return float(thr["min_accuracy"])
+    logger.warning(
+        "S5a violation_aware_gated: 'min_accuracy' not in thresholds; "
+        "defaulting to 0.0 (accept all models on accuracy). "
+        "Add 'min_accuracy' to the dataset config to suppress this warning."
+    )
+    return _DEFAULT_MIN_ACCURACY
+
+
+_COST_RANK = {"light": 0, "medium": 1, "heavy": 2}
+
+
+def _cost_rank(thr: dict, model: str) -> int:
+    return _COST_RANK.get(thr.get("models", {}).get(model, {}).get("cost_class", "medium"), 1)
+
+
+def _labelled(decision: PlanDecision, label: str, ctx: PlanningContext) -> PlanDecision:
+    """Attach the s5_reason label and the models this planner treats as
+    unknown (never observed) to a decision's metadata."""
+    unknown = [m for m in ctx.available_models
+               if m != ctx.current_model and not is_observed(ctx, m)]
+    decision.metadata = {**(decision.metadata or {}), "s5_reason": label,
+                         "s5_unknown_models": ";".join(unknown)}
+    return decision
+
+
+def _try_unobserved(ctx: PlanningContext, want_cheaper: bool, label: str) -> PlanDecision | None:
+    """Audit A5: when no observed model improves on the current one, try a
+    never-observed model whose configured cost_class points in the needed
+    direction (cheaper on an energy violation, costlier on a score violation),
+    instead of judging it by its 0.5 placeholder estimates."""
+    cur = _cost_rank(ctx.thresholds, ctx.current_model)
+    options = [
+        m for m in ctx.available_models
+        if m != ctx.current_model and not is_observed(ctx, m)
+        and (_cost_rank(ctx.thresholds, m) < cur if want_cheaper else _cost_rank(ctx.thresholds, m) > cur)
+    ]
+    if not options:
+        return None
+    pick = (min if want_cheaper else max)(options, key=lambda m: _cost_rank(ctx.thresholds, m))
+    return PlanDecision(
+        action="switch", model=pick,
+        reason=f"S5a violation_aware_gated: {label} — no observed alternative; trying never-observed '{pick}'",
+    )
+
+
+class ViolationAwareGatedPlanner(Planner):
+    """S5a: Route model selection based on which threshold was violated."""
+
+    name = "violation_aware_gated"
+
+    def plan(self, ctx: PlanningContext) -> PlanDecision:
+        if ctx.violation == "drift":
+            return self._handle_drift(ctx)
+
+        # Audit A2 (2026-09-28): periodically re-probe the stalest inactive
+        # model, like the original HarmonE's per-cycle exploration, so frozen
+        # EMA estimates get refreshed. Disabled unless explore_prob > 0.
+        probe = maybe_explore(
+            ctx, float(ctx.thresholds.get("explore_prob", 0.0)), "S5a violation_aware_gated"
+        )
+        if probe is not None:
+            return _labelled(probe, "probe", ctx)
+
+        if ctx.violation is None:
+            return _labelled(PlanDecision(action="noop", reason="S5a violation_aware_gated: no violation"),
+                             "no_violation", ctx)
+
+        if ctx.violation == "energy":
+            return self._handle_energy_violation(ctx)
+
+        # "score" or any other violation type
+        return self._handle_score_violation(ctx)
+
+    # ------------------------------------------------------------------
+    # Energy violation: find model with acceptable accuracy and least energy
+    # ------------------------------------------------------------------
+
+    def _handle_energy_violation(self, ctx: PlanningContext) -> PlanDecision:
+        """Energy too high: find the most accurate model that uses least energy.
+
+        Fix 2.1: uses min_accuracy, not min_score.
+        Fix 2.3: includes current model; returns noop if current is already best.
+        Fix 2.4: hysteresis — only switch if energy improvement exceeds margin.
+        Fix 2.5: if no model meets min_accuracy, fall back to min-energy over all.
+        """
+        thr = ctx.thresholds
+        min_acc = _get_min_accuracy(thr)
+        margin = float(thr.get("s5_switch_margin", _DEFAULT_SWITCH_MARGIN))
+
+        all_models = list(ctx.available_models)
+        ema_acc = ctx.ema_accuracy
+        ema_eng = ctx.ema_energy
+
+        # Only models with real estimates are compared (audit A5); the
+        # current model is always observed by the time a violation fires.
+        known = [m for m in all_models if m == ctx.current_model or is_observed(ctx, m)]
+
+        # Candidates meeting accuracy requirement (Fix 2.1: min_accuracy not min_score)
+        candidates = [m for m in known if ema_acc.get(m, 0.0) >= min_acc]
+        pool = candidates if candidates else known  # Fix 2.5: fallback = all known models
+
+        # Among pool, find the one with minimum energy
+        chosen = min(pool, key=lambda m: ema_eng.get(m, float("inf")))
+
+        # Fix 2.3: if that's the current model, noop
+        if chosen == ctx.current_model:
+            trial = _try_unobserved(ctx, want_cheaper=True, label="energy violation")
+            if trial is not None:
+                return _labelled(trial, "energy_unobserved_trial", ctx)
+            return _labelled(PlanDecision(
+                action="noop",
+                reason=(
+                    f"S5a violation_aware_gated: energy violation — current model "
+                    f"'{ctx.current_model}' is already the lowest-energy accurate option "
+                    f"(ema_E={ema_eng.get(chosen, float('nan')):.4f}). "
+                    "No better alternative; violation persists."
+                ),
+            ), "energy_current_lowest_noop", ctx)
+
+        # Fix 2.4: hysteresis — switch only if candidate energy is meaningfully lower
+        curr_eng = ema_eng.get(ctx.current_model, float("inf"))
+        cand_eng = ema_eng.get(chosen, float("inf"))
+        if not should_switch(d_current=curr_eng, d_candidate=cand_eng, margin=margin):
+            return _labelled(PlanDecision(
+                action="noop",
+                reason=(
+                    f"S5a violation_aware_gated: energy violation — candidate '{chosen}' "
+                    f"(ema_E={cand_eng:.4f}) not better than current "
+                    f"(ema_E={curr_eng:.4f}) by margin={margin}; staying."
+                ),
+            ), "energy_margin_noop", ctx)
+
+        return _labelled(PlanDecision(
+            action="switch",
+            model=chosen,
+            reason=(
+                f"S5a violation_aware_gated: energy violation — lowest_energy_model={chosen} "
+                f"(ema_E={cand_eng:.4f}, ema_A={ema_acc.get(chosen, float('nan')):.4f})"
+            ),
+        ), "energy_switch", ctx)
+
+    # ------------------------------------------------------------------
+    # Score violation: find model with acceptable energy and best accuracy
+    # ------------------------------------------------------------------
+
+    def _handle_score_violation(self, ctx: PlanningContext) -> PlanDecision:
+        """Score too low: find the most accurate model within energy budget.
+
+        Fix 2.2: uses live ctx.current_energy_threshold, not stale config value.
+        Fix 2.3: includes current model; returns noop if current is already best.
+        Fix 2.4: hysteresis — only switch if accuracy improvement exceeds margin.
+        Fix 2.5: if no model within energy budget, fall back to best-accuracy over all.
+        """
+        thr = ctx.thresholds
+        e_threshold = ctx.current_energy_threshold  # Fix 2.2: live threshold
+        margin = float(thr.get("s5_switch_margin", _DEFAULT_SWITCH_MARGIN))
+
+        all_models = list(ctx.available_models)
+        ema_acc = ctx.ema_accuracy
+        ema_eng = ctx.ema_energy
+
+        known = [m for m in all_models if m == ctx.current_model or is_observed(ctx, m)]  # audit A5
+
+        # Candidates within energy budget (Fix 2.2: live threshold)
+        candidates = [m for m in known if ema_eng.get(m, 1.0) <= e_threshold]
+        pool = candidates if candidates else known  # Fix 2.5: fallback = all known models
+
+        # Among pool, find the one with highest accuracy
+        chosen = max(pool, key=lambda m: ema_acc.get(m, 0.0))
+
+        # Fix 2.3: if that's the current model, noop
+        if chosen == ctx.current_model:
+            trial = _try_unobserved(ctx, want_cheaper=False, label="score violation")
+            if trial is not None:
+                return _labelled(trial, "score_unobserved_trial", ctx)
+            return _labelled(PlanDecision(
+                action="noop",
+                reason=(
+                    f"S5a violation_aware_gated: score violation — current model "
+                    f"'{ctx.current_model}' is already the most accurate within "
+                    f"energy budget={e_threshold:.4f} "
+                    f"(ema_A={ema_acc.get(chosen, float('nan')):.4f}). "
+                    "No better alternative; violation persists."
+                ),
+            ), "score_current_best_noop", ctx)
+
+        # Fix 2.4: hysteresis — switch only if candidate accuracy is meaningfully higher
+        curr_acc = ema_acc.get(ctx.current_model, 0.0)
+        cand_acc = ema_acc.get(chosen, 0.0)
+        # For accuracy: higher is better → d = -acc; should_switch(−curr, −cand, margin)
+        if not should_switch(d_current=-curr_acc, d_candidate=-cand_acc, margin=margin):
+            return _labelled(PlanDecision(
+                action="noop",
+                reason=(
+                    f"S5a violation_aware_gated: score violation — candidate '{chosen}' "
+                    f"(ema_A={cand_acc:.4f}) not better than current "
+                    f"(ema_A={curr_acc:.4f}) by margin={margin}; staying."
+                ),
+            ), "score_margin_noop", ctx)
+
+        return _labelled(PlanDecision(
+            action="switch",
+            model=chosen,
+            reason=(
+                f"S5a violation_aware_gated: score violation — best_acc_model={chosen} "
+                f"(ema_A={cand_acc:.4f}, ema_E={ema_eng.get(chosen, float('nan')):.4f})"
+            ),
+        ), "score_switch", ctx)
+
+    # ------------------------------------------------------------------
+    # Drift violation (unchanged from original)
+    # ------------------------------------------------------------------
+
+    def _handle_drift(self, ctx: PlanningContext) -> PlanDecision:
+        dr = ctx.drift_result
+        if dr is None:
+            return _labelled(PlanDecision(
+                action="noop", reason="S5a violation_aware_gated: drift signalled but no drift_result"),
+                "no_violation", ctx)
+        # 2026-10-07 (config s5_drift_prefers_switch, default true): switching
+        # costs nothing, retraining / restoring costs a metered adaptation.
+        # If another already-observed model meets the accuracy gate within
+        # the live energy budget, switch to the most accurate such model and
+        # leave adaptation to the case where no model is acceptable.
+        if bool(ctx.thresholds.get("s5_drift_prefers_switch", True)):
+            min_acc = _get_min_accuracy(ctx.thresholds)
+            ok = [
+                m for m in ctx.available_models
+                if m != ctx.current_model and is_observed(ctx, m)
+                and ctx.ema_accuracy.get(m, 0.0) >= min_acc
+                and ctx.ema_energy.get(m, 1.0) <= ctx.current_energy_threshold
+            ]
+            if ok:
+                best = max(ok, key=lambda m: ctx.ema_accuracy.get(m, 0.0))
+                return _labelled(PlanDecision(
+                    action="switch", model=best,
+                    reason=(f"S5a violation_aware_gated: drift on {ctx.current_model} — switching to "
+                            f"{best} (ema_A={ctx.ema_accuracy.get(best, 0.0):.4f} >= {min_acc}, "
+                            f"ema_E={ctx.ema_energy.get(best, 1.0):.4f} <= "
+                            f"{ctx.current_energy_threshold:.4f}) instead of adapting"),
+                ), "drift_prefers_switch", ctx)
+        if dr.get("action") in ("replace", "switch_version"):
+            path = dr.get("version")
+            return _labelled(PlanDecision(
+                action="replace",
+                version_path=path,
+                reason=f"S5a violation_aware_gated: VMR replace → {path}",
+            ), "drift_replace", ctx)
+        return _labelled(PlanDecision(action="retrain", reason="S5a violation_aware_gated: no VMR match, retrain"),
+                         "drift_retrain", ctx)
+
+
+REGISTRY["violation_aware_gated"] = ViolationAwareGatedPlanner

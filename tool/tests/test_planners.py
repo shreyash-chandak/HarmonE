@@ -15,7 +15,7 @@ from core.planners.naive import NaivePlanner
 from core.planners.random_switch import RandomSwitchPlanner
 from core.planners.greedy_switch import GreedySwitchPlanner
 from core.planners.harmone_original import HarmonEOriginalPlanner
-from core.planners.violation_aware import ViolationAwarePlanner
+from core.planners.violation_aware_gated import ViolationAwareGatedPlanner as ViolationAwarePlanner
 from core.planners.pareto import ParetoPlanner, build_pareto_front, chebyshev_distance
 
 

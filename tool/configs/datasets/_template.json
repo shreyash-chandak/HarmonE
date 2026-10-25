@@ -41,7 +41,6 @@
   "E_m": "OPTIONAL: minimum raw energy µJ for normalisation (default: 0)",
   "E_M": "OPTIONAL: maximum raw energy µJ for normalisation (CALIBRATE per hardware+dataset)",
   "tau_drift": "OPTIONAL: KL divergence threshold for drift detection (CALIBRATE per dataset)",
-  "drift_reference": "OPTIONAL: 'fixed' | 'rolling' | 'both' (default: 'both')",
 
   "_comment_cv_task": "== CV TASK KEYS (cv domain only) ==",
   "task": "OPTIONAL (cv): 'detection' | 'classification' | 'segmentation' (default: 'detection')",
@@ -56,7 +55,10 @@
   "rollback_if_worse": "OPTIONAL (cv): rollback new weights if proxy score drops after retrain (default: true)",
 
   "_comment_planner": "== PLANNER ==",
-  "planner": "OPTIONAL: planner strategy name (default: 'harmone_original'). Options: naive, random_switch, greedy_switch, harmone_original, violation_aware, pareto, bandit",
+  "planner": "OPTIONAL: planner strategy name (default: 'harmone_original'). Options: naive, naive_prt, random_switch, random_switch_prt, greedy_switch, harmone_original, violation_aware, violation_aware_gated, pareto, bandit",
+  "s5_credit_horizon": "OPTIONAL: S5 accuracy-credit horizon H in MAPE cycles (default: 3 = switch_hold_cycles)",
+  "s5_credit_cap": "S5 accuracy-credit cap B_max, written by experiments/calibrate_from_naive_runs.py: 1.5 x H x max(0, min_accuracy - naive ridge accuracy) (default if absent: 0.5, with a warning)",
+  "bandit_switch_cost": "OPTIONAL: S7 penalty on choosing a different arm (default: 0.01)",
   "w_acc": "OPTIONAL (pareto): accuracy weight in Chebyshev distance (default: 1.0)",
   "w_e": "OPTIONAL (pareto): energy weight in Chebyshev distance (default: 1.0)",
   "ema_head_start": "OPTIONAL (cv): EMA boost applied after VMR deploy (default: 0.1; set 0 to disable)",

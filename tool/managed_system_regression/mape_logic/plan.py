@@ -80,6 +80,7 @@ def dispatch_plan(violation: str | None, trigger: str = "local") -> dict | None:
         available_models=_AVAILABLE_MODELS,
         thresholds=thresholds,
         drift_result=drift_result,
+        accuracy_credit=float(mape_info.get("s5_credit", 0.0)),
     )
 
     planner_name = thresholds.get("planner", "harmone_original")
@@ -143,10 +144,11 @@ def plan_mape(trigger="local"):
         logging.warning(f"Unknown trigger '{trigger}'. Aborting plan.")
         return None
 
-    # Route to registry planner when "bandit" is configured (S7).
-    # dispatch_plan() builds PlanningContext and delegates to the BanditPlanner.
+    # Route to the registry planner when "bandit" (S7) or one of the S5
+    # variants is configured (2026-10-26: violation_aware needs the accuracy
+    # credit the monitor maintains). dispatch_plan() builds the PlanningContext.
     planner_name = thresholds.get("planner", "harmone_original")
-    if planner_name == "bandit":
+    if planner_name in ("bandit", "violation_aware", "violation_aware_gated"):
         violation = (analysis.get("threshold_violated") or "score") if analysis else "score"
         return dispatch_plan(violation, trigger=trigger)
 

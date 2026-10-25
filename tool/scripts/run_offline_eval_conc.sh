@@ -111,7 +111,7 @@ if [ -z "$FILTER_DATASET" ] || [ "$FILTER_DATASET" = "bdd100k" ]; then
         _eval_one "bdd100k_naive_${model}_conc" "bdd100k"
         _eval_one "bdd100k_naive_prt_${model}_conc" "bdd100k"
     done
-    for planner in random_switch random_switch_prt greedy_switch harmone_original violation_aware pareto bandit; do
+    for planner in random_switch random_switch_prt greedy_switch harmone_original violation_aware violation_aware_gated pareto bandit; do
         _eval_one "bdd100k_${planner}_conc" "bdd100k"
     done
 fi
@@ -128,7 +128,7 @@ for cv_dataset in imagenet imagenet_c; do
             _eval_one "${cv_dataset}_naive_${model}_conc" "$cv_dataset"
             _eval_one "${cv_dataset}_naive_prt_${model}_conc" "$cv_dataset"
         done
-        for planner in random_switch random_switch_prt greedy_switch harmone_original violation_aware pareto bandit; do
+        for planner in random_switch random_switch_prt greedy_switch harmone_original violation_aware violation_aware_gated pareto bandit; do
             _eval_one "${cv_dataset}_${planner}_conc" "$cv_dataset"
         done
     fi
@@ -141,7 +141,7 @@ if [ -z "$FILTER_DATASET" ] || [ "$FILTER_DATASET" = "acdc" ]; then
         _eval_one "acdc_naive_${model}_conc" "acdc"
         _eval_one "acdc_naive_prt_${model}_conc" "acdc"
     done
-    for planner in random_switch random_switch_prt greedy_switch harmone_original violation_aware pareto bandit; do
+    for planner in random_switch random_switch_prt greedy_switch harmone_original violation_aware violation_aware_gated pareto bandit; do
         _eval_one "acdc_${planner}_conc" "acdc"
     done
 fi

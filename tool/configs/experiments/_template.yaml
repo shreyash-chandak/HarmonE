@@ -13,6 +13,7 @@ planners:
   - greedy_switch
   - harmone_original
   - violation_aware
+  - violation_aware_gated
   - pareto
   # - bandit                      # uncomment when S7 is implemented
 

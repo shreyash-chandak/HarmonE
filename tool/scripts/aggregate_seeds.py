@@ -37,7 +37,7 @@ DATASETS = ["pems_driftinduced", "spot_prices_driftinduced", "uci_electricity_dr
 SHORT = {"pems_driftinduced": "PeMS", "spot_prices_driftinduced": "Spot", "uci_electricity_driftinduced": "UCI"}
 ORDER = ["naive_ridge", "naive_svr", "naive_lstm", "naive_prt_ridge", "naive_prt_svr", "naive_prt_lstm",
          "random_switch", "random_switch_prt", "greedy_switch", "harmone_original",
-         "violation_aware", "pareto", "bandit"]
+         "violation_aware", "violation_aware_gated", "pareto", "bandit"]
 MODELS = ("ridge", "svr", "lstm")
 
 

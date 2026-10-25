@@ -30,12 +30,13 @@ DATASETS = [("pems_driftinduced", "PeMS"), ("spot_prices_driftinduced", "Spot pr
             ("uci_electricity_driftinduced", "UCI electricity")]
 BASELINES = ["naive_ridge", "naive_svr", "naive_lstm", "naive_prt_ridge", "naive_prt_svr", "naive_prt_lstm"]
 ADAPTIVE = ["random_switch", "random_switch_prt", "greedy_switch", "harmone_original",
-            "violation_aware", "pareto", "bandit"]
+            "violation_aware", "violation_aware_gated", "pareto", "bandit"]
 LABEL = {"naive_ridge": "Ridge (naive)", "naive_svr": "SVR (naive)", "naive_lstm": "LSTM (naive)",
          "naive_prt_ridge": "Ridge + PRT", "naive_prt_svr": "SVR + PRT", "naive_prt_lstm": "LSTM + PRT",
          "random_switch": "Random switch", "random_switch_prt": "Random switch + PRT",
          "greedy_switch": "Greedy switch", "harmone_original": "HarmonE (original)",
-         "violation_aware": "Violation-aware (S5)", "pareto": "Pareto", "bandit": "Bandit"}
+         "violation_aware": "Violation-aware (S5)", "violation_aware_gated": "S5a gated",
+         "pareto": "Pareto", "bandit": "Bandit"}
 
 
 def main() -> None:

@@ -2,13 +2,15 @@
 # scripts/overnight_regression.sh — unattended regression pipeline in tmux:
 #   0. one real run as a pacing check     -> runs_pacecheck/ (abort if off)
 #   1. single-model baselines (naive, naive_prt; seed 1) -> runs_calib/
-#   2. calibrate E_m/E_M/min_accuracy/min_score from them (--write)
-#   3. adaptive planners for seeds 1..5    -> runs_seed1/ .. runs_seed5/
+#   2. calibrate E_m/E_M/min_accuracy/min_score/s5_credit_cap from them (--write)
+#   3. the 8 adaptive planners (incl. violation_aware_gated, 2026-10-26) for
+#      seeds 1..5                          -> runs_seed1/ .. runs_seed5/
 #      (the baselines run once — their R² does not depend on the seed — and
 #      the summary takes them from runs_calib; 2026-10-13)
 #   4. summary table                       -> overnight/summary.txt
 #
 # Usage (from tool/, after git pull):
+#   bash scripts/overnight_regression.sh --fresh  # everything from scratch, seeds 1-5 (~28 h at 7.5 ms)
 #   bash scripts/overnight_regression.sh          # pre-flight here, then starts tmux session "harmone"
 #   bash scripts/overnight_regression.sh --seeds "1"            # baselines + calibration + seed 1 only
 #   bash scripts/overnight_regression.sh --seeds "1 2 3 4 5"    # later: resumes, runs seeds 2-5, summarises all
@@ -103,8 +105,9 @@ PY
 import json, sys
 for ds in ["pems_driftinduced", "spot_prices_driftinduced", "uci_electricity_driftinduced"]:
     c = json.load(open(f"configs/datasets/{ds}.json"))
-    print(f"  {ds}: E_m={c['E_m']} E_M={c['E_M']} min_accuracy={c['min_accuracy']} min_score={c['min_score']}")
-    if not (0 < c["E_m"] < c["E_M"]):
+    print(f"  {ds}: E_m={c['E_m']} E_M={c['E_M']} min_accuracy={c['min_accuracy']} min_score={c['min_score']} "
+          f"s5_credit_cap={c.get('s5_credit_cap')}")
+    if not (0 < c["E_m"] < c["E_M"]) or not c.get("s5_credit_cap", 0) > 0:
         sys.exit(1)
 PY
         git diff configs/ > "$STATE/calibration.diff"

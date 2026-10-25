@@ -40,6 +40,8 @@
     }
   },
   "min_score": 0.5778,
+  "s5_credit_cap": 0.8295,
+  "s5_credit_cap_source": "calibrate_from_naive_runs:runs_station_2010/runs_calib (1.5 x s5_credit_horizon x (min_accuracy - naive ridge accuracy)); provisional, the pipeline recalibrates per machine",
   "energy_bounds_source": "calibrate_from_naive_runs:runs_calib",
   "energy_reference_source": "calibrate_from_naive_runs:runs_calib (E_ref = energy_budget_rho)",
   "accuracy_gate_source": "calibrate_from_naive_runs:runs_calib (min_accuracy = accuracy_budget_rho rule)",
@@ -69,13 +71,13 @@
   "accuracy_budget_rho": 0.5,
   "staleness_window": 2600,
   "s5_switch_margin": 0.02,
+  "s5_credit_horizon": 3,
   "pareto_switch_margin": 0.02,
   "pareto_switch_cost_lambda": 0.1,
   "pareto_augmentation": 0.01,
   "bandit_alpha": 1.0,
   "bandit_mu": 0.05,
-  "bandit_switch_margin": 0.01,
-  "bandit_min_observation_steps": 260,
+  "bandit_switch_cost": 0.01,
   "monitor_interval": 260,
   "drift_cooldown_rows": 2600,
   "max_batches_ahead": 1,
@@ -83,7 +85,6 @@
   "E_M": 77746.4,
   "tau_drift": 1.163284,
   "tau_drift_source": "calibrate_drift_threshold kl_overflow p99 window=1200 null=spot_prices:stream[:50090]",
-  "drift_reference": "both",
   "planner": "harmone_original",
   "energy_required": [
     "cpu"

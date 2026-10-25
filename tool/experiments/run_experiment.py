@@ -40,6 +40,7 @@ if str(_TOOL_DIR) not in sys.path:
 # ── Local imports ─────────────────────────────────────────────────────────────
 
 from core.planners.base import PlanningContext, PlanDecision, get_planner
+from core.planners.credit import update_run_credit
 from core.scoring import (
     compute_harmone_score,
     normalize_energy,
@@ -73,7 +74,13 @@ def setup_run_dir(run_dir: str) -> Path:
 def _load_dataset_config(dataset_name: str, configs_dir: Path) -> dict:
     config_path = configs_dir / "datasets" / f"{dataset_name}.json"
     with open(config_path, "r") as f:
-        return json.load(f)
+        config = json.load(f)
+    # Dead keys look like settings but change nothing (2026-10-26, core/config_keys.py).
+    from core.config_keys import unread_keys
+    dead = unread_keys(config)
+    if dead:
+        logger.warning("%s: config keys no component reads: %s", config_path.name, ", ".join(dead))
+    return config
 
 
 def _build_adapter(dataset_config: dict, configs_dir: Path):
@@ -666,6 +673,12 @@ def _monitor_batch(
     since[0] += acc
     since[1] += 1
 
+    # S5 run-level accuracy credit (2026-10-26, core/planners/credit.py):
+    # updated on every monitored batch from the model that served it — lagging
+    # batches and recovery-hold cycles included — so it tracks the run's
+    # realised accuracy. Tracked for every planner; only S5 decides on it.
+    update_run_credit(mape_info, acc, thresholds)
+
     return {
         "r2": round(r2, 6),
         "accuracy": round(acc, 6),
@@ -858,6 +871,7 @@ def _plan(
             "kl_div": drift_result.get("kl_div"),
             "served_model": served_model or current_model,
         },
+        accuracy_credit=float(mape_info.get("s5_credit", 0.0)),
     )
     decision = planner.plan(ctx)
     decision.effective_violation = effective_violation
@@ -893,6 +907,26 @@ def _plan(
             effective_violation=effective_violation,
         )
     return decision
+
+
+S5_EVENT_FIELDS = ["s5_credit", "s5_projected", "s5_required_acc", "s5_reason", "s5_unknown_models"]
+
+
+def s5_event_fields(planner_name: str, decision: PlanDecision, mape_info: dict) -> dict:
+    """The S5 columns of a mape_events.csv row (2026-10-26): filled for both S5
+    variants (violation_aware, violation_aware_gated), blank for other planners
+    and where a value does not apply."""
+    if not planner_name.startswith("violation_aware"):
+        return {k: "" for k in S5_EVENT_FIELDS}
+    meta = decision.metadata or {}
+    credit = mape_info.get("s5_credit")
+    return {
+        "s5_credit": "" if credit is None else round(float(credit), 6),
+        "s5_projected": meta.get("s5_projected", ""),
+        "s5_required_acc": meta.get("s5_required_acc", ""),
+        "s5_reason": meta.get("s5_reason", ""),
+        "s5_unknown_models": meta.get("s5_unknown_models", ""),
+    }
 
 
 def _load_model_store(dataset_config: dict, only: list[str] | None = None) -> dict:
@@ -3455,6 +3489,7 @@ def run_experiment(
                 "ema_score": telemetry["ema_score"],
                 "avg_energy_uJ": telemetry["avg_energy_uJ"],
                 "energy_threshold": round(mape_info["current_energy_threshold"], 6),
+                **s5_event_fields(planner_name, decision, mape_info),
             })
 
             # Per-cycle INFO line — shows accuracy + energy so log is human-readable

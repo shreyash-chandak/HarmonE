@@ -37,6 +37,9 @@ class PlanningContext:
     # served_model (the model that served the monitored batch). Used by the
     # bandit to learn from every batch (audit B1/B5).
     telemetry: dict = field(default_factory=dict)
+    # S5 run-level accuracy credit B (mape_info["s5_credit"], updated every
+    # cycle in Monitor; core/planners/credit.py). 0.0 when not tracked.
+    accuracy_credit: float = 0.0
 
 
 def prt_due(ctx: "PlanningContext", default_interval: int) -> bool:
@@ -109,7 +112,7 @@ def _register():
     Python's import system is idempotent — re-importing an already-loaded
     module is a no-op, so this is safe to call multiple times.
     """
-    from . import naive, random_switch, greedy_switch, harmone_original, violation_aware, pareto, bandit, naive_prt, random_switch_prt  # noqa: F401
+    from . import naive, random_switch, greedy_switch, harmone_original, violation_aware, violation_aware_gated, pareto, bandit, naive_prt, random_switch_prt  # noqa: F401
 
 
 def get_planner(name: str) -> Planner:

@@ -61,7 +61,7 @@ LOG_DIR="$TOOL_DIR/runs/logs"
 mkdir -p "$LOG_DIR"
 
 DATASETS=(pems_driftinduced uci_electricity_driftinduced spot_prices_driftinduced)
-ADAPTIVE_PLANNERS=(random_switch random_switch_prt greedy_switch harmone_original violation_aware pareto bandit)
+ADAPTIVE_PLANNERS=(random_switch random_switch_prt greedy_switch harmone_original violation_aware violation_aware_gated pareto bandit)
 REGRESSION_MODELS=(lstm ridge svr)
 
 # Prerequisite: the drift-induced CSVs referenced by each *_driftinduced.json

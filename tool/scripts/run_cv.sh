@@ -111,7 +111,7 @@ DATASET_SUPPORTS_PRT["imagenet"]=1
 DATASET_SUPPORTS_PRT["imagenet_c"]=1
 
 DATASETS=(bdd100k acdc imagenet imagenet_c)  # iwildcam excluded — see header comment
-ADAPTIVE_PLANNERS=(random_switch random_switch_prt greedy_switch harmone_original violation_aware pareto bandit)
+ADAPTIVE_PLANNERS=(random_switch random_switch_prt greedy_switch harmone_original violation_aware violation_aware_gated pareto bandit)
 
 MASTER_LOG="$LOG_DIR/master_cv.log"
 FAILED_LOG="$LOG_DIR/failed_cv.log"

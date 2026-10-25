@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.planners.base import PlanningContext  # noqa: E402
 from core.planners.pareto import ParetoPlanner  # noqa: E402
-from core.planners.violation_aware import ViolationAwarePlanner  # noqa: E402
+from core.planners.violation_aware_gated import ViolationAwareGatedPlanner as ViolationAwarePlanner  # noqa: E402
 from experiments.run_experiment import (  # noqa: E402
     BatchEnergy,
     _initial_mape_info,
@@ -181,7 +181,7 @@ def test_drift_confirmation_needs_accuracy_drop():
 
 
 def test_unconfirmed_drift_is_not_acted_on():
-    from core.planners.violation_aware import ViolationAwarePlanner
+    from core.planners.violation_aware_gated import ViolationAwareGatedPlanner as ViolationAwarePlanner
     from experiments.run_experiment import _plan
     info = _initial_mape_info(MODELS)
     for acc in (0.9, 0.9, 0.9):

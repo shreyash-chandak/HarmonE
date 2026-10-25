@@ -80,6 +80,8 @@ MAPE_EVENT_FIELDS = [
     "decision_action", "decision_model", "decision_reason",
     "model_before", "model_after",
     "r2", "accuracy", "ema_score", "avg_energy_uJ", "energy_threshold",
+    # S5 variants only (blank otherwise), 2026-10-26
+    "s5_credit", "s5_projected", "s5_required_acc", "s5_reason", "s5_unknown_models",
 ]
 
 # Serializes all core.energy.EnergyMeter usage *within mape/manage.py's process*

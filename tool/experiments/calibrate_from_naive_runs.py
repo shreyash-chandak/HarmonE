@@ -24,6 +24,11 @@ Accuracy gates (same budget rule on the accuracy axis):
   run's predictions.csv; CV: mean proxy confidence). min_score is the
   HarmonE score of a model sitting exactly at the target operating point.
 
+S5 accuracy-credit cap (2026-10-26, core/planners/credit.py):
+    s5_credit_cap = 1.5 × s5_credit_horizon × max(0, min_accuracy − acc_ridge)
+  with acc_ridge the naive ridge run's mean per-batch accuracy (the cheapest
+  model's if there is no "ridge"); 0.5 with a warning if acc_ridge >= min_accuracy.
+
 These values depend on the model pool and on the energy metering, so re-run
 this after either changes (pool positioning, batch metering) — the run
 manifests record which metering produced them.
@@ -107,6 +112,10 @@ def calibrate(dataset: str, runs_dir: Path, configs_dir: Path) -> dict:
     min_acc = acc_cheap + rho_a * (acc_best - acc_cheap)
     e_ref = rho_e
     min_score = beta * min_acc + (1.0 - beta) * (1.0 - e_ref)
+    from core.planners.credit import DEFAULT_CREDIT_HORIZON, credit_cap_from_naive
+    acc_ridge = per_model["ridge"]["accuracy"] if "ridge" in per_model else acc_cheap
+    credit_cap = credit_cap_from_naive(round(min_acc, 4), acc_ridge,
+                                       int(cfg.get("s5_credit_horizon", DEFAULT_CREDIT_HORIZON)))
     return {
         "dataset": dataset,
         "per_model": per_model,
@@ -117,6 +126,7 @@ def calibrate(dataset: str, runs_dir: Path, configs_dir: Path) -> dict:
             "energy_reference": round(e_ref, 4),
             "min_accuracy": round(min_acc, 4),
             "min_score": round(min_score, 4),
+            "s5_credit_cap": round(credit_cap, 4),
         },
         "source": f"calibrate_from_naive_runs:{runs_dir.name}",
     }
@@ -132,6 +142,7 @@ def write_config(dataset: str, configs_dir: Path, result: dict) -> None:
     updates["energy_bounds_source"] = result["source"]
     updates["energy_reference_source"] = result["source"] + " (E_ref = energy_budget_rho)"
     updates["accuracy_gate_source"] = result["source"] + " (min_accuracy = accuracy_budget_rho rule)"
+    updates["s5_credit_cap_source"] = result["source"] + " (1.5 x s5_credit_horizon x (min_accuracy - naive ridge accuracy))"
     missing = []
     for key, val in updates.items():
         pat = re.compile(rf'^(\s*)"{re.escape(key)}":\s*(?:"(?:[^"\\]|\\.)*"|[^,\n]+)(,?)$', re.M)

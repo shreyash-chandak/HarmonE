@@ -101,6 +101,7 @@ PLANNER_ORDER = [
     "greedy_switch",
     "harmone_original",
     "violation_aware",
+    "violation_aware_gated",
     "pareto",
     "bandit",
 ]
@@ -110,6 +111,7 @@ PLANNER_LABELS = {
     "greedy_switch":     "S3 Greedy",
     "harmone_original":  "S4 HarmonE",
     "violation_aware":   "S5 ViolAware",
+    "violation_aware_gated": "S5a gated",
     "pareto":            "S6 Pareto",
     "bandit":            "S7 Bandit",
 }
@@ -126,6 +128,7 @@ PLANNER_COLORS = {
     "greedy_switch":     "#e87d4c",
     "harmone_original":  "#d62728",
     "violation_aware":   "#9467bd",
+    "violation_aware_gated": "#c5b0d5",
     "pareto":            "#2ca02c",
     "bandit":            "#17becf",
 }

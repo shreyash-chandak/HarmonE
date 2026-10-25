@@ -43,7 +43,7 @@ from pathlib import Path
 # Canonical row ordering — mirrors scripts/plot_results.py's PLANNER_ORDER.
 PLANNER_ORDER = [
     "naive", "naive_prt", "random_switch", "random_switch_prt", "greedy_switch",
-    "harmone_original", "violation_aware", "pareto", "bandit",
+    "harmone_original", "violation_aware", "violation_aware_gated", "pareto", "bandit",
 ]
 
 DATASET_ORDER = [

@@ -301,6 +301,7 @@ def write_approach_config():
         'reg_harmone_score':    'reg_harmone',
         'reg_greedy_switch':    'reg_harmone',
         'reg_violation_aware':  'reg_harmone',
+        'reg_violation_aware_gated': 'reg_harmone',
         'reg_pareto':           'reg_harmone',
         'reg_random_switch':    'reg_harmone',
         'reg_switch_r2':        'reg_switch',
@@ -308,6 +309,7 @@ def write_approach_config():
         'cv_harmone_score':     'cv_harmone',
         'cv_greedy_switch':     'cv_harmone',
         'cv_violation_aware':   'cv_harmone',
+        'cv_violation_aware_gated': 'cv_harmone',
         'cv_switch_conf':       'cv_switch',
         'cv_single':            'cv_single',
     }
@@ -360,7 +362,7 @@ def set_model():
     return jsonify({"message": "Model set"}), 200
 
 
-_VALID_PLANNERS = {'harmone_original', 'greedy_switch', 'violation_aware', 'pareto', 'random_switch', 'bandit'}
+_VALID_PLANNERS = {'harmone_original', 'greedy_switch', 'violation_aware', 'violation_aware_gated', 'pareto', 'random_switch', 'bandit'}
 
 @app.route('/api/set-planner', methods=['POST'])
 def set_planner():

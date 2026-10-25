@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.join(BASE_DIR, '..', '..'))
 from core.drift.kl_fixed_ref import KLFixedRefDetector
 from core.drift.kl_rolling import KLRollingDetector
 from core.scoring import update_separated_emas
+from core.planners.credit import update_run_credit
 
 mape_info_file = os.path.join(KNOWLEDGE_DIR, "mape_info.json")
 thresholds_file = os.path.join(KNOWLEDGE_DIR, "thresholds.json")
@@ -95,6 +96,10 @@ def monitor_mape():
     # Update MAPE info (combined score + Phase 2.4 separated signals)
     info["ema_scores"][current_model] = final_score
     update_separated_emas(info, current_model, r2, energy_normalized, gamma)
+    # S5 run-level accuracy credit (2026-10-26, core/planners/credit.py): A_target
+    # is min_accuracy, or min_score inverted at E_ref when thresholds.json has
+    # none; the cap is s5_credit_cap, or 0.5 with a warning.
+    update_run_credit(info, max(0.0, min(1.0, float(r2))), thresholds)
     info["last_line"] += len(df)
 
     # Log computed values
