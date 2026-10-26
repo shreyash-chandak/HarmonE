@@ -4,8 +4,9 @@ scripts/plot_seed_results.py — paper-style plots for one machine's runs folder
 <root>/runs_seed<N> (adaptive planners); values are means over seeds.
 
 Writes to <root>/plots/:
-  accuracy_vs_energy.png      stream R² x 100 vs total energy per prediction
-                              (log x), one panel per dataset, every planner
+  energy_vs_error_<dataset>.png  as the paper's Fig. 7 (left): average total
+                              energy per prediction (mJ, left axis) beside MSE
+                              (right axis), every planner
   usage_<dataset>.png         share of predictions served by ridge / SVR / LSTM,
                               per adaptive planner
   inference_time_<dataset>.png  mean inference time per prediction, every planner
@@ -28,7 +29,6 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.ticker import FuncFormatter
 
 DATASETS = [("pems_driftinduced", "PeMS"), ("spot_prices_driftinduced", "Spot prices"),
             ("uci_electricity_driftinduced", "UCI electricity")]
@@ -46,6 +46,7 @@ SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#62
 COLOR = dict(zip(ADAPTIVE, SERIES))
 MODEL_COLOR = {"ridge": SERIES[0], "svr": SERIES[1], "lstm": SERIES[2]}
 INK, MUTED, GRID, BASE = "#1f1f1e", "#6b6a64", "#e4e3de", "#8f8e87"
+E_COLOR, MSE_COLOR = "#3b4cc0", "#eda100"   # paper Fig. 7: energy blue, loss orange
 
 plt.rcParams.update({
     "figure.facecolor": "white", "axes.facecolor": "white", "axes.edgecolor": MUTED,
@@ -70,7 +71,7 @@ def load(root: Path) -> dict:
             n = max(sum(steps.values()), 1)
             ec = j.get("event_counters", {})
             raw[(j["dataset"], name)].append({
-                "acc": 100 * j["task_metrics"]["r2"], "e": j["energy_mJ"], "t": j["inference_time_ms"],
+                "acc": 100 * j["task_metrics"]["r2"], "mse": j["task_metrics"]["rmse"] ** 2, "e": j["energy_mJ"], "t": j["inference_time_ms"],
                 "switches": ec.get("model_switches", 0), "retrains": ec.get("retrains", 0),
                 "vmr": ec.get("vmr_events", 0),
                 **{f"use_{m}": 100 * steps.get(m, 0) / n for m in MODEL_COLOR},
@@ -85,68 +86,36 @@ def _save(fig, path: Path) -> None:
     print("wrote", path)
 
 
-def _place_labels(fig, ax, items: list[tuple]) -> None:
-    """Direct labels without collisions: each (x, y, text, colour) takes the
-    first candidate offset whose box overlaps no point and no earlier label."""
-    fig.canvas.draw()
-    rend = fig.canvas.get_renderer()
-    frame = ax.get_window_extent(rend)
-    pts = [ax.transData.transform((x, y)) for x, y, _, _ in items]
-    taken = [(px - 5, py - 5, px + 5, py + 5) for px, py in pts]
-    cands = [(6, 2), (6, -9), (-6, 2), (-6, -9), (0, 7), (0, -15), (6, 10), (6, -17), (-6, 10), (-6, -17),
-             (6, 18), (6, -25), (-6, 18), (-6, -25)]
-    for (x, y, text, colour), (px, py) in zip(items, pts):
-        for dx, dy in cands:
-            ha = "left" if dx > 0 else ("right" if dx < 0 else "center")
-            t = ax.annotate(text, (x, y), xytext=(dx, dy), textcoords="offset points", fontsize=7,
-                            color=colour, ha=ha, va="bottom")
-            bb = t.get_window_extent(rend)
-            box = (bb.x0 - 1, bb.y0 - 1, bb.x1 + 1, bb.y1 + 1)
-            inside = frame.x0 <= box[0] and box[2] <= frame.x1 and frame.y0 <= box[1] and box[3] <= frame.y1
-            if inside and not any(box[0] < o[2] and o[0] < box[2] and box[1] < o[3] and o[1] < box[3] for o in taken):
-                taken.append(box)
-                break
-            t.remove()
-        else:   # nothing free: keep the first candidate, with a leader line
-            ax.annotate(text, (x, y), xytext=(6, 2), textcoords="offset points", fontsize=7, color=colour)
-
-
-def accuracy_vs_energy(data: dict, out: Path, n_seeds: int) -> None:
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5.2))
-    labels = []
-    for ax, (ds, short) in zip(axes, DATASETS):
-        items = []
-        for name in BASELINES:
-            r = data.get((ds, name))
-            if r is None:
-                continue
-            ax.scatter(r["e"], r["acc"], s=46, marker="s", color="white", edgecolor=BASE, linewidth=1.4, zorder=3)
-            items.append((r["e"], r["acc"], LABEL[name], MUTED))
-        for name in ADAPTIVE:
-            r = data.get((ds, name))
-            if r is None:
-                continue
-            ax.scatter(r["e"], r["acc"], s=64, color=COLOR[name], edgecolor="white", linewidth=1.5,
-                       zorder=4, label=LABEL[name])
-            items.append((r["e"], r["acc"], LABEL[name], INK))
-        labels.append((ax, items))
-        ax.set_xscale("log")
-        ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
-        ax.xaxis.set_minor_formatter(FuncFormatter(lambda v, _: f"{v:g}" if v in (3, 5, 7, 20, 30, 50) else ""))
-        ax.set_title(short, loc="left", fontweight="bold")
-        ax.set_xlabel("Total energy per prediction (mJ, log scale)")
-        ax.set_ylabel("Stream R² × 100")
-    handles = [plt.Line2D([], [], marker="o", ls="", color=COLOR[n], markersize=7, label=LABEL[n]) for n in ADAPTIVE]
-    handles.append(plt.Line2D([], [], marker="s", ls="", color="white", markeredgecolor=BASE,
-                              markeredgewidth=1.4, markersize=6, label="Single-model baseline"))
-    fig.legend(handles=handles, loc="lower center", ncol=9, bbox_to_anchor=(0.5, -0.04))
-    fig.suptitle(f"Accuracy vs energy per planner (mean over {n_seeds} seed(s); baselines run once)",
-                 x=0.01, ha="left", fontsize=11)
-    fig.tight_layout(rect=(0, 0.04, 1, 0.97))
-    for ax, items in labels:
-        ax.margins(x=0.08, y=0.08)
-        _place_labels(fig, ax, items)
-    _save(fig, out / "accuracy_vs_energy.png")
+def energy_vs_error(data: dict, out: Path, ds: str, short: str, n_seeds: int) -> None:
+    """As the original paper's Fig. 7 (left): per approach, average total energy
+    per prediction (left axis) beside prediction error, MSE (right axis); lower
+    is better on both."""
+    names = [n for n in BASELINES + ADAPTIVE if (ds, n) in data]
+    x = np.arange(len(names))
+    w = 0.38
+    fig, ax = plt.subplots(figsize=(12, 4.6))
+    ax2 = ax.twinx()
+    ax.bar(x - w / 2, [data[(ds, n)]["e"] for n in names], w, color=E_COLOR, label="Avg energy (mJ)")
+    ax2.bar(x + w / 2, [data[(ds, n)]["mse"] for n in names], w, color=MSE_COLOR, label="Avg loss (MSE)")
+    ax.set_ylabel("Avg energy (mJ)", color=E_COLOR)
+    ax2.set_ylabel("Avg loss (MSE)", color=MSE_COLOR)
+    ax.tick_params(axis="y", colors=E_COLOR)
+    ax2.tick_params(axis="y", colors=MSE_COLOR)
+    ax2.spines["right"].set_visible(True)
+    ax2.grid(False)
+    ax.grid(axis="x", visible=False)
+    ax.set_xticks(x, [LABEL[n] for n in names], rotation=35, ha="right")
+    ax.set_xlim(-0.6, len(names) - 0.4)
+    ax.set_ylim(0, ax.get_ylim()[1] * 1.15)    # headroom for the legend
+    ax2.set_ylim(0, ax2.get_ylim()[1] * 1.15)
+    ax.axvline(len(BASELINES) - 0.5, color=GRID, linewidth=1)
+    h1, l1 = ax.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    ax.legend(h1 + h2, l1 + l2, loc="upper left", ncol=2)
+    ax.set_title(f"{short}: energy vs prediction error per approach — lower is better on both axes "
+                 f"(adaptive: mean over {n_seeds} seed(s))", loc="left", fontweight="bold")
+    fig.tight_layout()
+    _save(fig, out / f"energy_vs_error_{ds}.png")
 
 
 def usage(data: dict, out: Path, ds: str, short: str) -> None:
@@ -217,8 +186,8 @@ def main() -> None:
     out = root / "plots"
     out.mkdir(exist_ok=True)
     data, n_seeds = load(root)
-    accuracy_vs_energy(data, out, n_seeds)
     for ds, short in DATASETS:
+        energy_vs_error(data, out, ds, short, n_seeds)
         usage(data, out, ds, short)
         inference_time(data, out, ds, short)
         adaptations(data, out, ds, short)
