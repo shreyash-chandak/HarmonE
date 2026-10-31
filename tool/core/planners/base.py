@@ -112,7 +112,7 @@ def _register():
     Python's import system is idempotent — re-importing an already-loaded
     module is a no-op, so this is safe to call multiple times.
     """
-    from . import naive, random_switch, greedy_switch, harmone_original, violation_aware, violation_aware_gated, pareto, bandit, naive_prt, random_switch_prt  # noqa: F401
+    from . import naive, random_switch, switch, greedy_switch, harmone_original, violation_aware, violation_aware_gated, pareto, bandit, naive_prt, random_switch_prt  # noqa: F401
 
 
 def get_planner(name: str) -> Planner:

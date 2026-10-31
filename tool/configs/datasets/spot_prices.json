@@ -14,7 +14,7 @@
     "lstm": {
       "weights_path": "managed_system_regression/models/lstm_spot_prices.pt",
       "loader": "adapters.loaders.lstm_loader",
-      "cost_class": "medium",
+      "cost_class": "heavy",
       "hyperparams": {
         "train":   {"epochs": 45, "lr": 0.0005, "batch_size": 8},
         "retrain": {"mode": "finetune"}

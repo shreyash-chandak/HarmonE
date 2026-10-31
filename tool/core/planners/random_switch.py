@@ -2,7 +2,8 @@
 core/planners/random_switch.py — S2: Random model switch.
 
 On any violation, picks uniformly at random from the non-current models.
-The paper's original "simple switch" baseline, honestly renamed.
+Our own additional baseline, kept registered but no longer in the regression
+grid (2026-10-31). The paper's "Switch" is core/planners/switch.py.
 """
 
 from __future__ import annotations

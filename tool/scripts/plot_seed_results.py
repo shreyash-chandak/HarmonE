@@ -33,11 +33,11 @@ import numpy as np
 DATASETS = [("pems_driftinduced", "PeMS"), ("spot_prices_driftinduced", "Spot prices"),
             ("uci_electricity_driftinduced", "UCI electricity")]
 BASELINES = ["naive_ridge", "naive_svr", "naive_lstm", "naive_prt_ridge", "naive_prt_svr", "naive_prt_lstm"]
-ADAPTIVE = ["random_switch", "random_switch_prt", "greedy_switch", "harmone_original",
+ADAPTIVE = ["switch", "switch_prt", "random_switch", "random_switch_prt", "greedy_switch", "harmone_original",
             "violation_aware", "violation_aware_gated", "pareto", "bandit"]
 LABEL = {"naive_ridge": "Ridge", "naive_svr": "SVR", "naive_lstm": "LSTM",
          "naive_prt_ridge": "Ridge + PRT", "naive_prt_svr": "SVR + PRT", "naive_prt_lstm": "LSTM + PRT",
-         "random_switch": "Random switch", "random_switch_prt": "Random switch + PRT",
+         "switch": "Switch", "switch_prt": "Switch + PRT", "random_switch": "Random switch", "random_switch_prt": "Random switch + PRT",
          "greedy_switch": "Greedy switch", "harmone_original": "HarmonE (original)",
          "violation_aware": "Violation-aware (S5)", "violation_aware_gated": "S5a gated",
          "pareto": "Pareto", "bandit": "Bandit"}

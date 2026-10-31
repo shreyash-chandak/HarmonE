@@ -36,7 +36,7 @@ from core.scoring import window_r2_mean  # noqa: E402
 DATASETS = ["pems_driftinduced", "spot_prices_driftinduced", "uci_electricity_driftinduced"]
 SHORT = {"pems_driftinduced": "PeMS", "spot_prices_driftinduced": "Spot", "uci_electricity_driftinduced": "UCI"}
 ORDER = ["naive_ridge", "naive_svr", "naive_lstm", "naive_prt_ridge", "naive_prt_svr", "naive_prt_lstm",
-         "random_switch", "random_switch_prt", "greedy_switch", "harmone_original",
+         "switch", "switch_prt", "random_switch", "random_switch_prt", "greedy_switch", "harmone_original",
          "violation_aware", "violation_aware_gated", "pareto", "bandit"]
 MODELS = ("ridge", "svr", "lstm")
 

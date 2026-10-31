@@ -24,7 +24,7 @@ VENV="$TOOL_DIR/../.venv/bin/activate"
 RUNS_DIR=runs_smoke
 ENERGY_FROM=runs_calib
 DATASETS="pems_driftinduced spot_prices_driftinduced uci_electricity_driftinduced"
-PLANNERS="naive naive_prt random_switch random_switch_prt greedy_switch harmone_original violation_aware violation_aware_gated pareto bandit"
+PLANNERS="naive naive_prt switch switch_prt greedy_switch harmone_original violation_aware violation_aware_gated pareto bandit"
 PY="${PYTHON:-python3}"
 while [[ $# -gt 0 ]]; do
     case "$1" in

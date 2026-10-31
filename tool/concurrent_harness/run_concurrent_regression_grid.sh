@@ -55,7 +55,7 @@ LOG_DIR="$RUNS_DIR/logs"
 mkdir -p "$LOG_DIR"
 
 DATASETS=(pems_driftinduced uci_electricity_driftinduced spot_prices_driftinduced)
-ADAPTIVE_PLANNERS=(random_switch random_switch_prt greedy_switch harmone_original violation_aware violation_aware_gated pareto bandit)
+ADAPTIVE_PLANNERS=(switch switch_prt greedy_switch harmone_original violation_aware violation_aware_gated pareto bandit)
 REGRESSION_MODELS=(lstm ridge svr)
 
 declare -A DRIFT_CSV

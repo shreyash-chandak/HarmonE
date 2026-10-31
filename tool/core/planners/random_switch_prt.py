@@ -1,8 +1,9 @@
 """
 core/planners/random_switch_prt.py — Random Switch + Periodic Retraining (PRT) baseline.
 
-Replicates the Switch+PRT baseline from the paper: random model switching on
-any violation, PLUS blind retraining of the active model every prt_interval steps.
+Our own additional baseline (the paper's Switch+PRT is core/planners/switch.py):
+random model switching on any violation, PLUS blind retraining of the active
+model every prt_interval steps.
 PRT takes priority over a same-cycle switch decision. Config-driven via
 thresholds["prt_interval"] (falls back to PRT_INTERVAL=3200 when absent) — see
 naive_prt.py's docstring for why CV needed this to stop being a shared, regression-

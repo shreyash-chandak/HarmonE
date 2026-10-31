@@ -152,7 +152,7 @@ def check_run(run: Path, naive_dirs: list[Path], cache: dict) -> tuple[dict, lis
         exp = EXPECTED.get(ds, {}).get(pin)
         if exp is not None and tm.get("r2") is not None and abs(tm["r2"] - exp) > 0.02:
             fail.append(f"static R² {tm['r2']:.4f}, expected {exp}")
-    if planner in ("naive_prt", "random_switch_prt"):
+    if planner in ("naive_prt", "switch_prt", "random_switch_prt"):
         sched = prt_schedule(n, mi, int(thr.get("prt_interval", 3200)))
         info["rt_exp"] = len(sched)
         done = info["rt"] + ec.get("retrain_skipped", 0) + info["busy"]

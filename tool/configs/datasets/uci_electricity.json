@@ -13,7 +13,7 @@
     "lstm": {
       "weights_path": "managed_system_regression/models/lstm_uci_electricity.pt",
       "loader": "adapters.loaders.lstm_loader",
-      "cost_class": "medium",
+      "cost_class": "heavy",
       "hyperparams": {
         "train":   {"epochs": 4, "lr": 0.0005, "batch_size": 8},
         "retrain": {"epochs": 50, "lr": 0.001, "batch_size": 16}

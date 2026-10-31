@@ -72,6 +72,27 @@ def _window_r2_mean(pred_csv: Path, interval: int, window: int) -> float:
                           [float(r["y_pred"]) for r in rows], interval, window)
 
 
+_COST_RANK = {"light": 0, "medium": 1, "heavy": 2}
+
+
+def cost_class_warnings(cfg: dict, per_model: dict) -> list[str]:
+    """Guard (2026-10-31): the planners' cost_class order must agree with the
+    measured energy order, and the LSTM must be the only most expensive class.
+    A wrong class silently disabled S5's unknown-model branches on Spot and UCI."""
+    models = cfg.get("models", {})
+    rank = {m: _COST_RANK.get(models.get(m, {}).get("cost_class", "medium"), 1) for m in per_model}
+    out = []
+    names = list(per_model)
+    for a in names:
+        for b in names:
+            if rank[a] < rank[b] and per_model[a]["energy_uJ_per_step"] > per_model[b]["energy_uJ_per_step"]:
+                out.append(f"{a} has a lower cost_class than {b} but measured more energy "
+                           f"({per_model[a]['energy_uJ_per_step']:.0f} vs {per_model[b]['energy_uJ_per_step']:.0f} µJ)")
+    if "lstm" in rank and any(rank[m] >= rank["lstm"] for m in names if m != "lstm"):
+        out.append("lstm is not strictly the most expensive cost_class")
+    return out
+
+
 def calibrate(dataset: str, runs_dir: Path, configs_dir: Path) -> dict:
     cfg_path = configs_dir / f"{dataset}.json"
     cfg = json.loads(cfg_path.read_text())
@@ -116,9 +137,13 @@ def calibrate(dataset: str, runs_dir: Path, configs_dir: Path) -> dict:
     acc_ridge = per_model["ridge"]["accuracy"] if "ridge" in per_model else acc_cheap
     credit_cap = credit_cap_from_naive(round(min_acc, 4), acc_ridge,
                                        int(cfg.get("s5_credit_horizon", DEFAULT_CREDIT_HORIZON)))
+    warnings_ = cost_class_warnings(cfg, per_model)
+    for w in warnings_:
+        print(f"WARNING {dataset}: {w}", file=sys.stderr)
     return {
         "dataset": dataset,
         "per_model": per_model,
+        "cost_class_warnings": warnings_,
         "values": {
             "E_m": round(e_m, 1),
             "E_M": round(e_M, 1),

@@ -96,6 +96,8 @@ PIN_LABELS = {
 
 # S2–S7 planners (non-pin, non-naive)
 PLANNER_ORDER = [
+    "switch",
+    "switch_prt",
     "random_switch",
     "random_switch_prt",
     "greedy_switch",
@@ -106,8 +108,10 @@ PLANNER_ORDER = [
     "bandit",
 ]
 PLANNER_LABELS = {
-    "random_switch":     "S2 Random",
-    "random_switch_prt": "S2b Rnd-PRT",
+    "switch":            "S2 Switch",
+    "switch_prt":        "S2b Switch-PRT",
+    "random_switch":     "Random",
+    "random_switch_prt": "Rnd-PRT",
     "greedy_switch":     "S3 Greedy",
     "harmone_original":  "S4 HarmonE",
     "violation_aware":   "S5 ViolAware",
@@ -123,6 +127,8 @@ _GRAY_6 = ["#b0b0b0", "#909090", "#cccccc", "#a0a0a0", "#d8d8d8", "#888888"]
 _CV_GRAYS = ["#b0b0b0", "#707070", "#444444"]
 
 PLANNER_COLORS = {
+    "switch":            "#2f5fb0",
+    "switch_prt":        "#5583c8",
     "random_switch":     "#4878d0",
     "random_switch_prt": "#6fa0e0",
     "greedy_switch":     "#e87d4c",
