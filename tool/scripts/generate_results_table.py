@@ -28,9 +28,12 @@ energy are computed from whatever predictions.csv it managed to write before
 failing, same as a clean run, but the row is marked FAILED so the numbers
 aren't mistaken for a clean result.
 
+Regression rows are one per dataset/planner/pinned model with mean ± sd over the
+runs found; pass --logs-dir once per seed folder (2026-10-31).
+
 Usage (from inside tool/):
     python3 scripts/generate_results_table.py
-    python3 scripts/generate_results_table.py --logs-dir runs/logs --out ../context/results.md
+    python3 scripts/generate_results_table.py --logs-dir runs_seed1/logs --logs-dir runs_seed2/logs --out ../context/results.md
 """
 
 from __future__ import annotations
@@ -86,6 +89,17 @@ def _fmt(value, digits=4) -> str:
     return f"{value:.{digits}f}"
 
 
+def _mean_sd(values: list, digits: int = 4) -> str:
+    """"mean ± sd" of the values present (no sd for a single value)."""
+    import statistics
+    v = [x for x in values if x is not None]
+    if not v:
+        return ""
+    if len(v) == 1:
+        return _fmt(v[0], digits)
+    return f"{statistics.mean(v):.{digits}f} ± {statistics.stdev(v):.{digits}f}"
+
+
 def load_runs(logs_dir: Path) -> list[dict]:
     runs = []
     for log_path in sorted(logs_dir.glob("*.log")):
@@ -117,29 +131,33 @@ def load_offline_metric(logs_dir: Path, run_id: str) -> tuple[float | None, str 
 
 def build_regression_table(runs: list[dict]) -> str:
     rows = [m for m in runs if "r2" in m.get("task_metrics", {})]
-    rows.sort(key=lambda m: (
-        DATASET_ORDER.index(m["dataset"]) if m["dataset"] in DATASET_ORDER else 99,
-        _planner_sort_key(m.get("planner", ""), m.get("pin_model")),
-    ))
+    groups: dict[tuple, list[dict]] = {}
+    for m in rows:
+        groups.setdefault((m["dataset"], m.get("planner", ""), m.get("pin_model")), []).append(m)
+
+    def energy(m: dict):
+        e = m.get("energy_mJ")
+        return m.get("event_counters", {}).get("energy_used_mJ") if e is None else e
 
     lines = [
-        "| Dataset | Planner | Pin Model | Stream R² | Window R² | Energy (mJ/prediction) | Status |",
-        "|---|---|---|---|---|---|---|",
+        "| Dataset | Planner | Pin Model | Runs | Stream R² | Window R² | Energy (mJ/prediction) | Status |",
+        "|---|---|---|---|---|---|---|---|",
     ]
-    for m in rows:
-        tm = m["task_metrics"]
-        energy_mj = m.get("energy_mJ")
-        if energy_mj is None:
-            energy_mj = m.get("event_counters", {}).get("energy_used_mJ")
-        status = "" if m.get("status") == "ok" else f"**FAILED** — {m.get('failure_reason', '')}"
+    for (ds, planner, pin), ms in sorted(groups.items(), key=lambda kv: (
+            DATASET_ORDER.index(kv[0][0]) if kv[0][0] in DATASET_ORDER else 99,
+            _planner_sort_key(kv[0][1], kv[0][2]))):
+        failed = [m for m in ms if m.get("status") != "ok"]
+        status = f"**{len(failed)} FAILED** — {failed[0].get('failure_reason', '')}" if failed else ""
         lines.append(
-            f"| {m['dataset']} | {m.get('planner', '')} | {m.get('pin_model') or '-'} "
-            f"| {_fmt(tm.get('r2'))} | {_fmt(tm.get('window_r2'))} | {_fmt(energy_mj, 3)} | {status} |"
+            f"| {ds} | {planner} | {pin or '-'} | {len(ms)} "
+            f"| {_mean_sd([m['task_metrics'].get('r2') for m in ms])} "
+            f"| {_mean_sd([m['task_metrics'].get('window_r2') for m in ms])} "
+            f"| {_mean_sd([energy(m) for m in ms], 3)} | {status} |"
         )
     return "\n".join(lines)
 
 
-def build_cv_table(runs: list[dict], logs_dir: Path) -> str:
+def build_cv_table(runs: list[dict]) -> str:
     rows = [m for m in runs if "mean_proxy_acc" in m.get("task_metrics", {})]
     rows.sort(key=lambda m: (
         DATASET_ORDER.index(m["dataset"]) if m["dataset"] in DATASET_ORDER else 99,
@@ -154,7 +172,7 @@ def build_cv_table(runs: list[dict], logs_dir: Path) -> str:
         tm = m["task_metrics"]
         energy_mj = m.get("event_counters", {}).get("energy_used_mJ")
         status = "" if m.get("status") == "ok" else f"**FAILED** — {m.get('failure_reason', '')}"
-        off_val, off_label = load_offline_metric(logs_dir, m["run_id"])
+        off_val, off_label = load_offline_metric(m["_log_path"].parent, m["run_id"])
         lines.append(
             f"| {m['dataset']} | {m.get('planner', '')} | {m.get('pin_model') or '-'} "
             f"| {_fmt(off_val)} | {off_label or ''} | {_fmt(tm.get('mean_proxy_acc'))} "
@@ -165,18 +183,19 @@ def build_cv_table(runs: list[dict], logs_dir: Path) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--logs-dir", default="runs/logs")
+    parser.add_argument("--logs-dir", action="append", default=None,
+                        help="Repeat once per seed folder (default runs/logs).")
     parser.add_argument("--out", default="../context/results.md")
     args = parser.parse_args()
 
-    logs_dir = Path(args.logs_dir)
+    logs_dirs = [Path(d) for d in (args.logs_dir or ["runs/logs"])]
     out_path = Path(args.out)
 
-    runs = load_runs(logs_dir)
-    print(f"Parsed {len(runs)} run logs from {logs_dir}")
+    runs = [m for d in logs_dirs for m in load_runs(d)]
+    print(f"Parsed {len(runs)} run logs from {[str(d) for d in logs_dirs]}")
 
     reg_table = build_regression_table(runs)
-    cv_table = build_cv_table(runs, logs_dir)
+    cv_table = build_cv_table(runs)
 
     from datetime import datetime, timezone
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")

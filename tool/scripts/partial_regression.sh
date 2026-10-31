@@ -9,6 +9,9 @@
 #   3. all 8 adaptive planners x 3 datasets for ONE seed -> runs_seed<N>/,
 #      checked with check_runs.py; then a summary (aggregate_seeds + s5_report)
 #
+# Note (2026-10-31): the main pipeline now runs baselines inside every seed, and
+# energy_mJ is net of overlaps; do not mix baselines made before that with new runs.
+#
 # Usage (from tool/, inside tmux, after git checkout -- configs/ && git pull):
 #   source ../.venv/bin/activate
 #   bash scripts/partial_regression.sh             # seed 1

@@ -543,3 +543,155 @@ class TestL6AtomicVmrVersion:
         (partial / "meta.json").write_text("{not json")
         assert [x.tag for x in vmr.list_versions("ridge")] == ["a"]
         assert not [n for n in os.listdir(tmp_path / "v" / "ridge") if n.endswith(".tmp") and n != partial.name]
+
+
+# ── step 7: pipeline, seeding, checks ─────────────────────────────────────────
+
+class TestSeededRetrain:
+    def _store(self, tmp_path, run_seed):
+        import torch
+        from adapters.loaders import LSTMModel
+        from experiments.run_experiment import _load_model_store
+        w = tmp_path / "lstm.pt"
+        torch.save(LSTMModel().state_dict(), w)
+        cfg = {"train_seed": 3, "_run_seed": run_seed, "models": {"lstm": {"weights_path": str(w), "hyperparams": {}}}}
+        return _load_model_store(cfg)
+
+    def test_retrain_seed_is_train_seed_plus_seed(self, tmp_path):
+        assert self._store(tmp_path, 2)["lstm"]["retrain_seed"] == 5
+
+    def test_different_seeds_give_different_weights(self, tmp_path):
+        import numpy as np
+        from sklearn.preprocessing import MinMaxScaler
+        from experiments.run_experiment import _do_inline_retrain
+        hist = [float(x) for x in np.sin(np.arange(60) / 3.0)]
+        scaler = MinMaxScaler().fit(np.array(hist).reshape(-1, 1))
+        out = []
+        for seed in (1, 2, 1):
+            s = self._store(tmp_path, seed)
+            s["lstm"]["retrain_params"] = {"epochs": 1, "lr": 1e-3, "batch_size": 16}
+            assert _do_inline_retrain("lstm", s, {}, hist, scaler, 5, 1200)
+            out.append(s["lstm"]["model"].fc.weight.detach().numpy().copy())
+        assert not (out[0] == out[1]).all() and (out[0] == out[2]).all()
+
+
+class TestA3ValRows:
+    def _ad(self, tmp_path):
+        import pandas as pd
+        from adapters.regression_csv import RegressionCSVAdapter
+        p = tmp_path / "d.csv"
+        pd.DataFrame({"v": range(100)}).to_csv(p, index=False)
+        return RegressionCSVAdapter({"data_path": str(p), "value_column": "v", "train_frac": 0.6, "val_frac": 0.1, "seq_length": 2})
+
+    def test_val_rows_overlap_stream(self, tmp_path):
+        a = self._ad(tmp_path)
+        assert a.val_row_range() == (60, 70) and a.stream_row_range() == (60, 100)
+        assert list(a.val_split()) == list(range(60, 70))
+        assert next(iter(a.stream())).inputs[0] == 60
+
+    def test_assert_disjoint(self, tmp_path):
+        a = self._ad(tmp_path)
+        a.assert_disjoint_from_stream(range(0, 60))
+        with pytest.raises(AssertionError):
+            a.assert_disjoint_from_stream(range(*a.val_row_range()))
+
+
+class TestCalibrationBasis:
+    def _run(self, root, model, e, ds="d"):
+        import csv
+        d = root / f"{ds}_naive_{model}_conc"
+        d.mkdir(parents=True)
+        (d / "run_manifest.json").write_text(json.dumps({"energy_by_model": {model: {"energy_per_inference_mJ": e, "energy_mJ": 1, "n_steps": 1}}}))
+        with open(d / "predictions.csv", "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["y_true", "y_pred"])
+            for i in range(120):
+                w.writerow([i % 7, i % 7])
+
+    def test_mean_across_dirs_and_stated(self, tmp_path):
+        from experiments.calibrate_from_naive_runs import calibrate
+        cfgs = tmp_path / "c"
+        cfgs.mkdir()
+        (cfgs / "d.json").write_text(json.dumps({"models": {"lstm": {"cost_class": "heavy"}, "ridge": {"cost_class": "light"}},
+                                                 "monitor_interval": 50}))
+        for name, l, r in (("s1", 10., 2.), ("s2", 20., 4.)):
+            self._run(tmp_path / name, "lstm", l)
+            self._run(tmp_path / name, "ridge", r)
+        one = calibrate("d", tmp_path / "s1", cfgs)
+        assert one["values"]["E_M"] == 10000.0 and "s1" in one["calibration_basis"]
+        both = calibrate("d", [tmp_path / "s1", tmp_path / "s2"], cfgs)
+        assert both["values"]["E_M"] == 15000.0 and both["values"]["E_m"] == 3000.0 and "mean" in both["calibration_basis"]
+
+
+class TestA2CheckRuns:
+    def _load(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("check_runs_mod", _TOOL / "scripts" / "check_runs.py")
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        return m
+
+    FIELDS = ["step", "violation", "violation_effective", "drift_confirmed", "decision_action",
+              "normalized_energy", "energy_threshold_before"]
+
+    def _run(self, tmp_path, events, decisions=None):
+        import csv
+        with open(tmp_path / "mape_events.csv", "w", newline="") as f:
+            w = csv.DictWriter(f, self.FIELDS)
+            w.writeheader()
+            for e in events:
+                w.writerow({k: e.get(k, "") for k in self.FIELDS})
+        with open(tmp_path / "planner_decisions.csv", "w", newline="") as f:
+            w = csv.DictWriter(f, ["step", "monitor_model", "current_model"])
+            w.writeheader()
+            for e in events:
+                w.writerow({"step": e["step"], "monitor_model": (decisions or {}).get(e["step"], "lstm"), "current_model": "lstm"})
+
+    THR = {"models": {"lstm": {"cost_class": "heavy"}, "ridge": {"cost_class": "light"}}, "drift_cooldown_rows": 2600,
+           "background_retrain": True}
+    OK = {"event_counters": {}, "energy_mJ": 1.0, "energy_gross_mJ": 1.0, "drift_checks": 10}
+
+    def _check(self, tmp_path, events, j=None, thr=None, planner="harmone_original", decisions=None):
+        self._run(tmp_path, events, decisions)
+        return self._load().check_fix_plan(tmp_path, j or self.OK, thr or self.THR, planner)
+
+    def test_clean(self, tmp_path):
+        assert self._check(tmp_path, [{"step": 260, "decision_action": "noop"}]) == []
+
+    def test_lag_adaptation(self, tmp_path):
+        ev = [{"step": 260, "violation_effective": "drift", "decision_action": "retrain", "drift_confirmed": "True"}]
+        assert "lag" in self._check(tmp_path, ev, decisions={260: "ridge"})[0]
+
+    def test_unacted_drift(self, tmp_path):
+        ev = [{"step": 260, "violation_effective": "score", "decision_action": "noop", "drift_confirmed": "True"}]
+        assert "unacted" in self._check(tmp_path, ev)[0]
+
+    def test_score_with_energy(self, tmp_path):
+        ev = [{"step": 260, "violation": "score", "decision_action": "noop", "normalized_energy": "0.9", "energy_threshold_before": "0.5"}]
+        assert "score violations" in self._check(tmp_path, ev)[0]
+
+    def test_inside_cooldown(self, tmp_path):
+        ev = [{"step": s, "violation_effective": "drift", "decision_action": "retrain"} for s in (260, 520)]
+        assert "cooldown" in self._check(tmp_path, ev)[0]
+
+    def test_prt_retrain_not_treated_as_drift(self, tmp_path):
+        ev = [{"step": s, "decision_action": "retrain"} for s in (260, 520)]
+        assert self._check(tmp_path, ev, decisions={260: "ridge"}, j={**self.OK, "drift_checks": 0}, planner="switch_prt") == []
+
+    def test_non_drift_planner_with_checks(self, tmp_path):
+        assert "ignores drift" in self._check(tmp_path, [{"step": 260, "decision_action": "noop"}], planner="switch")[0]
+
+    def test_naive_with_mape(self, tmp_path):
+        j = {**self.OK, "drift_checks": 0, "event_counters": {"mape_k_energy_uJ": 5.0}}
+        assert "MAPE-K" in self._check(tmp_path, [{"step": 260, "decision_action": "noop"}], j=j, planner="naive")[0]
+
+    def test_net_above_gross(self, tmp_path):
+        j = {**self.OK, "energy_mJ": 2.0}
+        assert "energy_gross_mJ" in self._check(tmp_path, [{"step": 260, "decision_action": "noop"}], j=j)[0]
+
+    def test_lstm_cost_class(self, tmp_path):
+        thr = {**self.THR, "models": {"lstm": {"cost_class": "medium"}, "svr": {"cost_class": "medium"}}}
+        assert "cost_class" in self._check(tmp_path, [{"step": 260, "decision_action": "noop"}], thr=thr)[0]
+
+    def test_committed_configs_pass(self):
+        assert self._load().check_configs() == []

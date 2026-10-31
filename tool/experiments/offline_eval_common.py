@@ -104,6 +104,8 @@ def build_stream_index(
         label_paths = [None] * len(image_paths)
         inline_labels = [None] * len(image_paths)
 
+    # CV only: matches adapters/cv_imagedir.py, whose stream() starts after the
+    # val slice. The regression adapter's stream does not skip it.
     n = len(image_paths)
     train_frac = float(config.get("train_frac", 0.8))
     val_frac = float(config.get("val_frac", 0.0))

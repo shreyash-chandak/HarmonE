@@ -11,7 +11,9 @@
 # Usage (from tool/; ~20-30 min on the remote for all 39 runs):
 #   bash scripts/smoke_check.sh
 #   bash scripts/smoke_check.sh --datasets "pems_driftinduced" --planners "naive_prt harmone_original"
-# Options: --runs-dir runs_smoke  --energy-from runs_calib
+# Options: --runs-dir runs_smoke  --energy-from runs_calib  --configs-dir DIR
+# Energies come from --energy-from, so the configs' E_m/E_M must be from the same
+# machine: pass a copy calibrated from those runs if configs/ holds another's.
 # Result: <runs-dir>/check.txt (also printed); exit 1 if a run failed a check.
 
 set -uo pipefail
@@ -23,6 +25,7 @@ VENV="$TOOL_DIR/../.venv/bin/activate"
 
 RUNS_DIR=runs_smoke
 ENERGY_FROM=runs_calib
+CONFIGS_ARG=()
 DATASETS="pems_driftinduced spot_prices_driftinduced uci_electricity_driftinduced"
 PLANNERS="naive naive_prt switch switch_prt greedy_switch harmone_original violation_aware violation_aware_gated pareto bandit"
 PY="${PYTHON:-python3}"
@@ -30,6 +33,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --runs-dir) RUNS_DIR="$2"; shift 2 ;;
         --energy-from) ENERGY_FROM="$2"; shift 2 ;;
+        --configs-dir) CONFIGS_ARG=(--configs-dir "$2"); shift 2 ;;
         --datasets) DATASETS="$2"; shift 2 ;;
         --planners) PLANNERS="$2"; shift 2 ;;
         *) echo "unknown argument: $1"; exit 1 ;;
@@ -50,7 +54,7 @@ for ds in $DATASETS; do
             id="${ds}_${planner}${m:+_$m}_conc"
             t0=$(date +%s)
             "$PY" concurrent_harness/run_concurrent.py --dataset "$ds" --planner "$planner" ${m:+--pin-model "$m"} \
-                --run-id "$id" --runs-dir "$RUNS_DIR" --seed 1 --smoke --smoke-energy-from "$ENERGY_FROM" \
+                --run-id "$id" --runs-dir "$RUNS_DIR" --seed 1 --smoke --smoke-energy-from "$ENERGY_FROM" "${CONFIGS_ARG[@]}" \
                 > "$RUNS_DIR/logs/$id.log" 2>&1
             echo "  $id: exit $? ($(( $(date +%s) - t0 )) s)"
         done

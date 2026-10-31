@@ -99,6 +99,7 @@ def main() -> None:
         from core.device import configure_device
         configure_device(dataset_config)  # CV fine-tune / VMR restore on the GPU (core/device.py)
     local_dataset_config = kio.localize_dataset_config(dataset_config, knowledge_dir)
+    local_dataset_config["_run_seed"] = args.seed  # LSTM retrains: train_seed + seed
     model_names = list(dataset_config.get("models", {}).keys())
     energy_backend = dataset_config.get("energy_meter", "auto")
 

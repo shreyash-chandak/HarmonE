@@ -2,10 +2,11 @@
 scripts/runs_readme.py — per-dataset results tables for one machine's runs
 folder, written to <root>/README.md (2026-10-25).
 
-Expects <root>/runs_calib (single-model baselines, run once) and
-<root>/runs_seed<N> (adaptive planners). Per planner and dataset:
-accuracy (stream R² x 100) min / max / mean over seeds, total energy per
-prediction (energy_mJ: inference + MAPE-K + retrains) min / max / mean,
+Expects <root>/runs_seed<N> holding all runs (baselines inside every seed since
+2026-10-31; for older folders, baselines come from <root>/runs_calib). Per planner
+and dataset: accuracy (stream R² x 100) min / max / mean ± sd over seeds, total
+energy per prediction (energy_mJ: inference + MAPE-K + retrains, net of overlaps)
+min / max / mean ± sd,
 mean inference energy per prediction (inference_energy_mJ), and for the
 adaptive planners accuracy / total energy (mean over seeds of the per-run
 ratio).
@@ -49,7 +50,9 @@ def main() -> None:
                    key=lambda d: int(re.sub(r"\D", "", d.name)))
     runs = collections.defaultdict(list)   # (dataset, planner) -> [manifest]
     thr = {}
-    for d in [root / "runs_calib", *seeds]:
+    # runs_calib only calibrates when the seeds hold their own baselines
+    seeds_have_baselines = any(any(d.glob("*_naive_*_conc/run_manifest.json")) for d in seeds)
+    for d in ([] if seeds_have_baselines else [root / "runs_calib"]) + seeds:
         for mf in sorted(d.glob("*_conc/run_manifest.json")):
             j = json.loads(mf.read_text())
             name = j["planner"] + (f"_{j['pin_model']}" if j.get("pin_model") else "")
@@ -59,9 +62,9 @@ def main() -> None:
 
     out = [f"# Regression results — {args.machine}", "",
            f"Generated {date.today()} by `scripts/runs_readme.py` from `{root.name}/`.", "",
-           f"- **Seeds:** {', '.join(s.name.replace('runs_seed', '') for s in seeds)} "
-           f"(adaptive planners, `runs_seed<N>/`). Single-model baselines run once "
-           "(`runs_calib/`), so their min = max = mean.",
+           f"- **Seeds:** {', '.join(s.name.replace('runs_seed', '') for s in seeds)} (`runs_seed<N>/`). "
+           + ("Baselines run inside every seed, interleaved with the planners." if seeds_have_baselines else
+              "Single-model baselines run once (`runs_calib/`), so their min = max = mean."),
            "- **Accuracy:** stream R² × 100 over the whole drift-induced test stream.",
            "- **Total energy:** all metered energy of the run (per-prediction pkg[0] readings + MAPE-K "
            "cycles + background retrains), net of overlaps, divided by the number of predictions, in mJ. "
@@ -80,8 +83,8 @@ def main() -> None:
 
     for ds, short in DATASETS:
         out += ["", f"## {short}", "",
-                "| Planner | Runs | Acc. min | Acc. max | Acc. mean | Total E min (mJ) | Total E max (mJ) "
-                "| Total E mean (mJ) | Inference E mean (mJ) | Acc. / total E |",
+                "| Planner | Runs | Acc. min | Acc. max | Acc. mean ± sd | Total E min (mJ) | Total E max (mJ) "
+                "| Total E mean ± sd (mJ) | Inference E mean (mJ) | Acc. / total E |",
                 "|---|---|---|---|---|---|---|---|---|---|"]
         for name in BASELINES + ADAPTIVE:
             js = runs.get((ds, name))
@@ -91,8 +94,9 @@ def main() -> None:
             e = np.array([j["energy_mJ"] for j in js])
             ei = np.array([j["inference_energy_mJ"] for j in js])
             ratio = f"{np.mean(acc / e):.3f}" if name in ADAPTIVE else "—"
-            out.append(f"| {LABEL[name]} | {len(js)} | {acc.min():.2f} | {acc.max():.2f} | {acc.mean():.2f} "
-                       f"| {e.min():.2f} | {e.max():.2f} | {e.mean():.2f} | {ei.mean():.2f} | {ratio} |")
+            sd = lambda v: float(np.std(v, ddof=1)) if len(v) > 1 else 0.0
+            out.append(f"| {LABEL[name]} | {len(js)} | {acc.min():.2f} | {acc.max():.2f} | {acc.mean():.2f} ± {sd(acc):.2f} "
+                       f"| {e.min():.2f} | {e.max():.2f} | {e.mean():.2f} ± {sd(e):.2f} | {ei.mean():.2f} | {ratio} |")
     (root / "README.md").write_text("\n".join(out) + "\n", encoding="utf-8")
     sys.stdout.reconfigure(encoding="utf-8")
     print("\n".join(out))

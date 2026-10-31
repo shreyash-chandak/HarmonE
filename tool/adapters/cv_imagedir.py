@@ -115,6 +115,12 @@ class CVImageDirAdapter(DatasetAdapter):
             self._inline_labels[: self._train_end],
         )
 
+    def assert_disjoint_from_stream(self, rows) -> None:
+        """Raise AssertionError if any row index is in the stream's rows (from
+        val_end on: for CV, unlike regression, val_split() is held out)."""
+        bad = [int(r) for r in rows if int(r) >= self._val_end]
+        assert not bad, f"{len(bad)} of these rows are stream rows (from {self._val_end}), e.g. {bad[:3]}"
+
     def stream(self) -> Iterator[Sample]:
         for idx, path in enumerate(self._image_paths[self._val_end :]):
             yield Sample(index=idx, inputs=path, ground_truth=None)

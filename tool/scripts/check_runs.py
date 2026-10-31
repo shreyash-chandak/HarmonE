@@ -16,10 +16,19 @@ Per run (runs/<dataset>_<planner>[_<model>]_conc/):
         busy-skipped retrains (they wait for retrains); S5 runs (both variants)
         with s5_credit missing or outside ±s5_credit_cap or cycles without an
         s5_reason; new-S5 runs with an energy-violation noop other than
-        "already_cheapest" or a switch on drift (2026-10-26).
+        "already_cheapest" or a switch on drift (2026-10-26). Since 2026-10-31,
+        on runs made with those fixes: a drift adaptation in a lag cycle; a
+        confirmed drift left unacted; a score violation logged while energy also
+        exceeded its threshold; a drift adaptation inside the global cooldown; a
+        planner that ignores drift with drift checks; naive (or naive_prt with
+        background retrains) with MAPE-K energy; energy_mJ > energy_gross_mJ; an
+        LSTM whose cost_class is not the most expensive (also over every
+        regression config, before the runs).
   WARN  ridge/SVR retrain gain over the 0.075 cap; naive_prt R² over PRT_MAX; a retrain that lowers R²;
         busy-skipped adaptations (real runs); "no drift result from t2" log lines;
         energy readings missing on > 1 % of rows (real runs).
+
+The fix-plan counters are printed per run in a second table.
 
 Usage (from tool/):
     python3 scripts/check_runs.py --runs runs_smoke
@@ -156,9 +165,11 @@ def check_run(run: Path, naive_dirs: list[Path], cache: dict) -> tuple[dict, lis
     if planner in ("naive_prt", "switch_prt", "random_switch_prt"):
         sched = prt_schedule(n, mi, int(thr.get("prt_interval", 3200)))
         info["rt_exp"] = len(sched)
-        done = info["rt"] + ec.get("retrain_skipped", 0) + info["busy"]
-        if done != len(sched):
-            fail.append(f"{done} PRT retrains (ok+failed+busy), schedule has {len(sched)}")
+        # A busy-skipped PRT retrain stays pending and runs later (prt_pending);
+        # several skips can collapse into one retry, or one can be left at the end.
+        done = info["rt"] + ec.get("retrain_skipped", 0)
+        if not len(sched) - info["busy"] <= done <= len(sched):
+            fail.append(f"{done} PRT retrains (ok+failed) with {info['busy']} busy skips, schedule has {len(sched)}")
         if ec.get("retrain_skipped", 0):
             fail.append(f"{ec['retrain_skipped']} failed retrains")
         if planner == "naive_prt" and sched:
@@ -188,9 +199,80 @@ def check_run(run: Path, naive_dirs: list[Path], cache: dict) -> tuple[dict, lis
                     warn.append(f"retraining lowers R² ({gain:+.3f})")
     if planner in ("violation_aware", "violation_aware_gated"):
         fail += check_s5(run, planner, thr)
+    if "energy_gross_mJ" in j:  # runs made with the 2026-10-31 fixes
+        fail += check_fix_plan(run, j, thr, planner)
     if info["busy"]:
         (fail if smoke else warn).append(f"{info['busy']} adaptations skipped (retrain busy)")
     return info, fail, warn
+
+
+def lstm_cost_problem(cfg: dict) -> str | None:
+    """Why the LSTM is not the most expensive cost_class of a regression config, if so."""
+    from core.planners.base import COST_RANK
+    models = cfg.get("models", {})
+    if cfg.get("domain", "regression") != "regression" or "lstm" not in models:
+        return None
+    rank = {m: COST_RANK.get(s.get("cost_class", "medium"), 1) for m, s in models.items()}
+    others = [m for m in rank if m != "lstm" and rank[m] >= rank["lstm"]]
+    return f"lstm cost_class {models['lstm'].get('cost_class')} not above {others}" if others else None
+
+
+def check_fix_plan(run: Path, j: dict, thr: dict, planner: str) -> list[str]:
+    """Invariants of the 2026-10-31 fixes, from the run's own logs."""
+    from core.planners.base import planner_reacts_to_drift
+    fail = []
+    ec = j.get("event_counters", {})
+    if not planner_reacts_to_drift(planner) and int(j.get("drift_checks", 0)) > 0:
+        fail.append(f"{planner} ignores drift but ran {j['drift_checks']} drift checks")
+    background = bool(thr.get("background_retrain", False))
+    if (planner == "naive" or (planner == "naive_prt" and background)) and float(ec.get("mape_k_energy_uJ", 0.0)) > 0:
+        fail.append(f"{planner} has MAPE-K energy {ec['mape_k_energy_uJ']}")
+    if j.get("energy_mJ") is not None and j.get("energy_gross_mJ") is not None and j["energy_mJ"] > j["energy_gross_mJ"] + 1e-6:
+        fail.append(f"energy_mJ {j['energy_mJ']} > energy_gross_mJ {j['energy_gross_mJ']}")
+    problem = lstm_cost_problem(thr)
+    if problem:
+        fail.append(problem)
+
+    with open(run / "mape_events.csv", newline="") as f:
+        ev = list(csv.DictReader(f))
+    with open(run / "planner_decisions.csv", newline="") as f:
+        dec = {r["step"]: r for r in csv.DictReader(f)}
+    is_adapt = lambda e: e["decision_action"] in ("retrain", "replace")
+    drift_adapt = [e for e in ev if e.get("violation_effective") == "drift" and is_adapt(e)]
+    lag = [e["step"] for e in drift_adapt if dec[e["step"]]["monitor_model"] != dec[e["step"]]["current_model"]]
+    if lag:
+        fail.append(f"{len(lag)} drift adaptations in lag cycles (first at step {lag[0]})")
+    unacted = [e["step"] for e in ev if e.get("drift_confirmed") == "True"
+               and not (is_adapt(e) or (planner == "violation_aware_gated" and e["decision_action"] == "switch"))]
+    if unacted:
+        fail.append(f"{len(unacted)} confirmed drifts left unacted (first at step {unacted[0]})")
+    both = [e["step"] for e in ev if e.get("violation") == "score" and e.get("normalized_energy")
+            and float(e["normalized_energy"]) > float(e["energy_threshold_before"])]
+    if both:
+        fail.append(f"{len(both)} score violations logged while energy also exceeded its threshold")
+    cooldown = int(thr.get("drift_cooldown_rows", thr.get("drift_window_size", 1200)))
+    steps = [int(e["step"]) for e in drift_adapt]
+    close = [b for a, b in zip(steps, steps[1:]) if b - a < cooldown]
+    if close:
+        fail.append(f"{len(close)} drift adaptations inside the {cooldown}-row cooldown (first at step {close[0]})")
+    return fail
+
+
+COUNTER_COLUMNS = ["drift_deferred_lag", "violation_deferred_drift", "score_and_energy", "drift_suppressed_busy",
+                   "vmr_single_version_retrain", "energy_invalid_rows", "prt_pending_retries",
+                   "decisions_executed", "decisions_skipped"]
+
+
+def check_configs() -> list[str]:
+    """Every regression config, whether or not a run used it."""
+    out = []
+    for path in sorted((_TOOL_DIR / "configs" / "datasets").glob("*.json")):
+        if path.name.startswith("_"):
+            continue
+        problem = lstm_cost_problem(json.loads(path.read_text(encoding="utf-8")))
+        if problem:
+            out.append(f"{path.name}: {problem}")
+    return out
 
 
 def check_s5(run: Path, planner: str, thr: dict) -> list[str]:
@@ -229,9 +311,11 @@ def main() -> None:
                                     else args.runs + ["runs_calib"])]
     cache: dict = {}
     n_fail = 0
+    counters = []
+    notes = [f"FAIL config {m}" for m in check_configs()]
+    n_fail += len(notes)
     print("| Run | Rows | R² | Switches | Retrains (schedule) | VMR | Busy | ridge/svr/lstm % | Result |")
     print("|---|---|---|---|---|---|---|---|---|")
-    notes = []
     for rd in run_dirs:
         for mf in sorted(rd.glob("*_conc/run_manifest.json")):
             try:
@@ -239,6 +323,8 @@ def main() -> None:
             except Exception as exc:  # a malformed run is itself a failure
                 info, fail, warn = {"run": mf.parent.name}, [f"checker crashed: {exc!r}"], []
             n_fail += bool(fail)
+            man = json.loads(mf.read_text())
+            counters.append((f"{rd.name}/{mf.parent.name}", man.get("event_counters", {}), man))
             res = "FAIL" if fail else ("warn" if warn else "ok")
             rt = f"{info.get('rt', '')}" + (f" ({info['rt_exp']})" if info.get("rt_exp") != "" else "")
             r2v = f"{info['r2']:.4f}" if isinstance(info.get("r2"), float) else "?"
@@ -248,6 +334,14 @@ def main() -> None:
                   f"| {info.get('vmr', '')} | {info.get('busy', '')} | {info.get('share', '')} | {res} |")
             notes += [f"FAIL {rd.name}/{info['run']}: {m}" for m in fail]
             notes += [f"warn {rd.name}/{info['run']}: {m}" for m in warn]
+    print()
+    print("| Run | " + " | ".join(COUNTER_COLUMNS) + " | drift_checks | mape_k J | overlap J | net / gross mJ |")
+    print("|---|" + "---|" * (len(COUNTER_COLUMNS) + 4))
+    for name, ec, man in counters:
+        cells = " | ".join(str(ec.get(c, "")) for c in COUNTER_COLUMNS)
+        overlap = sum((man.get("overlap_J") or {}).values())
+        print(f"| {name} | {cells} | {man.get('drift_checks', '')} | {float(ec.get('mape_k_energy_uJ', 0.0)) / 1e6:.2f} "
+              f"| {overlap:.2f} | {man.get('energy_mJ')} / {man.get('energy_gross_mJ', '')} |")
     print()
     print("\n".join(notes) if notes else "no problems found")
     print(f"\n{n_fail} run(s) failed")

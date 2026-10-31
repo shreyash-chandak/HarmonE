@@ -13,8 +13,9 @@ the trade-off against the ridge-LSTM line, retraining gains, SVR model sizes
 share on PeMS.
 
 Usage (from tool/):
-    python3 scripts/aggregate_seeds.py --runs runs_calib runs_seed1 runs_seed2 runs_seed3 runs_seed4 runs_seed5
-(single-model baselines run once, into runs_calib, since 2026-10-13)
+    python3 scripts/aggregate_seeds.py --runs runs_seed1 runs_seed2 runs_seed3 runs_seed4 runs_seed5
+(single-model baselines run inside every seed since 2026-10-31, so they get mean ±
+sd too. Leave runs_calib out: it only calibrates, and would add a sample.)
 """
 
 from __future__ import annotations
@@ -65,6 +66,7 @@ def load(run_dirs: list[Path]) -> dict:
                 "seed": rd.name, "status": j.get("status"),
                 "r2": tm.get("r2"), "wr2": wr2,
                 "e": j.get("energy_mJ"), "it": j.get("inference_time_ms"),
+                "eg": j.get("energy_gross_mJ", j.get("energy_mJ")),
                 # per-prediction readings only (manifests before 2026-10-13: energy_mJ was this)
                 "ei": j.get("inference_energy_mJ", j.get("energy_mJ")),
                 "sw": ec.get("model_switches", 0), "rt": ec.get("retrains", 0),
@@ -98,17 +100,17 @@ def main() -> None:
         if not keys:
             continue
         n_seeds = max(len(rows[(ds, k)]) for k in keys)
-        print(f"\n### {SHORT[ds]} (mean ± sd over {n_seeds} seeds; single-model baselines run once, sd 0)\n")
-        print("| Planner | Stream R² | Window R² | mJ/pred | of which inference | inf ms | Switches | Retrains | VMR | Skipped (busy) | ridge/svr/lstm % |")
-        print("|---|---|---|---|---|---|---|---|---|---|---|")
+        print(f"\n### {SHORT[ds]} (mean ± sd over up to {n_seeds} seeds; energy net of overlaps)\n")
+        print("| Planner | Runs | Stream R² | Window R² | mJ/pred | gross mJ/pred | inference mJ/pred | inf ms | Switches | Retrains | VMR | Skipped (busy) | ridge/svr/lstm % |")
+        print("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
         for k in keys:
             sh = {m: np.mean([r["share"][m] for r in rows[(ds, k)]]) * 100 for m in MODELS}
-            print(f"| {k} | {mean(ds,k,'r2'):.4f} ± {sd(ds,k,'r2'):.4f} | {mean(ds,k,'wr2'):.4f} ± {sd(ds,k,'wr2'):.4f} "
-                  f"| {mean(ds,k,'e'):.2f} ± {sd(ds,k,'e'):.2f} | {mean(ds,k,'ei'):.2f} | {mean(ds,k,'it'):.3f} | {mean(ds,k,'sw'):.0f} "
+            print(f"| {k} | {len(rows[(ds, k)])} | {mean(ds,k,'r2'):.4f} ± {sd(ds,k,'r2'):.4f} | {mean(ds,k,'wr2'):.4f} ± {sd(ds,k,'wr2'):.4f} "
+                  f"| {mean(ds,k,'e'):.2f} ± {sd(ds,k,'e'):.2f} | {mean(ds,k,'eg'):.2f} | {mean(ds,k,'ei'):.2f} | {mean(ds,k,'it'):.3f} | {mean(ds,k,'sw'):.0f} "
                   f"| {mean(ds,k,'rt'):.0f} | {mean(ds,k,'vmr'):.0f} | {mean(ds,k,'busy'):.0f} "
                   f"| {sh['ridge']:.0f}/{sh['svr']:.0f}/{sh['lstm']:.0f} |")
 
-    print("\n### Trade-off vs the ridge–LSTM line (stream R², mean mJ/pred)\n")
+    print("\n### Trade-off vs the ridge–LSTM line (stream R², mean mJ/pred, net)\n")
     print("| Planner | " + " | ".join(f"{SHORT[d]} R² @ mJ | vs line" for d in DATASETS) + " |")
     print("|---|" + "---|---|" * len(DATASETS))
     for k in ORDER:

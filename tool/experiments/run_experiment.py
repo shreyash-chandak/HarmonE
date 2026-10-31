@@ -1007,7 +1007,9 @@ def _load_model_store(dataset_config: dict, only: list[str] | None = None) -> di
             "n_train_sequences": dataset_config.get("_n_train_sequences"),
             "retrain_regularisation": dataset_config.get("retrain_regularisation", "sample_scaled"),
             "retrain_regularisation_factor": reg_factor,
-            "train_seed": int(dataset_config.get("train_seed", 0)),
+            # LSTM retrains differ between seeds (2026-10-31): train_seed + the run's
+            # --seed, set by concurrent_harness/mape/manage.py.
+            "retrain_seed": int(dataset_config.get("train_seed", 0)) + int(dataset_config.get("_run_seed", 0)),
             "seq_length": int(dataset_config.get("seq_length", 5)),
         }
         try:
@@ -1776,7 +1778,7 @@ def _do_inline_retrain(
                         return float(m(x).item())
                 models[model_name] = _new_predict
                 return True
-            torch.manual_seed(int(info.get("train_seed", 0)))
+            torch.manual_seed(int(info.get("retrain_seed", 0)))
             model_obj = LSTMModel()
             opt = optim.Adam(model_obj.parameters(), lr=float(hp.get("lr", 0.001)))
             loss_fn = nn.MSELoss()

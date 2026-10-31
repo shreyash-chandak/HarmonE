@@ -33,9 +33,14 @@ These values depend on the model pool and on the energy metering, so re-run
 this after either changes (pool positioning, batch metering) — the run
 manifests record which metering produced them.
 
+The output's "calibration_basis" states what was used. With several --runs-dir the
+per-model energy and accuracy are means across those folders (2026-10-31); the
+pipeline passes one, runs_calib: naive runs at seed 1, made before the seed grids
+because the adaptive planners need the calibration before they start.
+
 Usage (from tool/):
     python3 experiments/calibrate_from_naive_runs.py --dataset pems_driftinduced \\
-        --runs-dir runs [--write]
+        --runs-dir runs [--runs-dir runs_seed2 ...] [--write]
 """
 
 from __future__ import annotations
@@ -93,7 +98,20 @@ def cost_class_warnings(cfg: dict, per_model: dict) -> list[str]:
     return out
 
 
-def calibrate(dataset: str, runs_dir: Path, configs_dir: Path) -> dict:
+def _model_measures(run: Path, model: str, is_cv: bool, interval: int, window: int) -> tuple[float, float]:
+    """(energy µJ per step, accuracy) of one naive run."""
+    man = json.loads((run / "run_manifest.json").read_text())
+    e = man["energy_by_model"][model]
+    e_step = e.get("energy_per_inference_mJ")
+    if e_step is None:
+        e_step = e["energy_mJ"] / max(e.get("n_valid_steps", e["n_steps"]), 1)
+    if is_cv:
+        return float(e_step) * 1000.0, float(man["task_metrics"]["mean_proxy_acc"])
+    return float(e_step) * 1000.0, _window_r2_mean(run / "predictions.csv", interval, window)
+
+
+def calibrate(dataset: str, runs_dir: Path | list[Path], configs_dir: Path) -> dict:
+    runs_dirs = list(runs_dir) if isinstance(runs_dir, (list, tuple)) else [runs_dir]
     cfg_path = configs_dir / f"{dataset}.json"
     cfg = json.loads(cfg_path.read_text())
     is_cv = cfg.get("domain", "regression") == "cv"
@@ -105,22 +123,15 @@ def calibrate(dataset: str, runs_dir: Path, configs_dir: Path) -> dict:
 
     per_model: dict[str, dict] = {}
     for model in cfg.get("models", {}):
-        run = _naive_run_dir(runs_dir, dataset, model)
-        if run is None:
-            raise SystemExit(f"missing naive run for {dataset}/{model} under {runs_dir}")
-        man = json.loads((run / "run_manifest.json").read_text())
-        e = man["energy_by_model"][model]
-        e_step = e.get("energy_per_inference_mJ")
-        if e_step is None:
-            e_step = e["energy_mJ"] / max(e.get("n_valid_steps", e["n_steps"]), 1)
-        if is_cv:
-            acc = float(man["task_metrics"]["mean_proxy_acc"])
-        else:
-            acc = _window_r2_mean(run / "predictions.csv", interval, window)
+        runs = [r for r in (_naive_run_dir(d, dataset, model) for d in runs_dirs) if r is not None]
+        if not runs:
+            raise SystemExit(f"missing naive run for {dataset}/{model} under {[str(d) for d in runs_dirs]}")
+        measures = [_model_measures(r, model, is_cv, interval, window) for r in runs]
         per_model[model] = {
-            "energy_uJ_per_step": float(e_step) * 1000.0,
-            "accuracy": acc,
-            "run": run.name,
+            "energy_uJ_per_step": float(np.mean([m[0] for m in measures])),
+            "accuracy": float(np.mean([m[1] for m in measures])),
+            "run": runs[0].name,
+            "n_runs": len(runs),
         }
 
     cheap = min(per_model, key=lambda m: per_model[m]["energy_uJ_per_step"])
@@ -144,6 +155,8 @@ def calibrate(dataset: str, runs_dir: Path, configs_dir: Path) -> dict:
         "dataset": dataset,
         "per_model": per_model,
         "cost_class_warnings": warnings_,
+        "calibration_basis": (f"naive runs in {runs_dirs[0].name}" if len(runs_dirs) == 1 else
+                              f"mean of the naive runs across {[d.name for d in runs_dirs]}"),
         "values": {
             "E_m": round(e_m, 1),
             "E_M": round(e_M, 1),
@@ -153,7 +166,7 @@ def calibrate(dataset: str, runs_dir: Path, configs_dir: Path) -> dict:
             "min_score": round(min_score, 4),
             "s5_credit_cap": round(credit_cap, 4),
         },
-        "source": f"calibrate_from_naive_runs:{runs_dir.name}",
+        "source": "calibrate_from_naive_runs:" + "+".join(d.name for d in runs_dirs),
     }
 
 
@@ -190,13 +203,15 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--dataset", required=True, action="append",
                    help="Dataset config name; repeat for several.")
-    p.add_argument("--runs-dir", default=str(_TOOL_DIR / "runs"))
+    p.add_argument("--runs-dir", action="append", default=None,
+                   help="Folder with the naive runs (default runs/); repeat to average across folders.")
     p.add_argument("--configs-dir", default=str(_TOOL_DIR / "configs" / "datasets"))
     p.add_argument("--write", action="store_true", help="Write the values into the configs.")
     args = p.parse_args()
     for ds in args.dataset:
-        res = calibrate(ds, Path(args.runs_dir), Path(args.configs_dir))
+        res = calibrate(ds, [Path(d) for d in (args.runs_dir or [str(_TOOL_DIR / "runs")])], Path(args.configs_dir))
         print(json.dumps(res, indent=2))
+        print(f"{ds}: calibration basis: {res['calibration_basis']}", file=sys.stderr)
         if args.write:
             write_config(ds, Path(args.configs_dir), res)
             print(f"wrote {ds}.json", file=sys.stderr)

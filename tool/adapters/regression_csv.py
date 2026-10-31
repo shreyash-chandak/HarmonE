@@ -10,7 +10,11 @@ Config schema (all keys read from the dataset config JSON):
   Mode A — single file with internal split (default):
     data_path         : path to the CSV file (absolute or relative to tool/)
     train_frac        : fraction of rows used for training (default 0.8)
-    val_frac          : optional held-out slice between train and stream (default 0.0)
+    val_frac          : optional; val_split() returns this slice right after the
+                        training rows. It is NOT held out: stream() starts at the
+                        end of the training rows, so these rows are also the first
+                        stream rows. Do not fit on them without
+                        assert_disjoint_from_stream() (2026-10-31).
     train_window_rows : optional; train on only the last N rows before the
                         stream starts (default: all rows before it). The
                         stream is unchanged. Added 2026-10-06 for spot_prices,
@@ -95,8 +99,28 @@ class RegressionCSVAdapter(DatasetAdapter):
         start = max(0, self._train_end - int(window)) if window else 0
         return self._values[start : self._train_end]
 
+    def stream_row_range(self) -> tuple[int, int]:
+        """[start, end) of the stream's source rows in the concatenated values."""
+        return self._train_end, len(self._values)
+
+    def val_row_range(self) -> tuple[int, int]:
+        """[start, end) of val_split()'s rows; empty when val_frac is 0 or absent."""
+        val_frac = float(self._config.get("val_frac", 0.0))
+        if val_frac == 0.0:
+            return self._train_end, self._train_end
+        return self._train_end, int(len(self._values) * (float(self._config.get("train_frac", 0.8)) + val_frac))
+
+    def assert_disjoint_from_stream(self, rows) -> None:
+        """Raise AssertionError if any row index is in the stream's source rows.
+        For anything that fits on rows and must not see the stream."""
+        start, end = self.stream_row_range()
+        bad = [int(r) for r in rows if start <= int(r) < end]
+        assert not bad, (f"{len(bad)} of these rows are stream rows [{start}, {end}), "
+                         f"e.g. {bad[:3]}: fitting on them would see the evaluation stream")
+
     def val_split(self) -> np.ndarray:
-        """Return a held-out slice between train end and stream start."""
+        """The val_frac slice right after the training rows. These rows are also
+        the first stream rows (see the module docstring)."""
         val_frac = float(self._config.get("val_frac", 0.0))
         if val_frac == 0.0:
             return self._values[self._train_end : self._train_end]
