@@ -127,7 +127,7 @@ def test_stay_is_noop_and_decides_without_violation(tmp_path):
     b = _bandit(tmp_path, alpha=0.0, E_ref=1.0)
     for m, (acc, eng) in TRUTH.items():
         b.observe_outcome(np.ones(4), m, acc, eng)
-    b.pending_x = None
+    b.pending_x = []
     d = BanditPlanner(bandit=b).plan(_ctx("lstm", violation=None))
     assert d.action == "noop" and "stay on lstm" in d.reason
 

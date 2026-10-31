@@ -46,18 +46,13 @@ s5_unknown_models.
 
 from __future__ import annotations
 
-from .base import Planner, PlanningContext, PlanDecision, REGISTRY
+from .base import Planner, PlanningContext, PlanDecision, REGISTRY, cost_rank as _cost_rank
 from .credit import (credit_horizon, projected_credit, required_accuracy,
                      split_known_unknown, target_accuracy)
 from .exploration import maybe_explore
 
 _DEFAULT_SWITCH_MARGIN = 0.02
-_COST_RANK = {"light": 0, "medium": 1, "heavy": 2}
 _LABEL = "S5 violation_aware"
-
-
-def _cost_rank(thr: dict, model: str) -> int:
-    return _COST_RANK.get(thr.get("models", {}).get(model, {}).get("cost_class", "medium"), 1)
 
 
 class ViolationAwarePlanner(Planner):

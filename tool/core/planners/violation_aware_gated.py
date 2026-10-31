@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import logging
 
-from .base import Planner, PlanningContext, PlanDecision, REGISTRY, is_observed
+from .base import Planner, PlanningContext, PlanDecision, REGISTRY, is_observed, cost_rank as _cost_rank
 from .hysteresis import should_switch
 from .exploration import maybe_explore
 
@@ -49,13 +49,6 @@ def _get_min_accuracy(thr: dict) -> float:
         "Add 'min_accuracy' to the dataset config to suppress this warning."
     )
     return _DEFAULT_MIN_ACCURACY
-
-
-_COST_RANK = {"light": 0, "medium": 1, "heavy": 2}
-
-
-def _cost_rank(thr: dict, model: str) -> int:
-    return _COST_RANK.get(thr.get("models", {}).get(model, {}).get("cost_class", "medium"), 1)
 
 
 def _labelled(decision: PlanDecision, label: str, ctx: PlanningContext) -> PlanDecision:

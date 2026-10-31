@@ -827,6 +827,7 @@ def _plan(
     current_step: int = 0,
     telemetry: dict | None = None,
     served_model: str | None = None,
+    actuation_lag: int = 0,
 ) -> PlanDecision:
     # Original HarmonE recovery mode (2026-10-07; switch_hold_mode
     # "after_energy_violation"): HarmonE/mape/analyse.py sets recovery_cycles=3
@@ -905,6 +906,7 @@ def _plan(
             "volatility": (telemetry or {}).get("volatility"),
             "kl_div": drift_result.get("kl_div"),
             "served_model": served_model or current_model,
+            "actuation_lag": actuation_lag,
         },
         accuracy_credit=float(mape_info.get("s5_credit", 0.0)),
     )

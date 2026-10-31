@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import logging
 
-from .base import Planner, PlanningContext, PlanDecision, REGISTRY, is_observed
+from .base import Planner, PlanningContext, PlanDecision, REGISTRY, is_observed, cost_rank
 from .hysteresis import should_switch
 from .exploration import maybe_explore
 
@@ -187,8 +187,10 @@ class ParetoPlanner(Planner):
         # Audit A7: if the known front would keep the current model while it
         # violates, try an unknown (never-observed or stale) model first, so
         # unknowns can enter the front instead of waiting for a random probe.
-        if chosen == ctx.current_model and unknown:
-            target = unknown[0]
+        # Only in the direction the violation needs (2026-10-31, M6): it used to
+        # take unknown[0] in config order, sending score violations to ridge.
+        target = _directed_unknown(ctx, unknown) if chosen == ctx.current_model else None
+        if target is not None:
             return PlanDecision(
                 action="switch", model=target,
                 reason=f"S6 pareto: violation={ctx.violation}, current model is the known optimum; "
@@ -276,6 +278,18 @@ def _split_known_unknown(
             known.append(m)
 
     return known, unknown
+
+
+def _directed_unknown(ctx: PlanningContext, unknown: list[str]) -> str | None:
+    """The unknown model to re-measure: on an energy violation the cheapest one
+    cheaper than the current model, on a score violation the cheapest one
+    costlier than it; None if no unknown model points that way."""
+    cur = cost_rank(ctx.thresholds, ctx.current_model)
+    if ctx.violation == "energy":
+        options = [m for m in unknown if cost_rank(ctx.thresholds, m) < cur]
+    else:
+        options = [m for m in unknown if cost_rank(ctx.thresholds, m) > cur]
+    return min(options, key=lambda m: cost_rank(ctx.thresholds, m), default=None)
 
 
 def _apply_hard_constraints(

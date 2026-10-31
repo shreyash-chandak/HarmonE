@@ -93,12 +93,19 @@ def test_s5_ignores_placeholder_estimates():
 # ── A7: Pareto explores unknown models while violating ───────────────────────
 
 def test_pareto_explores_unknown_when_current_is_known_optimum():
+    # In the violation's direction only (2026-10-31, M6): a score violation on
+    # ridge re-measures a costlier unknown; on the LSTM no unknown is costlier.
+    ctx = _ctx("score", "ridge",
+               acc={"ridge": 0.99, "svr": 0.5, "lstm": 0.5},
+               eng={"ridge": 0.2, "svr": 0.5, "lstm": 0.5},
+               observed={"ridge": True, "svr": False, "lstm": False})
+    d = ParetoPlanner().plan(ctx)
+    assert d.action == "switch" and d.model in ("svr", "lstm")
     ctx = _ctx("score", "lstm",
                acc={"ridge": 0.5, "svr": 0.5, "lstm": 0.99},
                eng={"ridge": 0.5, "svr": 0.5, "lstm": 0.2},
                observed={"ridge": False, "svr": False, "lstm": True})
-    d = ParetoPlanner().plan(ctx)
-    assert d.action == "switch" and d.model in ("ridge", "svr")
+    assert ParetoPlanner().plan(ctx).action == "noop"
 
 
 # ── C1: batch energy metering ─────────────────────────────────────────────────

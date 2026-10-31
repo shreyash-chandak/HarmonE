@@ -335,3 +335,66 @@ class TestM2GlobalCooldown:
             "drift_result": {"drift_detected": True, "action": "retrain", "version": None, "kl_div": 2.0}})
         assert not pt._drift_for_batch(kp, 520, "svr", {"ridge": 520})["drift_detected"]
         assert pt._drift_for_batch(kp, 520, "svr", {})["drift_detected"]
+
+
+# ── step 4: planners ──────────────────────────────────────────────────────────
+
+COSTS = {"models": {"lstm": {"cost_class": "heavy"}, "svr": {"cost_class": "medium"}, "ridge": {"cost_class": "light"}}}
+
+
+class TestM6DirectedEscape:
+    def _ctx(self, violation, current, unknown):
+        step = 9000
+        seen = {m: (100 if m in unknown else step) for m in MODELS}
+        c = ctx(violation, {**COSTS, "min_accuracy": 0.0, "max_energy": 1.0, "energy_reference": 1.0},
+                current=current, step=step, staleness_window=2600, last_observed_step=seen)
+        c.ema_accuracy = {"lstm": .99, "svr": .99, "ridge": .99}
+        c.ema_energy = {"lstm": .01, "svr": .01, "ridge": .01}
+        return c
+
+    def test_score_never_escapes_to_a_cheaper_model(self):
+        d = get_planner("pareto").plan(self._ctx("score", "svr", ["ridge"]))
+        assert d.action == "noop"
+
+    def test_score_goes_to_costlier_unknown(self):
+        d = get_planner("pareto").plan(self._ctx("score", "svr", ["ridge", "lstm"]))
+        assert d.action == "switch" and d.model == "lstm"
+
+    def test_energy_goes_to_cheapest_unknown(self):
+        d = get_planner("pareto").plan(self._ctx("energy", "lstm", ["svr", "ridge"]))
+        assert d.action == "switch" and d.model == "ridge"
+
+    def test_energy_never_escapes_to_a_costlier_model(self):
+        d = get_planner("pareto").plan(self._ctx("energy", "ridge", ["lstm"]))
+        assert d.action == "noop"
+
+    def test_cost_rank_shared(self):
+        from core.planners import base, pareto, violation_aware, violation_aware_gated
+        assert violation_aware._cost_rank is base.cost_rank
+        assert violation_aware_gated._cost_rank is base.cost_rank
+        assert pareto.cost_rank is base.cost_rank
+
+
+class TestM5BanditContext:
+    def _go(self, tmp_path, lag):
+        import numpy as np
+        from core.planners.bandit import BanditPlanner, LinUCBBandit
+        b = LinUCBBandit(MODELS, 4, 1.0, tmp_path / "s.json")
+        seen = []
+        orig = b.observe_outcome
+        b.observe_outcome = lambda x, arm, a, e: (seen.append(np.asarray(x).copy()), orig(x, arm, a, e))
+        planner = BanditPlanner(bandit=b)
+        for k in range(5):
+            c = ctx(thr={"tau_drift": 1.0, **COSTS}, current_energy_threshold=0.1 * (k + 1), telemetry={
+                "accuracy": 0.9, "normalized_energy": 0.5, "served_model": "lstm", "actuation_lag": lag})
+            planner.plan(c)
+        return seen
+
+    def test_outcome_pairs_with_the_decision_that_took_effect(self, tmp_path):
+        seen = self._go(tmp_path, 1)
+        # cycle k (τ = 0.1·(k+1)) learns with the context of cycle k-2
+        assert [round(float(x[3]), 1) for x in seen] == [0.1, 0.2, 0.3]
+
+    def test_no_lag_keeps_previous_cycle(self, tmp_path):
+        seen = self._go(tmp_path, 0)
+        assert [round(float(x[3]), 1) for x in seen] == [0.1, 0.2, 0.3, 0.4]

@@ -57,6 +57,14 @@ def prt_due(ctx: "PlanningContext", default_interval: int) -> bool:
     return s > 0 and s // p > max(s - mi, 0) // p
 
 
+COST_RANK = {"light": 0, "medium": 1, "heavy": 2}
+
+
+def cost_rank(thresholds: dict, model: str) -> int:
+    """Configured cost class of a model as a rank (unknown class = medium)."""
+    return COST_RANK.get(thresholds.get("models", {}).get(model, {}).get("cost_class", "medium"), 1)
+
+
 def is_observed(ctx: "PlanningContext", model: str) -> bool:
     """Whether `model` has real EMA estimates (audit A5).
 

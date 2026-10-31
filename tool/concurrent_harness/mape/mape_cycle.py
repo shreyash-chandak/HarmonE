@@ -162,6 +162,7 @@ def run_cycle(
                     violation, drift_result, current_model, available_models,
                     mape_info, thresholds, planner, current_step=current_step,
                     telemetry=telemetry, served_model=monitor_model,
+                    actuation_lag=max(int(thresholds.get("max_batches_ahead", 1)), 0),
                 )
                 effective_violation = decision.effective_violation
                 decision = _head_start(decision, is_cv, thresholds, available_models,

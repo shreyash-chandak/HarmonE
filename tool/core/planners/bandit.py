@@ -20,7 +20,9 @@ Every MAPE cycle (`plan`) does two things:
 
 1. **Learn.** The batch just monitored was served by one model (the
    telemetry's served model). Its measured accuracy and normalised energy
-   are that arm's outcome for the context recorded at the previous decision;
+   are that arm's outcome for the context of the decision that took effect on
+   that batch: in the concurrent harness a decision at cycle k first serves
+   the batch monitored at cycle k + 1 + actuation_lag (2026-10-31, M5);
    both estimators of the served arm are updated (A += x xᵀ, b += r x). The
    energy-debt queue is updated: Q ← max(0, Q + e_norm − E_ref).
 
@@ -117,8 +119,8 @@ class LinUCBBandit:
         self.total_decisions: int = 0
         self.total_updates: int = 0
         self._current_dataset_id: str = "unknown"
-        # Context of the last decision, consumed by the next observation.
-        self.pending_x: np.ndarray | None = None
+        # Contexts of recent decisions, newest last (see BanditPlanner._learn).
+        self.pending_x: list[np.ndarray] = []
         for m in self.models:
             self._ensure_arm(m)
 
@@ -295,17 +297,24 @@ class BanditPlanner(Planner):
     def _learn(self, ctx: PlanningContext) -> None:
         tel = ctx.telemetry or {}
         b = self._bandit
-        if b.pending_x is None or tel.get("accuracy") is None or tel.get("normalized_energy") is None:
+        need = 1 + self._lag(ctx)
+        if len(b.pending_x) < need or tel.get("accuracy") is None or tel.get("normalized_energy") is None:
             return
         served = tel.get("served_model") or ctx.current_model
-        b.observe_outcome(b.pending_x, served, tel["accuracy"], tel["normalized_energy"])
+        b.observe_outcome(b.pending_x[-need], served, tel["accuracy"], tel["normalized_energy"])
         b.save()
+
+    @staticmethod
+    def _lag(ctx: PlanningContext) -> int:
+        """Batches between a decision and the first batch it serves, beyond the
+        next one (the barrier's max_batches_ahead; 0 in the single-threaded harness)."""
+        return max(int((ctx.telemetry or {}).get("actuation_lag", 0) or 0), 0)
 
     def plan(self, ctx: PlanningContext) -> PlanDecision:
         b = self._bandit
         self._learn(ctx)
         x = build_context(ctx)
-        b.pending_x = x  # the next monitored batch is this decision's outcome
+        b.pending_x = (b.pending_x + [x])[-(1 + self._lag(ctx)):]
 
         if ctx.violation == "drift":
             return self._handle_drift(ctx)
