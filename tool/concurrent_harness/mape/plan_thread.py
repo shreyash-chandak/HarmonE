@@ -48,6 +48,7 @@ _POLL_TICK_S = 0.02
 # Max wait for t2's drift result for the current batch. t2's per-batch work is
 # a histogram + KL (+ a VMR lookup when drift fires), normally milliseconds.
 _DRIFT_WAIT_S = 10.0
+_MAX_POLL_FAILURES = 5
 
 
 def _drift_for_batch(kp: dict, current_step: int, current_model: str,
@@ -140,12 +141,21 @@ def run(
     image_path_history: list[str] = []
 
     running = True
+    poll_failures = 0
     while running:
         running = waiter.wait()  # blocks until inference finishes a batch (item 1c)
-        pred_buf.poll()
-        if is_cv:
-            img_buf.poll()
-            lum_buf.poll()
+        try:
+            pred_buf.poll()
+            if is_cv:
+                img_buf.poll()
+                lum_buf.poll()
+            poll_failures = 0
+        except Exception:
+            poll_failures += 1
+            logger.exception("plan_thread: reading new rows failed (%d in a row)", poll_failures)
+            if poll_failures >= _MAX_POLL_FAILURES:
+                raise  # manage.py's watchdog ends the run instead of a silent hang
+            continue
 
         while True:
             batch = pred_buf.drain_chunk(monitor_interval)

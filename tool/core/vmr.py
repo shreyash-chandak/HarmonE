@@ -84,15 +84,18 @@ class VMR:
         ts = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
         version_name = f"{ts}_{tag}"
         version_dir = os.path.join(self.base_dir, model_name, version_name)
-        os.makedirs(version_dir, exist_ok=True)
+        # Built under a dot-prefixed name and renamed when complete (2026-10-31):
+        # a background retrain writes versions while the drift thread reads them.
+        build_dir = os.path.join(self.base_dir, model_name, f".{version_name}.tmp")
+        os.makedirs(build_dir, exist_ok=True)
 
         # Copy weights
         weights_ext = os.path.splitext(weights_src)[1]
         weights_dst = os.path.join(version_dir, f"weights{weights_ext}")
-        shutil.copy2(weights_src, weights_dst)
+        shutil.copy2(weights_src, os.path.join(build_dir, f"weights{weights_ext}"))
 
         # Write distribution
-        dist_path = os.path.join(version_dir, "distribution.json")
+        dist_path = os.path.join(build_dir, "distribution.json")
         with open(dist_path, "w") as f:
             json.dump(distribution, f)
 
@@ -104,9 +107,10 @@ class VMR:
             "proxy_score": proxy_score,
             "drift_score": drift_score,
         }
-        meta_path = os.path.join(version_dir, "meta.json")
+        meta_path = os.path.join(build_dir, "meta.json")
         with open(meta_path, "w") as f:
             json.dump(meta, f, indent=2)
+        os.replace(build_dir, version_dir)
 
         return VMRVersion(
             model=model_name,
@@ -127,6 +131,8 @@ class VMR:
 
         versions = []
         for version_name in sorted(os.listdir(model_dir), reverse=True):
+            if version_name.startswith("."):
+                continue  # being written (store())
             vdir = os.path.join(model_dir, version_name)
             meta_path = os.path.join(vdir, "meta.json")
             if not os.path.isfile(meta_path):

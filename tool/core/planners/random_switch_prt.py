@@ -31,6 +31,7 @@ class RandomSwitchPRTPlanner(Planner):
             return PlanDecision(
                 action="retrain",
                 reason=f"random_switch_prt: PRT trigger at step {ctx.current_step} (interval={prt_interval})",
+                metadata={"prt": True},
             )
 
         if ctx.violation is None:

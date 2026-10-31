@@ -1,9 +1,7 @@
 """concurrent_harness/mape/execute.py — the "E" stage: apply one PlanDecision.
 
 Mirrors HarmonE/mape/execute.py's role directly (E: switch/replace/retrain
-dispatch). Shared by plan_thread.py (t1) and drift_thread.py (t2): whichever
-thread's context produced a decision, applying it (switch / replace / retrain
-/ noop) is identical file/model I/O either way. New code, reusing
+dispatch). Called only by t1 (mape_cycle.py). New code, reusing
 experiments/run_experiment.py's VMR restore helpers read-only rather than
 duplicating them.
 """
@@ -116,6 +114,7 @@ def execute_decision(
         mape_store.update(lambda d: d["event_counters"].__setitem__(
             "adaptation_skipped_busy", d["event_counters"].get("adaptation_skipped_busy", 0) + 1))
         logger.info("%s skipped: a background retrain is still running (%s)", decision.action, decision.reason)
+        decision.executed = "skipped_busy"
         return current_model
 
     if decision.action == "retrain" and (drift_result or {}).get("single_version"):
@@ -138,6 +137,7 @@ def execute_decision(
                 "model_switches", d["event_counters"]["model_switches"] + 1))
             logger.info("switch: %s -> %s (%s)", current_model, decision.model, decision.reason)
             new_model = decision.model
+            decision.executed = "executed"
         else:
             mape_store.update(lambda d: d["event_counters"].__setitem__(
                 "noops", d["event_counters"]["noops"] + 1))
@@ -153,6 +153,7 @@ def execute_decision(
         kio.write_drift_ref_window(knowledge_dir, current_model, adapted_window)
         mape_store.update(_record_adaptation)
         logger.info("replace skipped (already serving): %s <- %s", current_model, decision.version_path)
+        decision.executed = "executed"
 
     elif decision.action == "replace" and decision.version_path:
         models: dict = {}
@@ -176,7 +177,9 @@ def execute_decision(
             kio.write_drift_ref_window(knowledge_dir, current_model, adapted_window)
             mape_store.update(lambda d: _record_adaptation(d, decision.version_path))
             logger.info("replace: %s <- %s", current_model, decision.version_path)
+            decision.executed = "executed"
         else:
+            decision.executed = "failed"
             mape_store.update(lambda d: d["event_counters"].__setitem__(
                 "retrain_skipped", d["event_counters"]["retrain_skipped"] + 1))
 
@@ -215,6 +218,7 @@ def execute_decision(
             _bg_thread = threading.Thread(target=_job, daemon=True, name=f"retrain-{current_model}")
             _bg_thread.start()
             logger.info("retrain started in background: %s (%s)", current_model, decision.reason)
+            decision.executed = "started"
             if local_dataset_config.get("smoke_wait_retrain"):
                 # Smoke check: without pacing the stream would run thousands of
                 # rows past a retrain; waiting keeps the new weights' arrival
@@ -233,6 +237,7 @@ def execute_decision(
             kio.write_drift_ref_window(knowledge_dir, current_model, adapted_window)
             mape_store.update(lambda d: _record_adaptation(d, archived))
         logger.info("retrain %s: %s (%s)", "ok" if ok else "skipped", current_model, decision.reason)
+        decision.executed = "executed" if ok else "failed"
 
     else:
         mape_store.update(lambda d: d["event_counters"].__setitem__(

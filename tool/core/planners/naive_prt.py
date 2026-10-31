@@ -31,6 +31,7 @@ class NaivePRTPlanner(Planner):
             return PlanDecision(
                 action="retrain",
                 reason=f"naive_prt: PRT trigger at step {ctx.current_step} (interval={prt_interval})",
+                metadata={"prt": True},
             )
         return PlanDecision(action="noop", reason="naive_prt: no PRT trigger")
 

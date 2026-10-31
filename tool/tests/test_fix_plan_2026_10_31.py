@@ -471,3 +471,75 @@ class TestM4Baselines:
         assert not pt._metered("naive_prt", True)
         assert pt._metered("naive_prt", False)      # in-cycle retrain needs the meter
         assert pt._metered("switch", True)
+
+
+# ── step 6: robustness ────────────────────────────────────────────────────────
+
+class TestL1GridResume:
+    def test_only_ok_manifests_are_skipped(self):
+        text = (_TOOL / "concurrent_harness" / "run_concurrent_regression_grid.sh").read_text(encoding="utf-8")
+        assert '.get("status") != "ok"' in text and "failed/" in text
+
+
+class TestL2Watchdog:
+    def test_manage_does_not_block_on_join(self):
+        text = (_TOOL / "concurrent_harness" / "mape" / "manage.py").read_text(encoding="utf-8")
+        assert "not errors" in text and "t.join()" not in text
+
+
+class TestL4ExecutedAndPrtRetry:
+    def _store(self):
+        class S:
+            def __init__(self):
+                self.d = {"event_counters": {}}
+            def update(self, fn):
+                fn(self.d)
+        return S()
+
+    def test_prt_due_while_pending(self):
+        from core.planners.base import prt_due
+        c = ctx(step=4000, thr={"prt_interval": 3200})
+        assert not prt_due(c, 3200)
+        c.prt_pending = True
+        assert prt_due(c, 3200)
+
+    def test_prt_skip_then_retry(self):
+        from core.planners.base import PlanDecision
+        mc = _harness_modules()["mape_cycle"]
+        s = self._store()
+        d = PlanDecision(action="retrain", metadata={"prt": True}, executed="skipped_busy")
+        mc._after_execute(d, s, False)
+        assert s.d["prt_pending"] and s.d["event_counters"]["decisions_skipped"] == 1
+        d = PlanDecision(action="retrain", metadata={"prt": True}, executed="started")
+        mc._after_execute(d, s, True)
+        ec = s.d["event_counters"]
+        assert not s.d["prt_pending"] and ec["prt_pending_retries"] == 1 and ec["decisions_executed"] == 1
+
+    def test_drift_skip_is_not_a_prt_retry(self):
+        from core.planners.base import PlanDecision
+        mc = _harness_modules()["mape_cycle"]
+        s = self._store()
+        mc._after_execute(PlanDecision(action="retrain", executed="skipped_busy"), s, False)
+        assert "prt_pending" not in s.d
+
+    def test_noop_counts_nothing(self):
+        from core.planners.base import PlanDecision
+        mc = _harness_modules()["mape_cycle"]
+        s = self._store()
+        mc._after_execute(PlanDecision(action="noop"), s, False)
+        assert s.d == {"event_counters": {}}
+
+
+class TestL6AtomicVmrVersion:
+    def test_partial_version_is_invisible(self, tmp_path):
+        import os
+        from core.vmr import VMR
+        vmr, w = VMR(str(tmp_path / "v")), tmp_path / "w.pkl"
+        w.write_bytes(b"x")
+        v = vmr.store("ridge", str(w), {"type": "histogram", "data": [1]}, tag="a")
+        assert os.path.isfile(v.weights_path) and len(vmr.list_versions("ridge")) == 1
+        partial = tmp_path / "v" / "ridge" / ".20990101_x.tmp"
+        partial.mkdir()
+        (partial / "meta.json").write_text("{not json")
+        assert [x.tag for x in vmr.list_versions("ridge")] == ["a"]
+        assert not [n for n in os.listdir(tmp_path / "v" / "ridge") if n.endswith(".tmp") and n != partial.name]

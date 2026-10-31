@@ -145,16 +145,8 @@ def _build_task_metrics_and_energy_by_model(predictions_file: Path, is_cv: bool,
     if not rows:
         return {}, {}
 
-    # energy_per_inference_mJ (2026-09-06) is computed from VALID readings
-    # only — n_steps counts every row active_model served, but a step whose
-    # EnergyMeter attempt lost the non-blocking cross-process energy_lock
-    # (kio.energy_lock; typically because a MAPE cycle held it) is recorded
-    # as energy_uJ=0.0, energy_valid=False, not "measured and free". Averaging
-    # over all of n_steps (including those zeroed rows) understates true
-    # per-inference cost, and understates it MORE for planners that generate
-    # more lock contention (more MAPE cycles / more retrains) — exactly the
-    # planners you'd most want an honest number for. n_valid_steps and
-    # energy_per_inference_mJ use only rows with energy_valid == "True";
+    # energy_per_inference_mJ uses VALID readings only: a row without a reading
+    # is recorded as energy_uJ=0.0, energy_valid=False, not "measured and free".
     # n_steps (kept for backward compatibility) still counts every row.
     energy_by_model: dict[str, dict] = {}
     for r in rows:
@@ -172,11 +164,9 @@ def _build_task_metrics_and_energy_by_model(predictions_file: Path, is_cv: bool,
             round(v["energy_mJ"] / v["n_valid_steps"], 6) if v["n_valid_steps"] else None
         )
 
-    # total_inference_energy_* (2026-09-28, audit C3): restored, same field
-    # names as run_experiment.py. Every step is now measured (inference.py
-    # uses a blocking energy lock), and MAPE-side energy is accumulated
-    # separately in event_counters.mape_k_energy_uJ, so the split matches the
-    # single-threaded harness.
+    # total_inference_energy_* (2026-09-28, audit C3): same field names as
+    # run_experiment.py. MAPE-side energy accumulates separately in
+    # event_counters.mape_k_energy_uJ.
     _total_e_uJ = sum(float(r["energy_uJ"]) for r in rows if r.get("energy_valid") == "True")
     _energy_fields = {
         "total_inference_energy_uJ": round(_total_e_uJ, 2),

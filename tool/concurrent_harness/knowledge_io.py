@@ -77,7 +77,7 @@ PREDICTION_FIELDS_CV = [
 # step/ema_score from this file) works unmodified against a concurrent run.
 MAPE_EVENT_FIELDS = [
     "step", "violation", "violation_effective", "drift_detected", "drift_confirmed", "drift_deferred", "kl_div",
-    "decision_action", "decision_model", "decision_reason",
+    "decision_action", "decision_executed", "decision_model", "decision_reason",
     "model_before", "model_after",
     "r2", "accuracy", "ema_score", "avg_energy_uJ", "energy_threshold", "energy_threshold_before",
     "normalized_energy",
@@ -100,8 +100,12 @@ _ENERGY_LOCK_FILE = "_energy.lock"
 
 @contextlib.contextmanager
 def energy_lock(knowledge_dir: Path, blocking: bool = True):
-    """Cross-process advisory lock guaranteeing at most one EnergyMeter is
-    open, system-wide, at any instant.
+    """Cross-process advisory lock: at most one EnergyMeter open at any instant.
+
+    Note (2026-10-31): the regression grid's per-prediction meter (Pkg0Meter) and
+    the background retrain meter take no lock, as in the original, so readings do
+    overlap there; core/energy_overlap.py counts that energy once. The text below
+    holds for batch/step metering (CV) only.
 
     RAPL/NVML/polling energy counters are global to the machine, not
     per-process — inference.py and mape/manage.py (via mape_cycle.py) each
@@ -157,14 +161,11 @@ def energy_lock(knowledge_dir: Path, blocking: bool = True):
 def add_mape_energy(mape_store: "MapeInfoStore", energy_uJ: float | None) -> None:
     """Add a MAPE-side EnergyMeter reading to event_counters.mape_k_energy_uJ.
 
-    2026-09-28 (audit C3): energy is now split exactly like the
-    single-threaded harness — inference energy lives in predictions.csv
-    (every step measured; summed into task_metrics.total_inference_energy_*
-    at manifest time) and MAPE-K overhead accumulates here. inference.py no
-    longer touches mape_info.json at all. Because every EnergyMeter in the
-    run is opened under the blocking cross-process energy_lock(), the two
-    totals never overlap in time, so run_concurrent.py can also report their
-    sum (event_counters.energy_used_uJ) without double counting.
+    2026-09-28 (audit C3): energy is split exactly like the single-threaded
+    harness — inference energy lives in predictions.csv (summed into
+    task_metrics.total_inference_energy_* at manifest time) and MAPE-K overhead
+    accumulates here. inference.py does not touch mape_info.json.
+    run_concurrent.py reports their gross sum and the total net of overlaps.
     """
     def _add(d: dict) -> None:
         ec = d["event_counters"]
@@ -177,7 +178,8 @@ def add_mape_energy(mape_store: "MapeInfoStore", energy_uJ: float | None) -> Non
 
 FIX_COUNTERS = (
     "drift_deferred_lag", "violation_deferred_drift", "score_and_energy", "drift_suppressed_busy",
-    "vmr_single_version_retrain", "energy_invalid_rows",
+    "vmr_single_version_retrain", "energy_invalid_rows", "prt_pending_retries",
+    "decisions_executed", "decisions_skipped",
 )
 
 
@@ -416,16 +418,8 @@ class MapeInfoStore:
     """Read-modify-write wrapper around knowledge_dir/mape_info.json, safe
     across both threads (within mape/manage.py) and processes.
 
-    As of 2026-09-06 (single shared energy_used_uJ total), inference.py also
-    holds its own MapeInfoStore instance on the same file — previously only
-    manage.py's process ever touched it. A plain threading.Lock (still kept
-    below, for the same-process t1/t2 fast path) is invisible to a different
-    process, so two processes racing to initialize or update this file could
-    (and did, verified directly: `FileNotFoundError` on the shared `.tmp`
-    path, and `JSONDecodeError: Extra data` from an interleaved write)
-    corrupt it. An flock on a dedicated lock file closes that gap — same
-    pattern as energy_lock() above, but this one guards mape_info.json's
-    read-modify-write cycle specifically, not EnergyMeter usage.
+    Only manage.py's threads use it now; the flock on a dedicated lock file
+    stays as a guard against any second process touching mape_info.json.
     """
 
     def __init__(self, path: Path, initial: dict):

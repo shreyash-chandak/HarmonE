@@ -21,8 +21,9 @@ Why not the original's literal three threads (switch / drift / blind PRT):
 this repo's core/planners/* already unify all three mechanisms into one
 Planner.plan(ctx) call, and a second executing thread was a source of real
 bugs (double-triggered adaptations, stale mape_info write-backs). With a single
-executor, core/vmr.py (no file locking) and core/planners/bandit.py's
-module-level singleton are only ever used for decisions from one thread.
+executor, core/planners/bandit.py's module-level singleton is used from one
+thread. core/vmr.py is shared: background retrains write versions while t2 reads
+them, so a version appears atomically (VMR.store).
 """
 
 from __future__ import annotations
@@ -205,8 +206,11 @@ def main() -> None:
         t.start()
     logger.info("manage_proc: started %s", [t.name for t in threads])
 
-    for t in threads:
-        t.join()
+    # Exit as soon as a thread dies (2026-10-31): a dead t1 stops advancing the
+    # barrier, so inference would wait forever while t2 kept this process alive.
+    # run_concurrent.py sees the exit and writes _abort.
+    while any(t.is_alive() for t in threads) and not errors:
+        threads[0].join(timeout=1.0)
 
     if errors:
         logger.error("manage_proc: %d thread(s) died — exiting with failure status.", len(errors))

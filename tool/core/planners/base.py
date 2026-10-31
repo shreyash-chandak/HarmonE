@@ -40,6 +40,9 @@ class PlanningContext:
     # S5 run-level accuracy credit B (mape_info["s5_credit"], updated every
     # cycle in Monitor; core/planners/credit.py). 0.0 when not tracked.
     accuracy_credit: float = 0.0
+    # A PRT retrain was skipped because another retrain was running; it runs on
+    # the next cycle that can (mape_info["prt_pending"], 2026-10-31).
+    prt_pending: bool = False
 
 
 def prt_due(ctx: "PlanningContext", default_interval: int) -> bool:
@@ -51,6 +54,8 @@ def prt_due(ctx: "PlanningContext", default_interval: int) -> bool:
     past each multiple instead; identical to the modulo test whenever
     monitor_interval divides prt_interval (e.g. 50 vs 3200).
     """
+    if ctx.prt_pending:
+        return True
     p = int(ctx.thresholds.get("prt_interval", default_interval))
     mi = int(ctx.thresholds.get("monitor_interval", 50))
     s = ctx.current_step
@@ -89,6 +94,9 @@ class PlanDecision:
     # Violation the planner was actually given (after the recovery hold and
     # drift folding), set by the harness's _plan(); logged next to the raw one.
     effective_violation: str | None = None
+    # What execution did with it, set by the concurrent harness's execute_decision:
+    # "executed", "started" (background), "skipped_busy", "failed"; None for a noop.
+    executed: str | None = None
 
 
 class Planner(ABC):

@@ -93,6 +93,26 @@ def _head_start(decision: PlanDecision, is_cv: bool, thresholds: dict,
                         reason=f"ema_head_start: bootstrap {trial} (never observed)")
 
 
+def _after_execute(decision: PlanDecision, mape_store: kio.MapeInfoStore, prt_was_pending: bool) -> None:
+    """Executed vs skipped counters and the PRT retry state (2026-10-31, L4)."""
+    is_prt = bool((decision.metadata or {}).get("prt"))
+
+    def _upd(d: dict) -> None:
+        ec = d["event_counters"]
+        if decision.executed is not None:
+            key = "decisions_skipped" if decision.executed in ("skipped_busy", "failed") else "decisions_executed"
+            ec[key] = ec.get(key, 0) + 1
+        if not is_prt:
+            return
+        if decision.executed == "skipped_busy":
+            d["prt_pending"] = True
+        elif prt_was_pending:
+            d["prt_pending"] = False
+            ec["prt_pending_retries"] = ec.get("prt_pending_retries", 0) + 1
+    if decision.executed is not None:
+        mape_store.update(_upd)
+
+
 def run_cycle(
     *,
     planner,
@@ -175,7 +195,10 @@ def run_cycle(
                 decision = _head_start(decision, is_cv, thresholds, available_models,
                                        current_model, mape_info)
 
-                if violation is not None and decision.action == "noop":
+                # What the planner was given, not the raw violation: a hold mutes
+                # it, and naive planners never act (2026-10-31, L5).
+                if (effective_violation in ("score", "energy") and decision.action == "noop"
+                        and not planner.name.startswith("naive")):
                     mape_info["event_counters"]["noop_on_violation"] = (
                         mape_info["event_counters"].get("noop_on_violation", 0) + 1)
 
@@ -219,6 +242,7 @@ def run_cycle(
                     image_path_history=image_path_history,
                     luminance_history=luminance_history,
                 )
+                _after_execute(decision, mape_store, bool(mape_info.get("prt_pending")))
                 if new_model != current_model:
                     # Same bookkeeping as run_experiment.py after a switch.
                     def _on_switch(d: dict) -> None:
@@ -244,6 +268,7 @@ def run_cycle(
                 "drift_deferred": drift_result.get("deferred", ""),
                 "kl_div": drift_result.get("kl_div"),
                 "decision_action": decision.action,
+                "decision_executed": decision.executed or "",
                 "decision_model": decision.model,
                 "decision_reason": decision.reason,
                 "model_before": current_model,

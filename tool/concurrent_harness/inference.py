@@ -10,20 +10,15 @@ split the original uses.
 2026-09-28 (audit D1/D2/D3/C3/D9): the active model is re-read only at
 monitor_interval batch boundaries, and at each boundary inference waits until
 the manager is at most `max_batches_ahead` batches behind (see the barrier
-comment in main()). Every step is energy-measured under a blocking
-cross-process lock. CV image/luminance rows are written before the matching
+comment in main()). CV image/luminance rows are written before the matching
 prediction row.
 
-Model loading matches experiments/run_experiment.py's own logic, not the
-original's: every model in the config is loaded ONCE up front via
-_load_models() (same function, imported read-only) into a {name: predict_fn}
-dict — switching only changes which entry gets called, same as the
-single-threaded harness. The one addition beyond that: since retrain/replace
-happens in a *different process* (mape/manage.py) in this design — unlike
-single-threaded, where it mutates the same in-memory dict directly — this
-process still watches for a per-model reload flag and reloads just that one
-model's weights from disk when one appears. That's a new problem this
-process split creates, not a deviation from single-threaded loading logic.
+Metering and loading depend on the config. The regression grid uses the
+original's mechanism: energy_metering "per_prediction" (Pkg0Meter around model
+load + predict, no lock) with reload_model_per_step, so new weights take effect
+on the very next prediction. Otherwise (CV, smoke) every model is loaded once up
+front via _load_models() and a per-model reload flag picks up new weights from a
+retrain/replace in the manager process at the next batch boundary.
 
 Reuses experiments/run_experiment.py's config loading, adapter construction,
 scaler-fitting, and CV raw-prediction-saving helpers (read-only import —
@@ -86,7 +81,7 @@ _MAX_RELOAD_ATTEMPTS = 3
 _last_reload_error: dict[str, str] = {}
 
 
-def _reload_one_model(models: dict, name: str, local_config: dict) -> bool:
+def _reload_one_model(models: dict, name: str, local_config: dict, log: bool = True) -> bool:
     """Reload a single model's weights from its (local) weights_path.
 
     Mirrors _load_models()'s per-entry logic exactly (same loader dispatch,
@@ -109,8 +104,9 @@ def _reload_one_model(models: dict, name: str, local_config: dict) -> bool:
         )
         return True
     except Exception as exc:
-        logger.exception("inference_proc: reload of %r from %s failed — old weights keep serving.",
-                         name, spec.get("weights_path"))
+        if log:
+            logger.exception("inference_proc: reload of %r from %s failed — old weights keep serving.",
+                             name, spec.get("weights_path"))
         _last_reload_error[name] = f"{type(exc).__name__}: {exc}"
         return False
 
@@ -310,6 +306,21 @@ def main() -> None:
 
     step = 0
     reload_attempts: dict[str, int] = {}
+    # Per-step reload failures (2026-10-31): recorded once per model per batch,
+    # outside the meter window, so reload_failures in the manifest counts them.
+    reload_failed_this_batch: set[str] = set()
+
+    def _note_step_reload(ok: bool, model: str) -> None:
+        if ok or model in reload_failed_this_batch:
+            return
+        reload_failed_this_batch.add(model)
+        kio.append_row(
+            knowledge_dir / kio.RELOAD_FAILURES_FILE,
+            {"step": step, "model": model, "attempt": 1,
+             "error": _last_reload_error.get(model, "")[:300]},
+            ["step", "model", "attempt", "error"],
+        )
+
     current_model = kio.read_current_model(kp["model_file"], default=initial_model)
     for sample in adapter.stream():
         # Model changes (switch, or new weights after retrain/replace) are
@@ -317,6 +328,7 @@ def main() -> None:
         # batch is served by a single model — t1's batches are never mixed
         # (audit D1: previously 267 of 466 batches mixed 2-3 models).
         if step % monitor_interval == 0:
+            reload_failed_this_batch.clear()
             _close_batch()
             if step > 0:
                 kio.notify_fds(notify_wfds)  # batch rows are on disk
@@ -348,7 +360,8 @@ def main() -> None:
             _open_batch(step)
 
         if per_step_reload and not per_prediction:  # per_prediction loads inside its meter window
-            _reload_one_model(models, current_model, local_config)
+            _note_step_reload(_reload_one_model(models, current_model, local_config,
+                                                log=current_model not in reload_failed_this_batch), current_model)
 
         predict_fn = models.get(current_model)
         if predict_fn is None:
@@ -416,7 +429,6 @@ def main() -> None:
             )
         else:
             scaled_inputs = scaler.transform(sample.inputs.reshape(-1, 1)).flatten()
-            # Blocking cross-process lock — see the CV branch above.
             energy_uJ, energy_valid = 0.0, True  # batch mode: set by _close_batch
             inference_time_s = None
             window_start = window_end = None  # meter window (core/energy_overlap.py)
@@ -435,9 +447,11 @@ def main() -> None:
                 window_start = time.monotonic()
                 pkg0.begin()
                 t0 = time.time()
+                reloaded = True
                 try:
                     if per_step_reload:
-                        _reload_one_model(models, current_model, local_config)
+                        reloaded = _reload_one_model(models, current_model, local_config,
+                                                     log=current_model not in reload_failed_this_batch)
                         predict_fn = models.get(current_model) or predict_fn
                     raw_pred = predict_fn(scaled_inputs)
                 except Exception as exc:
@@ -446,6 +460,7 @@ def main() -> None:
                 inference_time_s = time.time() - t0
                 reading = pkg0.end()
                 window_end = time.monotonic()
+                _note_step_reload(reloaded, current_model)
                 energy_uJ, energy_valid = (reading or 0.0), reading is not None
             elif batch_mode:
                 try:

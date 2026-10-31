@@ -12,8 +12,8 @@ _do_cv_inline_finetune, _load_model_store, _load_cv_model_store,
 _archive_in_vmr) are plain module-level functions that take all their state as
 explicit arguments — nothing tied to run_experiment()'s own loop. Importing
 them here read-only means retraining behaves *identically* to the
-single-threaded path (same hyperparams.retrain handling, same 5-epoch LSTM
-fine-tune, same pseudo-label/safety-valve CV logic) instead of a second,
+single-threaded path (same hyperparams.retrain handling, same LSTM retrain,
+same pseudo-label/safety-valve CV logic) instead of a second,
 independently-drifting reimplementation. This is a deliberate coupling,
 documented in the approved plan — no file under experiments/ is modified.
 

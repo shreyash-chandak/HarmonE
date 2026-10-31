@@ -909,6 +909,7 @@ def _plan(
             "actuation_lag": actuation_lag,
         },
         accuracy_credit=float(mape_info.get("s5_credit", 0.0)),
+        prt_pending=bool(mape_info.get("prt_pending", False)),
     )
     decision = planner.plan(ctx)
     decision.effective_violation = effective_violation
