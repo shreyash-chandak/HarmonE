@@ -15,7 +15,8 @@ Order of operations mirrors run_experiment.py's cycle (audit D7/D8 parity):
      actuation lag of the barrier, see inference.py) is evidence about THAT
      model, not about the one now in charge, so it updates EMAs but can't
      trigger a switch away from a model that hasn't served yet.
-  3. drift_result comes from t2 (already analysed incl. the VMR lookup).
+  3. drift_result comes from t2 (already analysed incl. the VMR lookup). _plan
+     defers it on a lag batch and gives confirmed drift precedence (2026-10-31).
   4. _update_energy_boundary(); last_observed_step / steps_since_last_switch
      bookkeeping exactly as single-threaded.
   5. Plan via the shared _plan() (includes the switch hold), then the
@@ -53,6 +54,12 @@ import knowledge_io as kio
 from execute import execute_decision
 
 logger = logging.getLogger(__name__)
+
+# event counters a cycle updates on its local mape_info copy (see _merge)
+_CYCLE_COUNTERS = (
+    "noop_on_violation", "drift_unconfirmed", "violations_in_recovery", "drift_deferred_lag",
+    "violation_deferred_drift", "score_and_energy", "energy_invalid_rows",
+)
 
 _MONITOR_FIELDS = (
     "ema_scores", "ema_accuracy", "ema_energy", "current_energy_threshold",
@@ -121,8 +128,14 @@ def run_cycle(
                 }
                 violation = None
                 effective_violation = None
+                energy_threshold_before = mape_info["current_energy_threshold"]
                 if monitor_rows and monitor_model:
-                    energies = [float(r["energy_uJ"]) for r in monitor_rows]
+                    # Valid readings only (2026-10-31); rows without one are
+                    # counted, not treated as zero energy.
+                    energies = [float(r["energy_uJ"]) for r in monitor_rows if r.get("energy_valid") == "True"]
+                    if len(energies) < len(monitor_rows):
+                        ec_ = mape_info["event_counters"]
+                        ec_["energy_invalid_rows"] = ec_.get("energy_invalid_rows", 0) + len(monitor_rows) - len(energies)
                     if is_cv:
                         acc = sum(float(r["proxy_acc"]) for r in monitor_rows) / len(monitor_rows)
                         telemetry = _monitor_batch([], [], energies, monitor_model,
@@ -136,6 +149,7 @@ def run_cycle(
                             reference_values=(value_history or [])[-int(thresholds.get("drift_window_size", 1200)):],
                         )
                     # ── Analyse (before the boundary update, as single-threaded)
+                    energy_threshold_before = mape_info["current_energy_threshold"]
                     if monitor_model == current_model:
                         violation = _analyse_violation(telemetry, mape_info, thresholds)
                     _update_energy_boundary(mape_info, telemetry, thresholds)
@@ -174,16 +188,12 @@ def run_cycle(
                 # Persist the monitor/analyse fields BEFORE executing: execute
                 # does its own counter updates through mape_store, and this
                 # must not overwrite them (only fields this cycle owns).
-                noop_on_violation = mape_info["event_counters"].get("noop_on_violation", 0)
-                drift_unconfirmed = mape_info["event_counters"].get("drift_unconfirmed", 0)
-                in_recovery = mape_info["event_counters"].get("violations_in_recovery", 0)
+                cycle_counters = {k: mape_info["event_counters"].get(k, 0) for k in _CYCLE_COUNTERS}
                 owned = {k: mape_info[k] for k in _MONITOR_FIELDS if k in mape_info}
 
                 def _merge(d: dict) -> None:
                     d.update(owned)
-                    d["event_counters"]["noop_on_violation"] = noop_on_violation
-                    d["event_counters"]["drift_unconfirmed"] = drift_unconfirmed
-                    d["event_counters"]["violations_in_recovery"] = in_recovery
+                    d["event_counters"].update(cycle_counters)
                 mape_store.update(_merge)
 
                 # ── Execute ──────────────────────────────────────────────
@@ -220,6 +230,7 @@ def run_cycle(
                 "violation_effective": effective_violation,
                 "drift_detected": drift_result.get("drift_detected", False),
                 "drift_confirmed": drift_result.get("drift_confirmed"),
+                "drift_deferred": drift_result.get("deferred", ""),
                 "kl_div": drift_result.get("kl_div"),
                 "decision_action": decision.action,
                 "decision_model": decision.model,
@@ -231,6 +242,8 @@ def run_cycle(
                 "ema_score": telemetry.get("ema_score"),
                 "avg_energy_uJ": telemetry.get("avg_energy_uJ"),
                 "energy_threshold": round(mape_info.get("current_energy_threshold", 0.6), 6),
+                "energy_threshold_before": round(energy_threshold_before, 6),
+                "normalized_energy": telemetry.get("normalized_energy"),
                 **s5_event_fields(planner.name, decision, mape_info),
             },
             kio.MAPE_EVENT_FIELDS,

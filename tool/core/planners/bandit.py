@@ -36,8 +36,8 @@ Every MAPE cycle (`plan`) does two things:
    Staying on the current model is a valid choice, so the bandit decides on
    every cycle, not only on violations.
 
-Drift with no score/energy violation still goes to the fixed VMR-replace /
-retrain rule shared with S4–S6 (retrain/replace are not arms).
+Confirmed drift still goes to the fixed VMR-replace / retrain rule shared with
+S4–S6 (retrain/replace are not arms).
 
 Context x: [1, drift_signal, volatility, τ] — describes the stream, from the
 current cycle's telemetry (PlanningContext.telemetry, filled by both
@@ -332,8 +332,8 @@ class BanditPlanner(Planner):
                             reason=f"S7 bandit: switch to {chosen} ({why})", metadata=meta)
 
     def _handle_drift(self, ctx: PlanningContext) -> PlanDecision:
-        """Drift without a score/energy violation: the fixed VMR-replace /
-        retrain rule shared with S4–S6 (retrain/replace are not arms)."""
+        """Confirmed drift: the fixed VMR-replace / retrain rule shared with
+        S4–S6 (retrain/replace are not arms)."""
         dr = ctx.drift_result
         if dr is None:
             return PlanDecision(action="noop", reason="S7 bandit: drift signalled but no drift_result")

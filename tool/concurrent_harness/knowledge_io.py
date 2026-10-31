@@ -76,10 +76,11 @@ PREDICTION_FIELDS_CV = [
 # writes, so scripts/plot_results.py's chart_ema_timeseries() (which reads
 # step/ema_score from this file) works unmodified against a concurrent run.
 MAPE_EVENT_FIELDS = [
-    "step", "violation", "violation_effective", "drift_detected", "drift_confirmed", "kl_div",
+    "step", "violation", "violation_effective", "drift_detected", "drift_confirmed", "drift_deferred", "kl_div",
     "decision_action", "decision_model", "decision_reason",
     "model_before", "model_after",
-    "r2", "accuracy", "ema_score", "avg_energy_uJ", "energy_threshold",
+    "r2", "accuracy", "ema_score", "avg_energy_uJ", "energy_threshold", "energy_threshold_before",
+    "normalized_energy",
     # S5 variants only (blank otherwise), 2026-10-26
     "s5_credit", "s5_projected", "s5_required_acc", "s5_reason", "s5_unknown_models",
 ]
@@ -174,6 +175,12 @@ def add_mape_energy(mape_store: "MapeInfoStore", energy_uJ: float | None) -> Non
     mape_store.update(_add)
 
 
+FIX_COUNTERS = (
+    "drift_deferred_lag", "violation_deferred_drift", "score_and_energy", "drift_suppressed_busy",
+    "vmr_single_version_retrain", "energy_invalid_rows",
+)
+
+
 def build_initial_mape_info(model_names) -> dict:
     """experiments.run_experiment._initial_mape_info() plus two concurrent-only
     fields:
@@ -188,6 +195,9 @@ def build_initial_mape_info(model_names) -> dict:
     info = _initial_mape_info(model_names)
     info["last_adaptation"] = {}
     info["drift_checks"] = 0
+    # Fix-plan counters (2026-10-31): always in the manifest, also when 0.
+    for k in FIX_COUNTERS:
+        info["event_counters"].setdefault(k, 0)
     return info
 
 

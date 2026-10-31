@@ -19,8 +19,8 @@ adapting on drift, and it trusted frozen estimates. This version:
 - always leaves on an energy violation unless already on the cheapest model
   (no 0.02 energy margin — HarmonE has none, and it produced no-ops).
 
-Decision order each cycle (recovery hold, busy skip and violation-over-drift
-precedence are the harness's and unchanged):
+Decision order each cycle (recovery hold, busy guard and drift-over-violation
+precedence are the harness's, run_experiment._plan):
   1. drift   → replace if the VMR has a version within tau_drift, else retrain
   2. probe   → with explore_prob, the stalest other model (as pareto)
   3. no violation → noop

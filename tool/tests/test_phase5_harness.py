@@ -259,11 +259,11 @@ class TestAnalyseViolation:
         v = _analyse_violation(tel, self._info(), self._thresholds())
         assert v == "energy"
 
-    def test_score_takes_priority_over_energy(self):
-        # Both violated: score check happens first
+    def test_energy_takes_priority_over_score(self):
+        # Both violated: energy wins, as in HarmonE/mape/analyse.py (2026-10-31)
         tel = {"ema_score": 0.50, "normalized_energy": 0.9}
         v = _analyse_violation(tel, self._info(), self._thresholds())
-        assert v == "score"
+        assert v == "energy"
 
 
 # ── _update_energy_boundary ───────────────────────────────────────────────────

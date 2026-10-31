@@ -113,6 +113,10 @@ def execute_decision(
         logger.info("%s skipped: a background retrain is still running (%s)", decision.action, decision.reason)
         return current_model
 
+    if decision.action == "retrain" and (drift_result or {}).get("single_version"):
+        mape_store.update(lambda d: d["event_counters"].__setitem__(
+            "vmr_single_version_retrain", d["event_counters"].get("vmr_single_version_retrain", 0) + 1))
+
     def _record_adaptation(d: dict, version_path: str | None = None) -> None:
         d.setdefault("last_adaptation", {})[current_model] = current_step
         note_adaptation(d, current_model, version_path)

@@ -647,7 +647,12 @@ def _monitor_batch(
     avg_energy_uJ = float(np.mean(energies_uJ)) if energies_uJ else 0.0
     e_min = thresholds.get("E_m", 0.0)
     e_max = thresholds.get("E_M", 25000.0)
-    e_norm = normalize_energy(avg_energy_uJ, e_min, e_max)
+    if energies_uJ:
+        e_norm = normalize_energy(avg_energy_uJ, e_min, e_max)
+    else:
+        # No valid reading in this batch (2026-10-31): keep the model's energy
+        # estimate instead of treating the batch as free.
+        e_norm = float(mape_info.get("ema_energy", {}).get(current_model, 0.5))
 
     beta = thresholds.get("beta", 0.95)
     gamma = thresholds.get("gamma", 0.8)
@@ -694,14 +699,22 @@ def _analyse_violation(
     mape_info: dict,
     thresholds: dict,
 ) -> str | None:
-    """Return 'score' | 'energy' | None."""
+    """Return 'energy' | 'score' | None.
+
+    Energy wins when both are violated, as in HarmonE/mape/analyse.py, where the
+    energy check runs second and overwrites threshold_violated (2026-10-31, H5).
+    """
     min_score = thresholds.get("min_score", 0.78)
     energy_threshold = mape_info["current_energy_threshold"]
-
-    if telemetry["ema_score"] < min_score:
-        return "score"
-    if telemetry["normalized_energy"] > energy_threshold:
+    score_bad = telemetry["ema_score"] < min_score
+    energy_bad = telemetry["normalized_energy"] > energy_threshold
+    if score_bad and energy_bad:
+        ec = mape_info.setdefault("event_counters", {})
+        ec["score_and_energy"] = ec.get("score_and_energy", 0) + 1
+    if energy_bad:
         return "energy"
+    if score_bad:
+        return "score"
     return None
 
 
@@ -755,6 +768,11 @@ def _analyse_drift(
             strategy=strategy,
             threshold=thresholds.get("tau_drift") if strategy == "closest_distribution" else None,
         )
+        if best is not None and len(vmr.list_versions(current_model)) <= 1:
+            # As HarmonE/mape/analyse.py::get_best_version (len(versions) <= 1 ->
+            # no reuse): a model with only one version retrains (2026-10-31).
+            return {"drift_detected": True, "action": "retrain", "version": None,
+                    "kl_div": kl, "single_version": True}
         if best is not None:
             return {
                 "drift_detected": True,
@@ -837,6 +855,16 @@ def _plan(
     if not getattr(planner, "reacts_to_drift", True):
         drift_result = dict(drift_result, drift_detected=False)
 
+    # Lag cycle (2026-10-31, H1): the batch was served by the previous model, so
+    # nothing has been measured about the commanded one and its accuracy EMA is
+    # frozen. Defer: t2 fires again on the next cycle if KL stays high and the
+    # cooldown is not consumed.
+    if drift_result["drift_detected"] and served_model not in (None, current_model):
+        ec = mape_info.setdefault("event_counters", {})
+        ec["drift_deferred_lag"] = ec.get("drift_deferred_lag", 0) + 1
+        drift_result["deferred"] = "lag"
+        drift_result = dict(drift_result, drift_detected=False)
+
     effective_violation = violation
     if drift_result["drift_detected"]:
         ok, why = drift_confirmed(mape_info, current_model, thresholds)
@@ -846,7 +874,14 @@ def _plan(
             ec = mape_info.setdefault("event_counters", {})
             ec["drift_unconfirmed"] = ec.get("drift_unconfirmed", 0) + 1
             drift_result = dict(drift_result, drift_detected=False, unconfirmed_reason=why)
-    if drift_result["drift_detected"] and violation is None:
+    # Confirmed drift goes first (2026-10-31, H2). In the original the drift
+    # thread is independent of the violation check, so violations cannot hide
+    # drift. One decision per cycle here: a persistent violation fires again on
+    # a later cycle.
+    if drift_result["drift_detected"]:
+        if violation is not None:
+            ec = mape_info.setdefault("event_counters", {})
+            ec["violation_deferred_drift"] = ec.get("violation_deferred_drift", 0) + 1
         effective_violation = "drift"
 
     ctx = PlanningContext(

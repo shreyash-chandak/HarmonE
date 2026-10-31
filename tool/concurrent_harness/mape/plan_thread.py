@@ -74,6 +74,17 @@ def _drift_for_batch(kp: dict, current_step: int, current_model: str,
     return state["drift_result"]
 
 
+def _busy_guard(drift_result: dict, busy: bool, mape_store) -> dict:
+    """No drift reaches the planner while a background retrain runs (2026-10-31,
+    H2): the original's drift thread is blocked during os.system(retrain), and
+    otherwise drift-first would swallow every switch and probe until it ends."""
+    if not busy or not drift_result.get("drift_detected"):
+        return drift_result
+    mape_store.update(lambda d: d["event_counters"].__setitem__(
+        "drift_suppressed_busy", d["event_counters"].get("drift_suppressed_busy", 0) + 1))
+    return dict(_NO_DRIFT, kl_div=drift_result.get("kl_div"))
+
+
 def run(
     *,
     dataset_config: dict,
@@ -155,6 +166,7 @@ def run(
                 execute.apply_background_results(mape_store, current_step)
                 last_adaptation = mape_store.load().get("last_adaptation", {})
                 drift_result = _drift_for_batch(kp, current_step, current_model, last_adaptation)
+                drift_result = _busy_guard(drift_result, execute.background_busy(), mape_store)
 
                 mape_cycle.run_cycle(
                     planner=planner,
