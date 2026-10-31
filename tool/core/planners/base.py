@@ -123,6 +123,12 @@ def _register():
     from . import naive, random_switch, switch, greedy_switch, harmone_original, violation_aware, violation_aware_gated, pareto, bandit, naive_prt, random_switch_prt  # noqa: F401
 
 
+def planner_reacts_to_drift(name: str) -> bool:
+    """Class attribute lookup, no instance (BanditPlanner needs its bandit set first)."""
+    _register()
+    return bool(REGISTRY[name].reacts_to_drift)
+
+
 def get_planner(name: str) -> Planner:
     """Instantiate a planner by its registered name.
 

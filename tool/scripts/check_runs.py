@@ -103,7 +103,8 @@ def check_run(run: Path, naive_dirs: list[Path], cache: dict) -> tuple[dict, lis
         n_ev = sum(1 for _ in csv.DictReader(f))
     if n_ev != j.get("mape_cycles"):
         fail.append(f"mape_events.csv has {n_ev} rows for {j.get('mape_cycles')} cycles")
-    if int(j.get("drift_checks", 0)) < n // mi - 1:
+    from core.planners.base import planner_reacts_to_drift
+    if planner_reacts_to_drift(planner) and int(j.get("drift_checks", 0)) < n // mi - 1:
         fail.append(f"only {j.get('drift_checks')} drift checks for {n // mi} batches")
     if j.get("reload_failures", 0):
         fail.append(f"{j['reload_failures']} weight reload failures")

@@ -11,8 +11,8 @@ directory was since cleaned up but whose log survives still contributes a row.
 
 Regression rows: accuracy = task_metrics.r2 (stream R²) and
 task_metrics.window_r2 (mean per-batch window R², 2026-10-12); energy = the
-manifest's energy_mJ, the mean per-prediction energy as in the HarmonE paper
-(falls back to event_counters.energy_used_mJ for runs made before it).
+manifest's energy_mJ, all metered energy per prediction, net of overlaps since
+2026-10-31 (falls back to event_counters.energy_used_mJ for runs made before it).
 
 CV rows: confidence = task_metrics.mean_proxy_acc (the live run's own proxy
 score — literally "confidence" for classification/detection), energy = same
@@ -196,8 +196,8 @@ clean run.
 ## Regression datasets
 
 Stream R² is R² over the full stream; window R² is the mean per-batch R²
-against the trailing window (the planners' accuracy signal). Energy is the
-mean per-prediction reading in mJ, as in the HarmonE paper's Table 2.
+against the trailing window (the planners' accuracy signal). Energy is all
+metered energy per prediction in mJ, net of overlaps.
 
 {reg_table}
 

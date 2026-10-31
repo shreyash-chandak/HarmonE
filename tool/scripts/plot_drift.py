@@ -62,11 +62,12 @@ plt.rcParams.update({
     "axes.spines.right": False,
 })
 
-# Planners whose mape_events.csv logs a kl_div value every cycle (not just on
-# detection) — see module docstring. Order is a preference for which one to
-# pick if a dataset has several.
+# Planners whose mape_events.csv logs a kl_div value every cycle. Since 2026-10-31
+# only planners that react to drift run the detector (the ones ignoring it have no
+# kl_div, and the curve here re-bases after each adaptation). Order is a preference
+# for which one to pick if a dataset has several.
 NON_DRIFT_AWARE_PLANNERS = [
-    "naive", "naive_prt", "random_switch", "random_switch_prt", "greedy_switch",
+    "harmone_original", "violation_aware", "violation_aware_gated", "pareto", "bandit",
 ]
 
 DATASETS = [

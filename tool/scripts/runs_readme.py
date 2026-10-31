@@ -64,7 +64,8 @@ def main() -> None:
            "(`runs_calib/`), so their min = max = mean.",
            "- **Accuracy:** stream R² × 100 over the whole drift-induced test stream.",
            "- **Total energy:** all metered energy of the run (per-prediction pkg[0] readings + MAPE-K "
-           "cycles + background retrains) divided by the number of predictions, in mJ.",
+           "cycles + background retrains), net of overlaps, divided by the number of predictions, in mJ. "
+           "Runs before 2026-10-31 are gross (overlaps counted more than once).",
            "- **Inference energy:** the per-prediction readings alone (model load + predict), mean, in mJ.",
            "- **Accuracy / energy:** accuracy (out of 100) ÷ total energy (mJ), computed per run and averaged "
            "over seeds; adaptive planners only. Higher is better.",

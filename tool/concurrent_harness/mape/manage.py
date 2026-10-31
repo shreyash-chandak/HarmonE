@@ -4,7 +4,9 @@ Mirrors HarmonE/mape/manage.py's role — starts the management threads and
 blocks until shutdown — with shutdown coordinated via a sentinel file instead
 of a human killing the process.
 
-Threads (2026-09-28 redesign, audit D4/D8 — both start for EVERY planner):
+Threads (2026-09-28 redesign, audit D4/D8; t2 only for planners that react to
+drift since 2026-10-31, as the original starts no drift thread for its switch and
+single-model approaches):
   - t1 (plan_thread.py): the only thread that plans and executes. One
     Monitor->Analyse->Plan->Execute cycle per monitor_interval batch, with
     violation AND drift passed into the same _plan() call, exactly like
@@ -57,6 +59,7 @@ from experiments.run_experiment import (
     _DRIFT_WINDOW_SIZE,
     _DRIFT_N_BINS,
 )
+from core.planners.base import planner_reacts_to_drift
 from core.vmr import VMR
 
 logger = logging.getLogger(__name__)
@@ -165,6 +168,7 @@ def main() -> None:
                 errors.append(exc)
         return _wrapped
 
+    use_t2 = planner_reacts_to_drift(args.planner)
     t1 = threading.Thread(
         target=_guarded(plan_thread.run, "t1-plan"),
         kwargs=dict(
@@ -178,6 +182,7 @@ def main() -> None:
             drift_window=drift_window,
             energy_backend=energy_backend,
             rows_rfd=rows_rfds[0], processed_wfd=args.processed_wfd,
+            use_t2=use_t2,
         ),
         daemon=True, name="t1-plan",
     )
@@ -194,7 +199,7 @@ def main() -> None:
         ),
         daemon=True, name="t2-drift",
     )
-    threads = [t1, t2]
+    threads = [t1, t2] if use_t2 else [t1]
 
     for t in threads:
         t.start()

@@ -31,12 +31,17 @@ EMA values.
 
 Energy: the whole cycle (monitor through execute) is inside one EnergyMeter,
 like single-threaded's `_mape_em`, and accumulates into
-event_counters.mape_k_energy_uJ (kio.add_mape_energy).
+event_counters.mape_k_energy_uJ (kio.add_mape_energy); its window goes to
+meter_windows.csv. metered=False (naive / naive_prt, 2026-10-31, D4): no meter,
+because the original's single-model baselines have no MAPE cycle; t1 is only
+logging and the barrier there. Its CPU still shows up in the package readings of
+concurrent predictions.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 
 from core.energy import EnergyMeter
 from core.planners.base import PlanDecision
@@ -110,13 +115,15 @@ def run_cycle(
     image_path_history: list[str] | None,
     luminance_history: list[float] | None,
     energy_backend: str,
+    metered: bool = True,
 ) -> str:
     """Returns the (possibly new) commanded model name."""
     kp = kio.knowledge_paths(knowledge_dir)
 
     with kio.ENERGY_LOCK:  # t1/t2 within-process serialization
         with kio.energy_lock(knowledge_dir, blocking=True):  # cross-process
-            em = EnergyMeter("mape_cycle", backend=energy_backend)
+            em = EnergyMeter("mape_cycle", backend=energy_backend if metered else "null")
+            window_start = time.monotonic()
             em.__enter__()
             try:
                 mape_info = mape_store.load()  # inside the lock (audit D4)
@@ -220,7 +227,10 @@ def run_cycle(
                     mape_store.update(_on_switch)
             finally:
                 em.__exit__(None, None, None)
-            kio.add_mape_energy(mape_store, em.total_uJ)
+            window_end = time.monotonic()
+            if metered:
+                kio.add_mape_energy(mape_store, em.total_uJ)
+                kio.append_meter_window(knowledge_dir, "mape", window_start, window_end, em.total_uJ)
 
         kio.append_row(
             kp["mape_events_file"],

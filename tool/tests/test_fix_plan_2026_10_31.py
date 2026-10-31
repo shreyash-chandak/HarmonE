@@ -398,3 +398,76 @@ class TestM5BanditContext:
     def test_no_lag_keeps_previous_cycle(self, tmp_path):
         seen = self._go(tmp_path, 0)
         assert [round(float(x[3]), 1) for x in seen] == [0.1, 0.2, 0.3, 0.4]
+
+
+# ── step 5: energy reporting ──────────────────────────────────────────────────
+
+class TestM3Overlap:
+    def _o(self, preds, windows):
+        from core.energy_overlap import compute_overlaps
+        return compute_overlaps(preds, windows)
+
+    def test_no_overlap(self):
+        assert self._o([(0, 1, 5.0)], [("retrain", 2, 3, 9.0)]) == {}
+
+    def test_retrain_contains_predictions_counted_once(self):
+        preds = [(float(i), i + 0.1, 1.0) for i in range(10)]
+        o = self._o(preds, [("retrain", 0, 10, 100.0)])
+        assert o == {"retrain_x_prediction": pytest.approx(10.0)}
+        # package total: the retrain's 100 already contains the 10
+        assert sum(p[2] for p in preds) + 100 - sum(o.values()) == pytest.approx(100.0)
+
+    def test_partial_prediction_is_prorated(self):
+        assert self._o([(0, 1, 4.0)], [("mape", 0.5, 2, 9.0)])["mape_x_prediction"] == pytest.approx(2.0)
+
+    def test_triple_overlap_counts_each_energy_once(self):
+        # prediction inside a MAPE cycle inside a retrain
+        o = self._o([(1, 2, 3.0)], [("mape", 0, 4, 8.0), ("retrain", 0, 10, 50.0)])
+        assert o["mape_x_prediction"] == pytest.approx(3.0)
+        assert o["retrain_x_prediction"] == pytest.approx(3.0)
+        assert o["retrain_x_mape"] == pytest.approx(5.0)   # mape's reading minus the prediction's
+        assert 3 + 8 + 50 - sum(o.values()) == pytest.approx(50.0)
+
+    def test_never_removes_more_than_the_reading(self):
+        o = self._o([(0, 1, 9.0)], [("retrain", 0, 1, 2.0)])
+        assert sum(o.values()) == pytest.approx(2.0)
+
+    def test_net_never_exceeds_gross_randomised(self):
+        import random as r
+        rng = r.Random(0)
+        preds = [(i + rng.random() * .4, i + .5 + rng.random() * .4, rng.random() * 5) for i in range(200)]
+        win = []
+        for k in ("mape", "drift", "retrain"):
+            for _ in range(15):
+                s = rng.random() * 190
+                win.append((k, s, s + rng.random() * (30 if k == "retrain" else 2), rng.random() * 40))
+        gross = sum(p[2] for p in preds) + sum(w[3] for w in win)
+        o = self._o(preds, win)
+        assert all(v >= 0 for v in o.values()) and gross - sum(o.values()) <= gross + 1e-9
+        assert gross - sum(o.values()) >= sum(p[2] for p in preds) - 1e-6
+
+    def test_from_files(self, tmp_path):
+        from core.energy_overlap import compute_from_run
+        p, w = tmp_path / "predictions.csv", tmp_path / "meter_windows.csv"
+        p.write_text("energy_uJ,energy_valid,start_monotonic,end_monotonic\n2.0,True,1.0,2.0\n9.0,False,1.0,2.0\n")
+        w.write_text("kind,start_monotonic,end_monotonic,energy_uJ\nretrain,0,5,20\nmape,6,7,\n")
+        assert compute_from_run(p, w) == {"retrain_x_prediction": pytest.approx(2.0)}
+        assert compute_from_run(p, tmp_path / "none.csv") == {}
+
+
+class TestM4Baselines:
+    @pytest.mark.parametrize("name,expected", [
+        ("naive", False), ("naive_prt", False), ("switch", False), ("switch_prt", False),
+        ("greedy_switch", False), ("random_switch", False), ("random_switch_prt", False),
+        ("harmone_original", True), ("violation_aware", True), ("violation_aware_gated", True),
+        ("pareto", True), ("bandit", True)])
+    def test_reacts_to_drift(self, name, expected):
+        from core.planners.base import planner_reacts_to_drift
+        assert planner_reacts_to_drift(name) is expected
+
+    def test_metered(self):
+        pt = _harness_modules()["plan_thread"]
+        assert not pt._metered("naive", True) and not pt._metered("naive", False)
+        assert not pt._metered("naive_prt", True)
+        assert pt._metered("naive_prt", False)      # in-cycle retrain needs the meter
+        assert pt._metered("switch", True)

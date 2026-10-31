@@ -8,11 +8,9 @@ run_manifest.json compatible with experiments/metrics.py and
 scripts/plot_results.py — without modifying either of those files.
 
 Spawns inference.py and mape/manage.py as separate OS processes (not threads,
-not multiprocessing) — the same process boundary the original uses. Energy
-meters in both processes are serialized by a cross-process flock
-(knowledge_io.energy_lock) so their windows never overlap; the manifest
-reports inference energy and MAPE-K overhead separately, like
-run_experiment.py (audit C3, 2026-09-28).
+not multiprocessing) — the same process boundary the original uses. The manifest
+reports inference, MAPE-K and retrain energy separately and their total net of
+overlaps (core/energy_overlap.py, 2026-10-31).
 """
 
 from __future__ import annotations
@@ -488,10 +486,10 @@ def main() -> None:
 
     # Energy split like run_experiment.py (audit C3, 2026-09-28): inference
     # total in task_metrics.total_inference_energy_uJ, MAPE-K overhead in
-    # event_counters.mape_k_energy_uJ. energy_used_uJ/mJ (their sum) is kept
-    # for scripts/generate_results_table.py; every EnergyMeter in the run is
-    # opened under the blocking cross-process energy_lock, so the two never
-    # overlap in time and the sum does not double count.
+    # event_counters.mape_k_energy_uJ. energy_used_uJ/mJ is their GROSS sum:
+    # per-prediction readings take no lock and retrain meters cover the whole
+    # package, so readings overlap in time. core/energy_overlap.py counts the
+    # energy of an overlap once; energy_net_* is what is left (2026-10-31, D3).
     event_counters = dict(event_counters)
     _inf_uJ = float(task_metrics.get("total_inference_energy_uJ", 0.0)) if task_metrics else 0.0
     _mape_uJ = float(event_counters.get("mape_k_energy_uJ", 0.0))
@@ -499,6 +497,12 @@ def main() -> None:
     event_counters["energy_used_uJ"] = round(_inf_uJ + _mape_uJ + _retrain_uJ, 2)
     event_counters["energy_used_mJ"] = round((_inf_uJ + _mape_uJ + _retrain_uJ) / 1000.0, 4)
     _n_valid = int((task_metrics or {}).get("n_samples", 0)) - int((task_metrics or {}).get("energy_invalid_steps", 0) or 0)
+    from core.energy_overlap import compute_from_run
+    _overlap_uJ = compute_from_run(kp["predictions_file"], knowledge_dir / kio.METER_WINDOWS_FILE)
+    _overlap_total_uJ = sum(_overlap_uJ.values())
+    _net_uJ = _inf_uJ + _mape_uJ + _retrain_uJ - _overlap_total_uJ
+    event_counters["energy_net_uJ"] = round(_net_uJ, 2)
+    event_counters["energy_net_mJ"] = round(_net_uJ / 1000.0, 4)
 
     # A clean exit with zero recorded steps is still a failure (e.g. the
     # stream produced nothing before crashing between polls) — matches
@@ -530,16 +534,22 @@ def main() -> None:
         "final_model": kio.read_current_model(kp["model_file"]),
         # The single reported energy (2026-10-13): all metered energy of the
         # run — per-prediction readings + MAPE-K cycles and drift checks +
-        # background retrains — per prediction (mJ). The paper's Table 2
-        # charges retraining to its PRT baselines (LSTM+PRT 45.4 vs LSTM
-        # 32.9 mJ); the per-prediction mean alone missed it. Breakdown in
+        # background retrains — per prediction (mJ), net of overlaps since
+        # 2026-10-31 (package energy counted in more than one reading is
+        # counted once; energy_gross_mJ keeps the plain sum). The paper's
+        # Table 2 charges retraining to its PRT baselines (LSTM+PRT 45.4 vs
+        # LSTM 32.9 mJ); the per-prediction mean alone missed it. Breakdown in
         # energy_breakdown_J; inference_energy_mJ is the old per-prediction mean.
         "energy_metering": str(dataset_config.get("energy_metering", "batch")),
-        "energy_mJ": (round(event_counters["energy_used_mJ"] / _n_valid, 6)
+        "energy_mJ": (round(event_counters["energy_net_mJ"] / _n_valid, 6)
                       if task_metrics and _n_valid > 0 else None),
+        "energy_gross_mJ": (round(event_counters["energy_used_mJ"] / _n_valid, 6)
+                            if task_metrics and _n_valid > 0 else None),
+        "overlap_J": {k: round(v / 1e6, 3) for k, v in sorted(_overlap_uJ.items())},
         "inference_energy_mJ": (task_metrics or {}).get("energy_per_inference_mJ"),
         "energy_breakdown_J": {"inference": round(_inf_uJ / 1e6, 3), "mape_k": round(_mape_uJ / 1e6, 3),
-                               "retrain": round(_retrain_uJ / 1e6, 3)},
+                               "retrain": round(_retrain_uJ / 1e6, 3),
+                               "overlap": round(_overlap_total_uJ / 1e6, 3)},
         "inference_time_ms": (task_metrics or {}).get("mean_inference_time_ms"),
         # Failed cross-process weight reloads (audit D6); > 0 means some
         # counted adaptations never reached the stream.
@@ -599,8 +609,9 @@ def main() -> None:
         _inf_mJ = _inf_uJ / 1000.0
         _mape_mJ = _mape_uJ / 1000.0
         logger.info(
-            "energy summary    | inference=%.3f mJ  mape_overhead=%.3f mJ  total=%.3f mJ",
-            _inf_mJ, _mape_mJ, _inf_mJ + _mape_mJ,
+            "energy summary    | inference=%.3f mJ  mape_overhead=%.3f mJ  retrain=%.3f mJ  "
+            "overlap=%.3f mJ  net total=%.3f mJ",
+            _inf_mJ, _mape_mJ, _retrain_uJ / 1000.0, _overlap_total_uJ / 1000.0, _net_uJ / 1000.0,
         )
     if energy_by_model:
         for _m, _ev in sorted(energy_by_model.items()):

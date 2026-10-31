@@ -419,7 +419,9 @@ def main() -> None:
             # Blocking cross-process lock — see the CV branch above.
             energy_uJ, energy_valid = 0.0, True  # batch mode: set by _close_batch
             inference_time_s = None
+            window_start = window_end = None  # meter window (core/energy_overlap.py)
             if fixed_energy is not None:
+                window_start = time.monotonic()
                 t0 = time.time()
                 try:
                     raw_pred = predict_fn(scaled_inputs)
@@ -427,8 +429,10 @@ def main() -> None:
                     logger.warning("Prediction failed at step %d: %s", step, exc)
                     raw_pred = 0.0
                 inference_time_s = time.time() - t0
+                window_end = time.monotonic()
                 energy_uJ, energy_valid = float(fixed_energy[current_model]), True
             elif per_prediction:
+                window_start = time.monotonic()
                 pkg0.begin()
                 t0 = time.time()
                 try:
@@ -441,6 +445,7 @@ def main() -> None:
                     raw_pred = 0.0
                 inference_time_s = time.time() - t0
                 reading = pkg0.end()
+                window_end = time.monotonic()
                 energy_uJ, energy_valid = (reading or 0.0), reading is not None
             elif batch_mode:
                 try:
@@ -468,6 +473,8 @@ def main() -> None:
                 "active_model": current_model,
                 "energy_uJ": round(energy_uJ, 4), "energy_valid": energy_valid,
                 "inference_time_s": None if inference_time_s is None else round(inference_time_s, 7),
+                "start_monotonic": None if window_start is None else f"{window_start:.6f}",
+                "end_monotonic": None if window_end is None else f"{window_end:.6f}",
             })
             # Regression has no per-step log line in single-threaded either
             # (relies on the periodic "MAPE[...]" cycle line instead — see

@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+import time
 from pathlib import Path
 
 from core.energy import Pkg0Meter
@@ -197,6 +198,7 @@ def execute_decision(
                 # around retrain.py), without the MAPE energy lock so monitoring
                 # is not blocked; added to the reported total (2026-10-13).
                 meter = Pkg0Meter()
+                window_start = time.monotonic()
                 meter.begin()
                 try:
                     ok_, archived_ = retrain.do_regression_retrain(
@@ -206,7 +208,9 @@ def execute_decision(
                 except Exception:
                     logger.exception("background retrain of %s failed", model)
                     ok_, archived_ = False, None
-                _bg_results.put((model, ok_, archived_, reason, meter.end(), adapted_window))
+                reading = meter.end()
+                kio.append_meter_window(knowledge_dir, "retrain", window_start, time.monotonic(), reading)
+                _bg_results.put((model, ok_, archived_, reason, reading, adapted_window))
 
             _bg_thread = threading.Thread(target=_job, daemon=True, name=f"retrain-{current_model}")
             _bg_thread.start()

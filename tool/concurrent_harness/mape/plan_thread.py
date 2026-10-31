@@ -75,6 +75,10 @@ def _drift_for_batch(kp: dict, current_step: int, current_model: str,
     return state["drift_result"]
 
 
+def _metered(planner_name: str, background_retrain: bool) -> bool:
+    return not (planner_name == "naive" or (planner_name == "naive_prt" and background_retrain))
+
+
 def _busy_guard(drift_result: dict, busy: bool, mape_store) -> dict:
     """No drift reaches the planner while a background retrain runs (2026-10-31,
     H2): the original's drift thread is blocked during os.system(retrain), and
@@ -102,9 +106,14 @@ def run(
     energy_backend: str,
     rows_rfd: int | None = None,
     processed_wfd: int | None = None,
+    use_t2: bool = True,
 ) -> None:
     kp = kio.knowledge_paths(knowledge_dir)
     planner = get_planner(planner_name)
+    # Single-model baselines (2026-10-31, D4): t1 is harness logging and the
+    # barrier only. naive_prt's retrains are metered by the background thread;
+    # without background retrains they run in the cycle and need its meter.
+    metered = _metered(planner_name, bool(local_dataset_config.get("background_retrain", False)))
     waiter = kio.PipeWaiter(rows_rfd, kp["shutdown"], tick_s=_POLL_TICK_S)
     processed_wfds = [processed_wfd] if processed_wfd is not None else []
     all_models = list(dataset_config.get("models", {}).keys())
@@ -166,8 +175,11 @@ def run(
 
                 execute.apply_background_results(mape_store, current_step, knowledge_dir)
                 last_adaptation = mape_store.load().get("last_adaptation", {})
-                drift_result = _drift_for_batch(kp, current_step, current_model, last_adaptation)
-                drift_result = _busy_guard(drift_result, execute.background_busy(), mape_store)
+                if use_t2:
+                    drift_result = _drift_for_batch(kp, current_step, current_model, last_adaptation)
+                    drift_result = _busy_guard(drift_result, execute.background_busy(), mape_store)
+                else:
+                    drift_result = dict(_NO_DRIFT)
 
                 mape_cycle.run_cycle(
                     planner=planner,
@@ -190,6 +202,7 @@ def run(
                     image_path_history=(image_path_history if is_cv else None),
                     luminance_history=(luminance_history if is_cv else None),
                     energy_backend=energy_backend,
+                    metered=metered,
                 )
             except Exception:
                 # A failed cycle must not kill the thread (torn rows can no

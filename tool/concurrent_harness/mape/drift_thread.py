@@ -15,9 +15,9 @@ _plan() call. Consequences:
   - "cycles" counts t1 planning cycles only (one per batch), comparable with
     single-threaded's mape_cycles; t2's work is counted in drift_checks.
 
-t2 now runs for EVERY planner (previously only drift-aware ones; the others
-had t1 compute drift itself), so drift semantics are identical across
-planners.
+t2 runs only for planners that react to drift (Planner.reacts_to_drift;
+2026-10-31, D4), as in the original, whose switch and single-model approaches
+start no drift thread.
 
 Drift semantics come from mape/drift_ref.py (audit E1/E2): overflow bins, a
 per-model reference re-based after each replace/retrain to the window saved at
@@ -33,6 +33,7 @@ part of its MAPE cycle too).
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 
 import numpy as np
@@ -141,6 +142,7 @@ def run(
                 with kio.ENERGY_LOCK:
                     with kio.energy_lock(knowledge_dir, blocking=True):
                         em = EnergyMeter("drift_check", backend=energy_backend)
+                        window_start = time.monotonic()
                         em.__enter__()
                         try:
                             current_dist = None
@@ -158,6 +160,7 @@ def run(
                             )
                         finally:
                             em.__exit__(None, None, None)
+                        kio.append_meter_window(knowledge_dir, "drift", window_start, time.monotonic(), em.total_uJ)
                         if em.total_uJ is None:
                             pending["invalid"] += 1
                         else:

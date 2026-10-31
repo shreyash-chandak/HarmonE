@@ -67,7 +67,7 @@ MODELS_SUBDIR = "models"                            # per-run copies of live wei
 
 PREDICTION_FIELDS_REGRESSION = [
     "step", "y_true", "y_pred", "active_model", "energy_uJ", "energy_valid",
-    "inference_time_s",
+    "inference_time_s", "start_monotonic", "end_monotonic",
 ]
 PREDICTION_FIELDS_CV = [
     "step", "proxy_acc", "active_model", "planner", "energy_uJ", "energy_valid",
@@ -305,6 +305,22 @@ def write_current_model(model_file: Path, name: str) -> None:
 
 
 # ── predictions.csv / image_history.csv ────────────────────────────────────────
+
+METER_WINDOWS_FILE = "meter_windows.csv"
+METER_WINDOW_FIELDS = ["kind", "start_monotonic", "end_monotonic", "energy_uJ"]
+_METER_WINDOWS_LOCK = threading.Lock()
+
+
+def append_meter_window(knowledge_dir: Path, kind: str, start: float, end: float, energy_uJ: float | None) -> None:
+    """One non-prediction meter's window (time.monotonic, shared across processes
+    on Linux) and reading, for core/energy_overlap.py (2026-10-31). kind: mape,
+    drift or retrain. Written by t1, t2 and the background retrain thread."""
+    with _METER_WINDOWS_LOCK:
+        append_row(Path(knowledge_dir) / METER_WINDOWS_FILE,
+                   {"kind": kind, "start_monotonic": f"{start:.6f}", "end_monotonic": f"{end:.6f}",
+                    "energy_uJ": "" if energy_uJ is None else energy_uJ},
+                   METER_WINDOW_FIELDS)
+
 
 def append_row(csv_path: Path, row: dict, fieldnames: list[str]) -> None:
     is_new = not csv_path.exists()

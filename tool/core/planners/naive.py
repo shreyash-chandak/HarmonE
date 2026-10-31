@@ -14,6 +14,7 @@ class NaivePlanner(Planner):
     """S1: Never adapt. Keeps the model fixed for the entire stream."""
 
     name = "naive"
+    reacts_to_drift = False  # the original's single-model approaches run no drift thread
 
     def plan(self, ctx: PlanningContext) -> PlanDecision:
         return PlanDecision(action="noop", reason="S1 naive: no adaptation")

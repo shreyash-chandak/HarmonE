@@ -5,8 +5,8 @@ Reads runs_seed*/<dataset>_<planner>[_<model>]_conc/run_manifest.json (+
 predictions.csv for model shares, and for window R² on runs made before the
 manifest carried it) and prints, per dataset, mean ± sd over seeds of:
 stream R², window R² (mean per-batch R², the planners' accuracy signal),
-energy (all metered energy per prediction: inference + MAPE-K + retrains,
-and the per-prediction readings alone), inference time,
+energy (all metered energy per prediction: inference + MAPE-K + retrains, net
+of overlaps, and the per-prediction readings alone), inference time,
 switches, retrains, VMR restores, skipped adaptations and model shares. Then
 the trade-off against the ridge-LSTM line, retraining gains, SVR model sizes
 (initial vs after retraining), per-seed greedy energy on UCI and S5's LSTM

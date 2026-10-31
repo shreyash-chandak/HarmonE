@@ -68,8 +68,8 @@ def evaluate(run_dirs: list[Path], merge_gap: int) -> list[dict]:
         for ev_path in sorted(run_dir.glob("*_conc/mape_events.csv")):
             man = json.loads((ev_path.parent / "run_manifest.json").read_text())
             ds = man["dataset"]
-            if ds not in CLEAN:
-                continue
+            if ds not in CLEAN or not man.get("drift_checks"):
+                continue  # planners that ignore drift run no detector (2026-10-31)
             if ds not in seg_cache:
                 seg_cache[ds] = injected_segments(ds, merge_gap)
             segs, n_rows = seg_cache[ds]
@@ -110,7 +110,7 @@ def main() -> None:
     p.add_argument("--csv", default=None, help="Optional per-run CSV output path.")
     args = p.parse_args()
     rows = evaluate([Path(r) for r in args.runs], args.merge_gap)
-    if args.csv:
+    if args.csv and rows:
         with open(args.csv, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=list(rows[0]))
             w.writeheader()

@@ -23,6 +23,7 @@ class NaivePRTPlanner(Planner):
     """Naive (no switching) + periodic retraining every prt_interval steps."""
 
     name = "naive_prt"
+    reacts_to_drift = False  # single+retrain runs only the periodic retrain thread
 
     def plan(self, ctx: PlanningContext) -> PlanDecision:
         prt_interval = int(ctx.thresholds.get("prt_interval", PRT_INTERVAL))
