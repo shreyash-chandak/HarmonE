@@ -272,3 +272,66 @@ class TestInvalidEnergy:
         t = _monitor_batch([1., 2., 3.], [1., 2., 3.], [], "lstm", info, {"E_m": 0, "E_M": 100, "gamma": 0.8})
         assert t["normalized_energy"] == pytest.approx(0.9)
         assert info["ema_energy"]["lstm"] == pytest.approx(0.9)
+
+
+# ── step 3: drift reference ───────────────────────────────────────────────────
+
+@pytest.fixture()
+def ref_file(tmp_path):
+    import numpy as np
+    train = np.random.default_rng(2).normal(100, 10, 5000)
+    hist, edges = np.histogram(train, bins=50)
+    p = tmp_path / "reference_distribution.json"
+    p.write_text(json.dumps({"histogram": hist.tolist(), "bin_edges": edges.tolist()}))
+    return str(p)
+
+
+class TestM1SavedWindow:
+    def test_return_to_model_uses_window_saved_at_adaptation(self, ref_file):
+        import numpy as np
+        dr = _harness_modules()["drift_ref"]
+        rng = np.random.default_rng(5)
+        adapted, later = rng.normal(160, 10, 1200), rng.normal(40, 10, 1200)
+        ref = dr.PerModelDriftReference(ref_file, tau_drift=0.5, window_size=1200, cooldown_rows=600)
+        ref.note_adaptation("ridge", 3000, adapted, 3000)   # saved window, not the current one
+        # Many rows later: the reference is still what the model was adapted to.
+        assert not ref.detect("ridge", rng.normal(160, 10, 1200), 9000)["drift_detected"]
+        assert ref.detect("ridge", later, 9000)["drift_detected"]
+
+    def test_window_round_trip_and_background_result(self, tmp_path):
+        mods = _harness_modules()
+        kio, ex = mods["knowledge_io"], mods["execute"]
+        assert kio.read_drift_ref_window(tmp_path, "ridge") is None
+
+        class S:
+            d = {"event_counters": {"retrains": 0, "retrain_skipped": 0}}
+            def update(self, fn):
+                fn(self.d)
+        ex._bg_results.put(("ridge", True, None, "r", None, [1.0, 2.0]))
+        ex.apply_background_results(S(), 3000, tmp_path)
+        assert kio.read_drift_ref_window(tmp_path, "ridge") == [1.0, 2.0]
+        assert S.d["last_adaptation"]["ridge"] == 3000
+
+
+class TestM2GlobalCooldown:
+    def test_adapting_one_model_suppresses_all(self, ref_file):
+        import numpy as np
+        dr = _harness_modules()["drift_ref"]
+        rng = np.random.default_rng(6)
+        ref = dr.PerModelDriftReference(ref_file, tau_drift=0.5, window_size=1200, cooldown_rows=2600)
+        w = rng.normal(160, 10, 1200)
+        assert ref.detect("svr", w, 3000)["drift_detected"]
+        ref.note_adaptation("ridge", 3000, w, 3000)
+        r = ref.detect("svr", w, 5000)
+        assert r["cooldown"] and not r["drift_detected"]
+        assert ref.detect("svr", w, 5600)["drift_detected"]
+
+    def test_t1_ignores_result_older_than_any_adaptation(self, tmp_path):
+        mods = _harness_modules()
+        kio, pt = mods["knowledge_io"], mods["plan_thread"]
+        kp = kio.knowledge_paths(tmp_path)
+        kio.write_drift_state(kp["drift_state"], {
+            "step": 520, "model": "svr", "adaptation_seen": -1,
+            "drift_result": {"drift_detected": True, "action": "retrain", "version": None, "kl_div": 2.0}})
+        assert not pt._drift_for_batch(kp, 520, "svr", {"ridge": 520})["drift_detected"]
+        assert pt._drift_for_batch(kp, 520, "svr", {})["drift_detected"]

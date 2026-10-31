@@ -47,13 +47,16 @@ def background_busy() -> bool:
     return _bg_thread is not None and _bg_thread.is_alive()
 
 
-def apply_background_results(mape_store: kio.MapeInfoStore, current_step: int) -> None:
+def apply_background_results(mape_store: kio.MapeInfoStore, current_step: int,
+                             knowledge_dir: Path | None = None) -> None:
     """Apply finished background retrains (call from the plan thread only)."""
     while True:
         try:
-            model, ok, archived, reason, energy_uJ = _bg_results.get_nowait()
+            model, ok, archived, reason, energy_uJ, *rest = _bg_results.get_nowait()
         except queue.Empty:
             return
+        if ok and rest and knowledge_dir is not None:
+            kio.write_drift_ref_window(knowledge_dir, model, rest[0])  # before last_adaptation (M1)
         key = "retrains" if ok else "retrain_skipped"
         mape_store.update(lambda d: d["event_counters"].__setitem__(
             key, d["event_counters"][key] + 1))
@@ -69,13 +72,14 @@ def apply_background_results(mape_store: kio.MapeInfoStore, current_step: int) -
                     "ok" if ok else "skipped", current_step, model, reason)
 
 
-def finish_background(mape_store: kio.MapeInfoStore, current_step: int, timeout_s: float = 600.0) -> None:
+def finish_background(mape_store: kio.MapeInfoStore, current_step: int,
+                      knowledge_dir: Path | None = None, timeout_s: float = 600.0) -> None:
     """Wait for an in-flight background retrain and apply its result (shutdown)."""
     if _bg_thread is not None:
         _bg_thread.join(timeout_s)
         if _bg_thread.is_alive():
             logger.warning("background retrain still running after %.0f s at shutdown — not counted.", timeout_s)
-    apply_background_results(mape_store, current_step)
+    apply_background_results(mape_store, current_step, knowledge_dir)
 
 
 def execute_decision(
@@ -99,10 +103,10 @@ def execute_decision(
     """Apply decision; update mape_info counters; return the (possibly new)
     active model name.
 
-    A successful replace/retrain also records
+    A successful replace/retrain also saves the window it adapted to and records
     mape_info["last_adaptation"][current_model] = current_step, which t2
     (drift_thread.py) uses to re-base that model's drift reference and start
-    its cooldown (audit E1 — see mape/drift_ref.py)."""
+    the cooldown (audit E1 — see mape/drift_ref.py)."""
     global _bg_thread
     kp = kio.knowledge_paths(knowledge_dir)
     new_model = current_model
@@ -116,6 +120,11 @@ def execute_decision(
     if decision.action == "retrain" and (drift_result or {}).get("single_version"):
         mape_store.update(lambda d: d["event_counters"].__setitem__(
             "vmr_single_version_retrain", d["event_counters"].get("vmr_single_version_retrain", 0) + 1))
+
+    # The window this decision adapts to (2026-10-31, M1): for a retrain, what it
+    # trains on; for a restore, what the version was matched against.
+    drift_window = int(local_dataset_config.get("drift_window_size", 1200))
+    adapted_window = list((luminance_history if is_cv else value_history) or [])[-drift_window:]
 
     def _record_adaptation(d: dict, version_path: str | None = None) -> None:
         d.setdefault("last_adaptation", {})[current_model] = current_step
@@ -140,6 +149,7 @@ def execute_decision(
         # baseline, as a restore would.
         mape_store.update(lambda d: d["event_counters"].__setitem__(
             "vmr_noop", d["event_counters"].get("vmr_noop", 0) + 1))
+        kio.write_drift_ref_window(knowledge_dir, current_model, adapted_window)
         mape_store.update(_record_adaptation)
         logger.info("replace skipped (already serving): %s <- %s", current_model, decision.version_path)
 
@@ -162,6 +172,7 @@ def execute_decision(
             kio.write_reload_flag(knowledge_dir, current_model)
             mape_store.update(lambda d: d["event_counters"].__setitem__(
                 "vmr_events", d["event_counters"]["vmr_events"] + 1))
+            kio.write_drift_ref_window(knowledge_dir, current_model, adapted_window)
             mape_store.update(lambda d: _record_adaptation(d, decision.version_path))
             logger.info("replace: %s <- %s", current_model, decision.version_path)
         else:
@@ -195,7 +206,7 @@ def execute_decision(
                 except Exception:
                     logger.exception("background retrain of %s failed", model)
                     ok_, archived_ = False, None
-                _bg_results.put((model, ok_, archived_, reason, meter.end()))
+                _bg_results.put((model, ok_, archived_, reason, meter.end(), adapted_window))
 
             _bg_thread = threading.Thread(target=_job, daemon=True, name=f"retrain-{current_model}")
             _bg_thread.start()
@@ -215,6 +226,7 @@ def execute_decision(
         mape_store.update(lambda d: d["event_counters"].__setitem__(
             key, d["event_counters"][key] + 1))
         if ok:
+            kio.write_drift_ref_window(knowledge_dir, current_model, adapted_window)
             mape_store.update(lambda d: _record_adaptation(d, archived))
         logger.info("retrain %s: %s (%s)", "ok" if ok else "skipped", current_model, decision.reason)
 

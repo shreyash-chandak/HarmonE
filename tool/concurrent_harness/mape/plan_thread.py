@@ -18,8 +18,8 @@ single-threaded's `step % monitor_interval == 0`):
      D1: previously 267/466 batches mixed models and the own-row filter
      scored as few as 1-10 rows).
   2. Wait (briefly) for t2's drift result for this same batch and use it only
-     if it is for the commanded model and t2 had already accounted for that
-     model's latest adaptation.
+     if it is for the commanded model and t2 had already accounted for the
+     latest adaptation of any model (the cooldown is global).
   3. Run the cycle (mape_cycle.run_cycle).
   4. Publish the processed-row count (kio.PROCESSED_FILE) — this advances
      the inference/manager barrier (see inference.py). Always written, even
@@ -68,8 +68,9 @@ def _drift_for_batch(kp: dict, current_step: int, current_model: str,
         return dict(_NO_DRIFT)
     if state.get("model") != current_model:
         return dict(_NO_DRIFT, kl_div=state["drift_result"].get("kl_div"))
-    if state.get("adaptation_seen", -1) < int(last_adaptation.get(current_model, -1)):
-        # t2 computed this before re-basing for the model's latest adaptation.
+    if state.get("adaptation_seen", -1) < max((int(v) for v in last_adaptation.values()), default=-1):
+        # t2 computed this before accounting for the latest adaptation of any
+        # model (re-base + global cooldown).
         return dict(_NO_DRIFT, kl_div=state["drift_result"].get("kl_div"))
     return state["drift_result"]
 
@@ -163,7 +164,7 @@ def run(
                     value_history.extend(float(r["y_true"]) for r in batch)
                     value_history = value_history[-history_keep:]
 
-                execute.apply_background_results(mape_store, current_step)
+                execute.apply_background_results(mape_store, current_step, knowledge_dir)
                 last_adaptation = mape_store.load().get("last_adaptation", {})
                 drift_result = _drift_for_batch(kp, current_step, current_model, last_adaptation)
                 drift_result = _busy_guard(drift_result, execute.background_busy(), mape_store)
@@ -201,5 +202,5 @@ def run(
                 kio.write_processed(kp["processed"], current_step)
                 kio.notify_fds(processed_wfds)
 
-    execute.finish_background(mape_store, pred_buf.committed_count)
+    execute.finish_background(mape_store, pred_buf.committed_count, knowledge_dir)
     logger.info("plan_thread: shutdown")

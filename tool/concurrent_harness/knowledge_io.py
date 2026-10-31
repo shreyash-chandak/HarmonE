@@ -256,6 +256,24 @@ def read_drift_state(path: Path) -> dict | None:
         return None
 
 
+def _drift_ref_path(knowledge_dir: Path, model: str) -> Path:
+    return Path(knowledge_dir) / f"drift_ref_{model}.json"
+
+
+def write_drift_ref_window(knowledge_dir: Path, model: str, window: list[float]) -> None:
+    """The window `model` was adapted to, captured at the decision (2026-10-31,
+    M1); t2 re-bases the model's drift reference to it."""
+    _atomic_write_text(_drift_ref_path(knowledge_dir, model), json.dumps([float(v) for v in window]))
+
+
+def read_drift_ref_window(knowledge_dir: Path, model: str) -> list[float] | None:
+    try:
+        with open(_drift_ref_path(knowledge_dir, model)) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
 def append_dict_row(csv_path: Path, row: dict) -> None:
     """Append a row whose header is the first row's keys (schema fixed per
     run) — used for planner_decisions.csv, whose per-model columns depend on

@@ -20,8 +20,9 @@ had t1 compute drift itself), so drift semantics are identical across
 planners.
 
 Drift semantics come from mape/drift_ref.py (audit E1/E2): overflow bins, a
-per-model reference re-based after each replace/retrain, and a row-count
-cooldown after adaptation (the original's `time.sleep(400)` after acting).
+per-model reference re-based after each replace/retrain to the window saved at
+the decision, and a global row-count cooldown after adaptation (the original's
+`time.sleep(400)` after acting).
 
 Triggering is row-count-based (every monitor_interval rows), matching t1.
 Its detection work is metered under the same locks as a MAPE cycle and
@@ -122,12 +123,20 @@ def run(
 
                 current_model = kio.read_current_model(kp["model_file"], default=available_models[0])
                 last_adapt = mape_store.load().get("last_adaptation", {})
-                if current_model in last_adapt:
-                    if ref.note_adaptation(current_model, int(last_adapt[current_model]), window, current_step):
-                        logger.info(
-                            "drift_thread: re-based drift reference for %s after adaptation at step %s "
-                            "(cooldown %d rows)", current_model, last_adapt[current_model], cooldown_rows,
-                        )
+                # Every model, commanded or not (2026-10-31, M1), to the window
+                # it was adapted to; the cooldown is global (M2).
+                for model_, step_ in last_adapt.items():
+                    if ref.has_seen(model_, int(step_)):
+                        continue
+                    saved = kio.read_drift_ref_window(knowledge_dir, model_)
+                    if saved is None:
+                        logger.warning("drift_thread: no saved window for %s's adaptation at step %s — "
+                                       "keeping its reference", model_, step_)
+                    ref.note_adaptation(model_, int(step_), saved or [], current_step)
+                    logger.info(
+                        "drift_thread: re-based drift reference for %s after adaptation at step %s "
+                        "(cooldown %d rows)", model_, step_, cooldown_rows,
+                    )
 
                 with kio.ENERGY_LOCK:
                     with kio.energy_lock(knowledge_dir, blocking=True):
@@ -157,11 +166,11 @@ def run(
                 kio.write_drift_state(kp["drift_state"], {
                     "step": current_step,
                     "model": current_model,
-                    # Latest adaptation of this model t2 had already accounted
+                    # Latest adaptation of ANY model t2 had already accounted
                     # for (re-based + cooldown) when producing this result —
                     # t1 ignores a result computed before it knew about the
-                    # model's latest adaptation (see plan_thread.py).
-                    "adaptation_seen": ref._seen_adaptation.get(current_model, -1),
+                    # latest adaptation (see plan_thread.py).
+                    "adaptation_seen": ref.latest_adaptation_seen(),
                     "drift_result": drift_result,
                 })
                 with kio.DRIFT_COND:

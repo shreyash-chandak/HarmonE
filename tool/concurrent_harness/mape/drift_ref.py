@@ -19,13 +19,16 @@ Three fixes to the fixed-training-reference KL detector
    so once the stream moved, drift fired on every cycle forever (~850-970
    VMR replaces per run). Here each model starts with the training reference;
    after that model is replaced or retrained, its reference becomes the window
-   it was adapted to. Drift then means "different from what the current model
-   is fitted to", which keeps B3's ability to catch gradual drift.
+   it was adapted to, saved when the adaptation was decided (2026-10-31, M1:
+   it used to be whatever window t2 held when the model was next commanded).
+   Drift then means "different from what the current model is fitted to",
+   which keeps B3's ability to catch gradual drift.
 
-3. Cooldown (E1). The original's execute_drift() ends with time.sleep(400):
-   no drift checks for a while after acting. Here, after an adaptation of a
-   model, drift is suppressed for that model for `cooldown_rows` stream rows
-   (row-count, not wall-clock, to match the harness's row-based triggering).
+3. Cooldown (E1). The original's execute_drift() ends with time.sleep(400),
+   which stops its whole drift thread after acting. Here any adaptation
+   suppresses drift on every model for `cooldown_rows` stream rows (row-count,
+   not wall-clock, to match the harness's row-based triggering; global since
+   2026-10-31, M2, it used to be per model).
 
 This module has no fcntl dependency so it can be unit-tested on any OS.
 """
@@ -60,7 +63,7 @@ class PerModelDriftReference:
         self.window_size = int(window_size)
         self.cooldown_rows = int(cooldown_rows)
         self._ref: dict[str, np.ndarray] = {}
-        self._cooldown_until: dict[str, int] = {}
+        self._cooldown_until: int = -1
         self._seen_adaptation: dict[str, int] = {}
 
     def histogram(self, window) -> np.ndarray:
@@ -79,11 +82,18 @@ class PerModelDriftReference:
         self._seen_adaptation[model] = adaptation_step
         if len(window) >= self.window_size:
             self._ref[model] = self.histogram(window[-self.window_size:])
-        self._cooldown_until[model] = adaptation_step + self.cooldown_rows
+        self._cooldown_until = max(self._cooldown_until, adaptation_step + self.cooldown_rows)
         return True
 
+    def has_seen(self, model: str, adaptation_step: int) -> bool:
+        return adaptation_step <= self._seen_adaptation.get(model, -1)
+
+    def latest_adaptation_seen(self) -> int:
+        """Newest adaptation of any model accounted for (the cooldown is global)."""
+        return max(self._seen_adaptation.values(), default=-1)
+
     def in_cooldown(self, model: str, current_step: int) -> bool:
-        return current_step < self._cooldown_until.get(model, -1)
+        return current_step < self._cooldown_until
 
     def detect(self, model: str, window, current_step: int) -> dict[str, Any]:
         """Same return contract as KLFixedRefDetector.detect(), plus
